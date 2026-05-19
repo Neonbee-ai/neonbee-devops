@@ -1,0 +1,529 @@
+# =============================================================================
+# Neonbee — Universal Rollback Workflow
+# =============================================================================
+# Place this file in:  neonbee-devops/.github/workflows/neonbee-rollback.yml
+#
+# What it does:
+#   - Reverts ANY single service to its previous deploy in ~30 seconds
+#   - Works for all 3 deployment types: NestJS backends, Vite MFEs, Next.js apps
+#   - Pushes updated slot metric to Grafana via Pushgateway after rollback
+#   - Full audit trail: who ran it, when, which service, which env
+#
+# How rollback works per type:
+#   Backend  : rsync {service}-prev/ → {service}/ + pm2 reload
+#   Vite MFE : rsync {nginx-root}-prev/ → {nginx-root}/ + nginx -s reload
+#   Next.js  : rsync {service}-prev/ → {service}/ + pm2 reload
+#
+# Prerequisite: at least one deploy using the Blue/Green deploy workflow must
+# have run first (that deploy creates the -prev/ backup).
+# =============================================================================
+
+name: Rollback Service
+
+on:
+  workflow_dispatch:
+    inputs:
+      service:
+        description: 'Service to rollback'
+        required: true
+        type: choice
+        options:
+          # ── Backends ──────────────────────────────────────────────────────
+          - so360-core
+          - so360-crm-be
+          - so360-inventory-be
+          - so360-accounting-be
+          - so360-projects-be
+          - so360-timesheet-be
+          - so360-dailystore-admin-be
+          - so360-people-connect-be
+          - so360-neura-be
+          - so360-inbox-be
+          - so360-flow-be
+          - so360-insight-be
+          - so360-subscription-be
+          - so360-storefront-api
+          - so360-forms-be
+          - so360-fulfillment-be
+          - so360-support-be
+          - so360-chat-be
+          - so360-command-be
+          - so360-documents-be
+          - so360-manufacturing-be
+          # ── Vite MFE Frontends ────────────────────────────────────────────
+          - so360-shell-fe
+          - so360-sso-fe
+          - so360-crm-fe
+          - so360-inventory-fe
+          - so360-accounting-fe
+          - so360-projects-fe
+          - so360-timesheet-fe
+          - so360-dailystore-admin-fe
+          - so360-people-connect-fe
+          - so360-neura-fe
+          - so360-inbox-fe
+          - so360-flow-fe
+          - so360-insight-fe
+          - so360-forms-fe
+          - so360-fulfillment-fe
+          - so360-support-fe
+          - so360-chat-fe
+          - so360-manufacturing-fe
+          # ── Next.js Apps ─────────────────────────────────────────────────
+          - so360-storefront-web-fe
+          - so360-command
+          - so360-mobility-pwa
+
+      environment:
+        description: 'Environment to rollback'
+        required: true
+        type: choice
+        options:
+          - dev
+          - staging
+          - prod
+
+      confirm:
+        description: 'Type ROLLBACK to confirm (prevents accidental triggers)'
+        required: true
+        type: string
+
+jobs:
+  rollback:
+    runs-on: self-hosted
+    # Guard: require explicit confirmation word
+    if: ${{ github.event.inputs.confirm == 'ROLLBACK' }}
+
+    steps:
+      - name: Guard — confirm word check
+        run: |
+          if [ "${{ github.event.inputs.confirm }}" != "ROLLBACK" ]; then
+            echo "Confirmation word incorrect. Type ROLLBACK exactly."
+            exit 1
+          fi
+          echo "Confirmation accepted. Rolling back ${{ github.event.inputs.service }} on ${{ github.event.inputs.environment }}..."
+
+      - name: Setup SSH
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: |
+            ${{ secrets.CONTABO_SSH_KEY }}
+            ${{ secrets.DIGITALOCEAN_SSH_KEY }}
+
+      # ── Service Registry ──────────────────────────────────────────────────
+      # Maps every service name → type + VM + paths + PM2/NGINX config
+      # Add new services here as the platform grows.
+      # ─────────────────────────────────────────────────────────────────────
+      - name: Resolve service config
+        id: config
+        env:
+          SERVICE: ${{ github.event.inputs.service }}
+          ENV: ${{ github.event.inputs.environment }}
+        run: |
+          BASE="/github/SO360 V.2"
+
+          case "$SERVICE" in
+            # ── NestJS Backends ─────────────────────────────────────────────
+            so360-core)
+              TYPE="backend"; DIR="$BASE/so360-core"
+              PM2_DEV="core-dev";            PORT_DEV=6000
+              PM2_STAGING="core-staging";    PORT_STAGING=7000
+              HEALTH="/health" ;;
+            so360-crm-be)
+              TYPE="backend"; DIR="$BASE/so360-crm/so360-crm-be"
+              PM2_DEV="crm-dev";             PORT_DEV=6001
+              PM2_STAGING="crm-staging";     PORT_STAGING=7001
+              HEALTH="/api" ;;
+            so360-inventory-be)
+              TYPE="backend"; DIR="$BASE/so360-inventory/so360-inventory-be"
+              PM2_DEV="inventory-dev";       PORT_DEV=6006
+              PM2_STAGING="inventory-staging"; PORT_STAGING=7006
+              HEALTH="/api" ;;
+            so360-accounting-be)
+              TYPE="backend"; DIR="$BASE/so360-accounting/so360-accounting-be"
+              PM2_DEV="accounting-dev";      PORT_DEV=6008
+              PM2_STAGING="accounting-staging"; PORT_STAGING=7008
+              HEALTH="/api" ;;
+            so360-projects-be)
+              TYPE="backend"; DIR="$BASE/so360-projects/so360-projects-be"
+              PM2_DEV="projects-dev";        PORT_DEV=6010
+              PM2_STAGING="projects-staging"; PORT_STAGING=7010
+              HEALTH="/api" ;;
+            so360-timesheet-be)
+              TYPE="backend"; DIR="$BASE/so360-timesheet/so360-timesheet-be"
+              PM2_DEV="timesheet-dev";       PORT_DEV=6012
+              PM2_STAGING="timesheet-staging"; PORT_STAGING=7012
+              HEALTH="/api" ;;
+            so360-dailystore-admin-be)
+              TYPE="backend"; DIR="$BASE/so360-dailystore-admin/so360-dailystore-admin-be"
+              PM2_DEV="dailystore-admin-dev"; PORT_DEV=6014
+              PM2_STAGING="dailystore-admin-staging"; PORT_STAGING=7014
+              HEALTH="/api" ;;
+            so360-people-connect-be)
+              TYPE="backend"; DIR="$BASE/so360-people-connect/so360-people-connect-be"
+              PM2_DEV="people-connect-dev";  PORT_DEV=6007
+              PM2_STAGING="people-connect-staging"; PORT_STAGING=7007
+              HEALTH="/api" ;;
+            so360-neura-be)
+              TYPE="backend"; DIR="$BASE/so360-neura/so360-neura-be"
+              PM2_DEV="neura-dev";           PORT_DEV=6017
+              PM2_STAGING="neura-staging";   PORT_STAGING=7017
+              HEALTH="/api" ;;
+            so360-inbox-be)
+              TYPE="backend"; DIR="$BASE/so360-inbox/so360-inbox-be"
+              PM2_DEV="inbox-dev";           PORT_DEV=6018
+              PM2_STAGING="inbox-staging";   PORT_STAGING=7018
+              HEALTH="/api" ;;
+            so360-flow-be)
+              TYPE="backend"; DIR="$BASE/so360-flow/so360-flow-be"
+              PM2_DEV="flow-dev";            PORT_DEV=6021
+              PM2_STAGING="flow-staging";    PORT_STAGING=7021
+              HEALTH="/api" ;;
+            so360-insight-be)
+              TYPE="backend"; DIR="$BASE/so360-insight/so360-insight-be"
+              PM2_DEV="insight-dev";         PORT_DEV=6023
+              PM2_STAGING="insight-staging"; PORT_STAGING=7023
+              HEALTH="/api" ;;
+            so360-subscription-be)
+              TYPE="backend"; DIR="$BASE/so360-subscription/so360-subscription-be"
+              PM2_DEV="subscription-dev";    PORT_DEV=6026
+              PM2_STAGING="subscription-staging"; PORT_STAGING=7026
+              HEALTH="/api" ;;
+            so360-storefront-api)
+              TYPE="backend"; DIR="$BASE/so360-storefront/so360-storefront-api"
+              PM2_DEV="storefront-api-dev";  PORT_DEV=6020
+              PM2_STAGING="storefront-api-staging"; PORT_STAGING=7020
+              HEALTH="/api" ;;
+            so360-forms-be)
+              TYPE="backend"; DIR="$BASE/so360-forms/so360-forms-be"
+              PM2_DEV="forms-dev";           PORT_DEV=6027
+              PM2_STAGING="forms-staging";   PORT_STAGING=7027
+              HEALTH="/api" ;;
+            so360-fulfillment-be)
+              TYPE="backend"; DIR="$BASE/so360-fulfillment/so360-fulfillment-be"
+              PM2_DEV="fulfillment-dev";     PORT_DEV=6032
+              PM2_STAGING="fulfillment-staging"; PORT_STAGING=7032
+              HEALTH="/api" ;;
+            so360-support-be)
+              TYPE="backend"; DIR="$BASE/so360-support/so360-support-be"
+              PM2_DEV="support-dev";         PORT_DEV=6033
+              PM2_STAGING="support-staging"; PORT_STAGING=7033
+              HEALTH="/api" ;;
+            so360-chat-be)
+              TYPE="backend"; DIR="$BASE/so360-chat/so360-chat-be"
+              PM2_DEV="chat-dev";            PORT_DEV=6036
+              PM2_STAGING="chat-staging";    PORT_STAGING=7036
+              HEALTH="/api" ;;
+            so360-command-be)
+              TYPE="backend"; DIR="$BASE/so360-command/so360-command-be"
+              PM2_DEV="command-be-dev";      PORT_DEV=6038
+              PM2_STAGING="command-be-staging"; PORT_STAGING=7038
+              HEALTH="/api" ;;
+            so360-documents-be)
+              TYPE="backend"; DIR="$BASE/so360-documents/so360-documents-be"
+              PM2_DEV="documents-dev";       PORT_DEV=6040
+              PM2_STAGING="documents-staging"; PORT_STAGING=7040
+              HEALTH="/api" ;;
+            so360-manufacturing-be)
+              TYPE="backend"; DIR="$BASE/so360-manufacturing/so360-manufacturing-be"
+              PM2_DEV="manufacturing-dev";   PORT_DEV=6034
+              PM2_STAGING="manufacturing-staging"; PORT_STAGING=7034
+              HEALTH="/api" ;;
+
+            # ── Vite MFE Frontends ──────────────────────────────────────────
+            so360-shell-fe)
+              TYPE="vite-mfe"
+              NGINX_DEV="/var/www/dev.shell.skyoffice360.com/html"
+              NGINX_STAGING="/var/www/staging.shell.skyoffice360.com/html" ;;
+            so360-sso-fe)
+              TYPE="vite-mfe"
+              NGINX_DEV="/var/www/dev.sso.skyoffice360.com/html"
+              NGINX_STAGING="/var/www/staging.sso.skyoffice360.com/html" ;;
+            so360-crm-fe)
+              TYPE="vite-mfe"
+              NGINX_DEV="/var/www/dev-cdn.skyoffice360.com/html/crm"
+              NGINX_STAGING="/var/www/staging.crm.skyoffice360.com/html" ;;
+            so360-inventory-fe)
+              TYPE="vite-mfe"
+              NGINX_DEV="/var/www/dev-cdn.skyoffice360.com/html/inventory"
+              NGINX_STAGING="/var/www/staging.inventory.skyoffice360.com/html" ;;
+            so360-accounting-fe)
+              TYPE="vite-mfe"
+              NGINX_DEV="/var/www/dev-cdn.skyoffice360.com/html/accounting"
+              NGINX_STAGING="/var/www/staging.accounting.skyoffice360.com/html" ;;
+            so360-projects-fe)
+              TYPE="vite-mfe"
+              NGINX_DEV="/var/www/dev-cdn.skyoffice360.com/html/projects"
+              NGINX_STAGING="/var/www/staging.projects.skyoffice360.com/html" ;;
+            so360-timesheet-fe)
+              TYPE="vite-mfe"
+              NGINX_DEV="/var/www/dev-cdn.skyoffice360.com/html/timesheet"
+              NGINX_STAGING="/var/www/staging.timesheet.skyoffice360.com/html" ;;
+            so360-dailystore-admin-fe)
+              TYPE="vite-mfe"
+              NGINX_DEV="/var/www/dev-cdn.skyoffice360.com/html/dailystore-admin"
+              NGINX_STAGING="/var/www/staging.dailystore-admin.skyoffice360.com/html" ;;
+            so360-people-connect-fe)
+              TYPE="vite-mfe"
+              NGINX_DEV="/var/www/dev-cdn.skyoffice360.com/html/people-connect"
+              NGINX_STAGING="/var/www/staging.people-connect.skyoffice360.com/html" ;;
+            so360-neura-fe)
+              TYPE="vite-mfe"
+              NGINX_DEV="/var/www/dev-cdn.skyoffice360.com/html/neura"
+              NGINX_STAGING="/var/www/staging.neura.skyoffice360.com/html" ;;
+            so360-inbox-fe)
+              TYPE="vite-mfe"
+              NGINX_DEV="/var/www/dev-cdn.skyoffice360.com/html/inbox"
+              NGINX_STAGING="/var/www/staging.inbox.skyoffice360.com/html" ;;
+            so360-flow-fe)
+              TYPE="vite-mfe"
+              NGINX_DEV="/var/www/dev-cdn.skyoffice360.com/html/flow"
+              NGINX_STAGING="/var/www/staging.flow.skyoffice360.com/html" ;;
+            so360-insight-fe)
+              TYPE="vite-mfe"
+              NGINX_DEV="/var/www/dev-cdn.skyoffice360.com/html/insight"
+              NGINX_STAGING="/var/www/staging.insight.skyoffice360.com/html" ;;
+            so360-forms-fe)
+              TYPE="vite-mfe"
+              NGINX_DEV="/var/www/dev-cdn.skyoffice360.com/html/forms"
+              NGINX_STAGING="/var/www/staging.forms.skyoffice360.com/html" ;;
+            so360-fulfillment-fe)
+              TYPE="vite-mfe"
+              NGINX_DEV="/var/www/dev-cdn.skyoffice360.com/html/fulfillment"
+              NGINX_STAGING="/var/www/staging.fulfillment.skyoffice360.com/html" ;;
+            so360-support-fe)
+              TYPE="vite-mfe"
+              NGINX_DEV="/var/www/dev-cdn.skyoffice360.com/html/support"
+              NGINX_STAGING="/var/www/staging.support.skyoffice360.com/html" ;;
+            so360-chat-fe)
+              TYPE="vite-mfe"
+              NGINX_DEV="/var/www/dev-cdn.skyoffice360.com/html/chat"
+              NGINX_STAGING="/var/www/staging.chat.skyoffice360.com/html" ;;
+            so360-manufacturing-fe)
+              TYPE="vite-mfe"
+              NGINX_DEV="/var/www/dev-cdn.skyoffice360.com/html/manufacturing"
+              NGINX_STAGING="/var/www/staging.manufacturing.skyoffice360.com/html" ;;
+
+            # ── Next.js Apps ────────────────────────────────────────────────
+            so360-storefront-web-fe)
+              TYPE="nextjs"; DIR="$BASE/so360-storefront/so360-storefront-web-fe"
+              PM2_DEV="storefront-web-dev";  PORT_DEV=6031
+              PM2_STAGING="storefront-web-staging"; PORT_STAGING=7031
+              HEALTH="/" ;;
+            so360-command)
+              TYPE="nextjs"; DIR="$BASE/so360-command"
+              PM2_DEV="command-dev";         PORT_DEV=6039
+              PM2_STAGING="command-staging"; PORT_STAGING=7039
+              HEALTH="/" ;;
+            so360-mobility-pwa)
+              TYPE="nextjs"; DIR="$BASE/so360-mobility/so360-mobility-pwa"
+              PM2_DEV="mobility-pwa-dev";    PORT_DEV=6035
+              PM2_STAGING="mobility-pwa-staging"; PORT_STAGING=7035
+              HEALTH="/" ;;
+
+            *)
+              echo "Unknown service: $SERVICE"
+              exit 1 ;;
+          esac
+
+          # Resolve env-specific values
+          case "$ENV" in
+            dev)
+              VM="${{ secrets.SERVER_IP }}"
+              PM2_NAME="$PM2_DEV"
+              PORT="$PORT_DEV"
+              NGINX_ROOT="$NGINX_DEV" ;;
+            staging)
+              VM="${{ secrets.SERVER_IP }}"
+              PM2_NAME="$PM2_STAGING"
+              PORT="$PORT_STAGING"
+              NGINX_ROOT="$NGINX_STAGING" ;;
+            prod)
+              # Prod VM depends on service type
+              if [ "$SERVICE" = "so360-storefront-web-fe" ] || [ "$SERVICE" = "so360-storefront-api" ]; then
+                VM="${{ secrets.STOREFRONT_PROD_IP }}"
+              else
+                VM="${{ secrets.PROD_SERVER_IP }}"
+              fi
+              PM2_NAME="${PM2_DEV//-dev/}"       # strip -dev suffix for prod
+              PORT_DEV_STRIPPED="${PORT_DEV/6/3}" # 6XXX → 3XXX for prod
+              PORT="$PORT_DEV_STRIPPED"
+              NGINX_ROOT="${NGINX_DEV//dev-cdn/}" # rough prod path
+              NGINX_ROOT="${NGINX_ROOT//dev./}" ;;
+          esac
+
+          # Export all resolved values as step outputs
+          echo "type=$TYPE"             >> $GITHUB_OUTPUT
+          echo "dir=$DIR"               >> $GITHUB_OUTPUT
+          echo "pm2_name=$PM2_NAME"     >> $GITHUB_OUTPUT
+          echo "port=$PORT"             >> $GITHUB_OUTPUT
+          echo "health=$HEALTH"         >> $GITHUB_OUTPUT
+          echo "nginx_root=$NGINX_ROOT" >> $GITHUB_OUTPUT
+          echo "vm=$VM"                 >> $GITHUB_OUTPUT
+
+          echo ""
+          echo "Service   : $SERVICE"
+          echo "Type      : $TYPE"
+          echo "Env       : $ENV"
+          echo "VM        : $VM"
+          echo "PM2/NGINX : ${PM2_NAME:-$NGINX_ROOT}"
+
+      # ── Rollback: NestJS Backend ─────────────────────────────────────────
+      - name: Rollback backend
+        if: steps.config.outputs.type == 'backend'
+        env:
+          VM: ${{ steps.config.outputs.vm }}
+          DIR: ${{ steps.config.outputs.dir }}
+          PM2_NAME: ${{ steps.config.outputs.pm2_name }}
+          PORT: ${{ steps.config.outputs.port }}
+          HEALTH: ${{ steps.config.outputs.health }}
+        run: |
+          ssh-keyscan -H $VM >> ~/.ssh/known_hosts 2>/dev/null
+
+          ssh root@$VM "bash -s" << ROLLBACK
+            set -e
+            PREV="${DIR}-prev"
+
+            if [ ! -d "\$PREV" ]; then
+              echo "No backup found at \$PREV — cannot rollback."
+              echo "This means no Blue/Green deploy has run yet for this service."
+              exit 1
+            fi
+
+            echo "Rolling back $PM2_NAME from \$PREV ..."
+            rsync -a --delete "\$PREV/" "${DIR}/"
+            echo "Restore complete."
+
+            # Reload PM2 with previous build
+            if pm2 describe "$PM2_NAME" > /dev/null 2>&1; then
+              pm2 reload "$PM2_NAME"
+            else
+              MAIN_JS=\$(find "${DIR}/dist" -name main.js | head -1)
+              pm2 start "\$MAIN_JS" --name "$PM2_NAME" --instances 2 --max-memory-restart 500M
+            fi
+            pm2 save
+
+            # Verify health
+            sleep 4
+            HTTP=\$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 http://localhost:${PORT}${HEALTH} || echo "000")
+            if [ "\$HTTP" = "200" ] || [ "\$HTTP" = "204" ]; then
+              echo "Health check passed (HTTP \$HTTP) — rollback successful."
+            else
+              echo "Health check returned HTTP \$HTTP — check PM2 logs."
+              pm2 logs "$PM2_NAME" --lines 20 --nostream
+              exit 1
+            fi
+          ROLLBACK
+
+      # ── Rollback: Vite MFE Frontend ──────────────────────────────────────
+      - name: Rollback vite-mfe
+        if: steps.config.outputs.type == 'vite-mfe'
+        env:
+          VM: ${{ steps.config.outputs.vm }}
+          NGINX_ROOT: ${{ steps.config.outputs.nginx_root }}
+        run: |
+          ssh-keyscan -H $VM >> ~/.ssh/known_hosts 2>/dev/null
+
+          ssh root@$VM "bash -s" << ROLLBACK
+            set -e
+            PREV="${NGINX_ROOT}-prev"
+
+            if [ ! -d "\$PREV" ]; then
+              echo "No backup found at \$PREV — cannot rollback."
+              exit 1
+            fi
+
+            echo "Rolling back NGINX root from \$PREV ..."
+            rsync -a --delete "\$PREV/" "${NGINX_ROOT}/"
+            echo "Restore complete."
+
+            nginx -s reload
+            echo "NGINX reloaded — rollback live."
+
+            # Verify remoteEntry.js is back
+            sleep 2
+            if [ -f "${NGINX_ROOT}/remoteEntry.js" ]; then
+              echo "remoteEntry.js confirmed present — rollback successful."
+            else
+              echo "Warning: remoteEntry.js not found. This may be normal for shell/sso."
+            fi
+          ROLLBACK
+
+      # ── Rollback: Next.js App ────────────────────────────────────────────
+      - name: Rollback nextjs
+        if: steps.config.outputs.type == 'nextjs'
+        env:
+          VM: ${{ steps.config.outputs.vm }}
+          DIR: ${{ steps.config.outputs.dir }}
+          PM2_NAME: ${{ steps.config.outputs.pm2_name }}
+          PORT: ${{ steps.config.outputs.port }}
+        run: |
+          ssh-keyscan -H $VM >> ~/.ssh/known_hosts 2>/dev/null
+
+          ssh root@$VM "bash -s" << ROLLBACK
+            set -e
+            PREV="${DIR}-prev"
+
+            if [ ! -d "\$PREV" ]; then
+              echo "No backup found at \$PREV — cannot rollback."
+              exit 1
+            fi
+
+            echo "Rolling back $PM2_NAME from \$PREV ..."
+            rsync -a --delete "\$PREV/" "${DIR}/"
+            echo "Restore complete."
+
+            if pm2 describe "$PM2_NAME" > /dev/null 2>&1; then
+              pm2 reload "$PM2_NAME"
+            else
+              pm2 start npm --name "$PM2_NAME" -- start -- --hostname 0.0.0.0 --port ${PORT}
+            fi
+            pm2 save
+
+            sleep 4
+            HTTP=\$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 http://localhost:${PORT}/ || echo "000")
+            if [ "\$HTTP" = "200" ] || [ "\$HTTP" = "301" ] || [ "\$HTTP" = "302" ]; then
+              echo "Health check passed (HTTP \$HTTP) — rollback successful."
+            else
+              echo "Health check returned HTTP \$HTTP"
+              pm2 logs "$PM2_NAME" --lines 20 --nostream
+              exit 1
+            fi
+          ROLLBACK
+
+      # ── Push rollback metric to Grafana ──────────────────────────────────
+      - name: Push rollback metric to Grafana
+        if: success()
+        env:
+          TOOLS_VM: ${{ secrets.INTERNAL_TOOLS_VM }}
+          SERVICE: ${{ github.event.inputs.service }}
+          ENV: ${{ github.event.inputs.environment }}
+        run: |
+          ssh-keyscan -H $TOOLS_VM >> ~/.ssh/known_hosts 2>/dev/null
+          TS=$(date -u +%s)
+
+          ssh root@$TOOLS_VM "
+            printf 'deploy_rollback{service=\"${SERVICE}\",env=\"${ENV}\",triggered_by=\"${{ github.actor }}\"} 1\n' | \
+              curl -s --data-binary @- http://localhost:9091/metrics/job/rollback/instance/${SERVICE}-${ENV}
+            printf 'deploy_rollback_timestamp{service=\"${SERVICE}\",env=\"${ENV}\"} ${TS}\n' | \
+              curl -s --data-binary @- http://localhost:9091/metrics/job/rollback/instance/${SERVICE}-${ENV}
+            echo 'Rollback metric pushed'
+          "
+
+      # ── Summary ───────────────────────────────────────────────────────────
+      - name: Rollback summary
+        if: always()
+        run: |
+          echo ""
+          echo "========================================"
+          echo " Rollback Report"
+          echo "========================================"
+          echo " Service     : ${{ github.event.inputs.service }}"
+          echo " Environment : ${{ github.event.inputs.environment }}"
+          echo " Triggered by: ${{ github.actor }}"
+          echo " Time        : $(date -u)"
+          echo " Status      : ${{ job.status }}"
+          echo "========================================"
+          echo ""
+          echo "To rollback again (re-deploy original):"
+          echo "  Push to the relevant branch and let the pipeline re-deploy."

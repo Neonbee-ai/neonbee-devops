@@ -1,0 +1,240 @@
+# =============================================================================
+# Neonbee — Reusable Vite MFE Frontend Deploy Workflow
+# =============================================================================
+# Place in: neonbee-devops/.github/workflows/neonbee-deploy-vite-mfe.yml
+#
+# Architecture (CLAUDE.md Rule 0 — NON-NEGOTIABLE):
+#   Contabo runner: gate → build → rsync dist/
+#   Target VM    : receives static dist/ only → nginx -s reload (no build on VM)
+#
+# Blue/Green additions (layered on top of live base pattern):
+#   - NGINX_ROOT-prev backup before overwrite (enables 30-sec rollback)
+#   - Pushgateway metric pushed via SSH to Internal Tools VM
+# =============================================================================
+
+name: Deploy Vite MFE (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      service_name:
+        required: true
+        type: string
+      nginx_root_dev:
+        required: true
+        type: string
+      nginx_root_staging:
+        required: true
+        type: string
+      vite_base_url_dev:
+        required: true
+        type: string
+      vite_base_url_staging:
+        required: true
+        type: string
+      vite_core_api_dev:
+        required: false
+        type: string
+        default: 'https://dev.api.skyoffice360.com/core'
+      vite_core_api_staging:
+        required: false
+        type: string
+        default: 'https://staging.api.skyoffice360.com/core'
+      is_mfe:
+        required: false
+        type: boolean
+        default: true
+      node_version:
+        required: false
+        type: string
+        default: '22'
+    secrets:
+      CONTABO_SSH_KEY:      { required: true }
+      DIGITALOCEAN_SSH_KEY: { required: true }
+      SERVER_IP:            { required: true }
+      INTERNAL_TOOLS_VM:    { required: true }
+      PAT_TOKEN:            { required: false }
+
+jobs:
+
+  # ── Gate: single merged job ────────────────────────────────────────────────
+  gate:
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+          cache: 'npm'
+      - name: Install dependencies
+        run: npm install --legacy-peer-deps --no-audit --no-fund
+      - name: Run unit tests
+        env:
+          CI: 'true'
+        run: npm test
+      - name: Security audit
+        run: npm audit --audit-level=critical --omit=dev
+      - name: Check dependency licenses
+        run: >-
+          npx license-checker
+          --failOn "GPL-2.0;GPL-3.0;AGPL-3.0;LGPL-2.0;LGPL-2.1;LGPL-3.0"
+          --excludePrivatePackages
+      - name: Scan for secrets
+        run: |
+          rm -rf dist/ coverage/ dist-ssr/
+          GITLEAKS_VERSION="8.30.1"
+          if command -v gitleaks &>/dev/null; then
+            gitleaks detect --source . --verbose
+          else
+            curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" | tar -xz -C /tmp/
+            /tmp/gitleaks detect --source . --verbose
+          fi
+
+  # ── CodeQL (parallel, non-blocking) ───────────────────────────────────────
+  codeql:
+    runs-on: self-hosted
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: javascript-typescript
+      - uses: github/codeql-action/autobuild@v3
+      - uses: github/codeql-action/analyze@v3
+        with:
+          category: '/language:javascript-typescript'
+          upload: never
+
+  # ── Build + Deploy (gate must pass) ───────────────────────────────────────
+  build-deploy:
+    needs: [gate]
+    runs-on: self-hosted
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+          cache: 'npm'
+
+      - uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: |
+            ${{ secrets.CONTABO_SSH_KEY }}
+            ${{ secrets.DIGITALOCEAN_SSH_KEY }}
+
+      # Build on Contabo runner — dist/ generated here, never on target VM
+      - name: Install + build (dev)
+        if: github.ref == 'refs/heads/develop'
+        run: |
+          npm install --legacy-peer-deps --no-audit --no-fund
+          mkdir -p node_modules/@so360
+          rm -rf node_modules/@so360/* && cp -r .ci-stubs/@so360/* node_modules/@so360/ 2>/dev/null || true
+          printf '%s\n' \
+            "VITE_BASE_URL=${{ inputs.vite_base_url_dev }}" \
+            "VITE_SO360_CORE_API=${{ inputs.vite_core_api_dev }}" \
+            "VITE_ENVIRONMENT=cloud" \
+            > .env
+          npm run build
+
+      - name: Install + build (staging)
+        if: github.ref == 'refs/heads/qa'
+        run: |
+          npm install --legacy-peer-deps --no-audit --no-fund
+          mkdir -p node_modules/@so360
+          rm -rf node_modules/@so360/* && cp -r .ci-stubs/@so360/* node_modules/@so360/ 2>/dev/null || true
+          printf '%s\n' \
+            "VITE_BASE_URL=${{ inputs.vite_base_url_staging }}" \
+            "VITE_SO360_CORE_API=${{ inputs.vite_core_api_staging }}" \
+            "VITE_ENVIRONMENT=cloud" \
+            > .env
+          npm run build
+
+      # ── Dev ──────────────────────────────────────────────────────────────
+      - name: Deploy to Dev
+        if: github.ref == 'refs/heads/develop'
+        env:
+          SERVER_IP: ${{ secrets.SERVER_IP }}
+          NGINX_ROOT: ${{ inputs.nginx_root_dev }}
+        run: |
+          ssh-keyscan -H $SERVER_IP >> ~/.ssh/known_hosts 2>/dev/null
+
+          # Backup current assets before overwriting (Blue/Green rollback target)
+          ssh root@$SERVER_IP "
+            mkdir -p '$NGINX_ROOT' '${NGINX_ROOT}-prev'
+            rsync -a --delete '$NGINX_ROOT/' '${NGINX_ROOT}-prev/' 2>/dev/null || true
+          "
+
+          # Deploy dist/ only — no source, no node_modules
+          ssh root@$SERVER_IP "mkdir -p '$NGINX_ROOT'"
+          rsync -avz --delete dist/ "root@$SERVER_IP:$NGINX_ROOT/"
+
+          # Verify remoteEntry.js (MFE guard) + nginx reload on VM
+          IS_MFE="${{ inputs.is_mfe }}"
+          ssh root@$SERVER_IP "bash -s" << VERIFY
+            set -e
+            if [ "$IS_MFE" = "true" ] && [ ! -f "$NGINX_ROOT/remoteEntry.js" ]; then
+              echo "remoteEntry.js missing — restoring backup"
+              rsync -a --delete "${NGINX_ROOT}-prev/" "$NGINX_ROOT/"
+              exit 1
+            fi
+            nginx -s reload
+            echo "${{ inputs.service_name }} live at $NGINX_ROOT"
+          VERIFY
+
+          # Push deploy metric to Pushgateway on Internal Tools VM
+          TOOLS=${{ secrets.INTERNAL_TOOLS_VM }}
+          ssh-keyscan -H $TOOLS >> ~/.ssh/known_hosts 2>/dev/null
+          TS=$(date -u +%s)
+          ssh root@$TOOLS "
+            printf 'deploy_active_slot{service=\"${{ inputs.service_name }}\",slot=\"green\",env=\"dev\",commit=\"${GITHUB_SHA:0:8}\"} 1\n' | \
+              curl -s --data-binary @- http://localhost:9091/metrics/job/deploy/instance/${{ inputs.service_name }}-dev
+            printf 'deploy_timestamp{service=\"${{ inputs.service_name }}\",slot=\"green\",env=\"dev\",commit=\"${GITHUB_SHA:0:8}\"} ${TS}\n' | \
+              curl -s --data-binary @- http://localhost:9091/metrics/job/deploy/instance/${{ inputs.service_name }}-dev
+          "
+
+      # ── Staging ──────────────────────────────────────────────────────────
+      - name: Deploy to Staging
+        if: github.ref == 'refs/heads/qa'
+        env:
+          SERVER_IP: ${{ secrets.SERVER_IP }}
+          NGINX_ROOT: ${{ inputs.nginx_root_staging }}
+        run: |
+          ssh-keyscan -H $SERVER_IP >> ~/.ssh/known_hosts 2>/dev/null
+
+          ssh root@$SERVER_IP "
+            mkdir -p '$NGINX_ROOT' '${NGINX_ROOT}-prev'
+            rsync -a --delete '$NGINX_ROOT/' '${NGINX_ROOT}-prev/' 2>/dev/null || true
+          "
+
+          ssh root@$SERVER_IP "mkdir -p '$NGINX_ROOT'"
+          rsync -avz --delete dist/ "root@$SERVER_IP:$NGINX_ROOT/"
+
+          IS_MFE="${{ inputs.is_mfe }}"
+          ssh root@$SERVER_IP "bash -s" << VERIFY
+            set -e
+            if [ "$IS_MFE" = "true" ] && [ ! -f "$NGINX_ROOT/remoteEntry.js" ]; then
+              echo "remoteEntry.js missing — restoring backup"
+              rsync -a --delete "${NGINX_ROOT}-prev/" "$NGINX_ROOT/"
+              exit 1
+            fi
+            nginx -s reload
+          VERIFY
+
+          TOOLS=${{ secrets.INTERNAL_TOOLS_VM }}
+          ssh-keyscan -H $TOOLS >> ~/.ssh/known_hosts 2>/dev/null
+          TS=$(date -u +%s)
+          ssh root@$TOOLS "
+            printf 'deploy_active_slot{service=\"${{ inputs.service_name }}\",slot=\"green\",env=\"staging\",commit=\"${GITHUB_SHA:0:8}\"} 1\n' | \
+              curl -s --data-binary @- http://localhost:9091/metrics/job/deploy/instance/${{ inputs.service_name }}-staging
+            printf 'deploy_timestamp{service=\"${{ inputs.service_name }}\",slot=\"green\",env=\"staging\",commit=\"${GITHUB_SHA:0:8}\"} ${TS}\n' | \
+              curl -s --data-binary @- http://localhost:9091/metrics/job/deploy/instance/${{ inputs.service_name }}-staging
+          "
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "Service: ${{ inputs.service_name }} | Branch: ${{ github.ref_name }} | Status: ${{ job.status }}"

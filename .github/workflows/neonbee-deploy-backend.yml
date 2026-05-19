@@ -1,0 +1,308 @@
+# =============================================================================
+# Neonbee — Reusable Backend Deploy Workflow (NestJS + PM2)
+# =============================================================================
+# Place in: neonbee-devops/.github/workflows/neonbee-deploy-backend.yml
+#
+# Architecture (CLAUDE.md Rule 0 — NON-NEGOTIABLE):
+#   Contabo runner: gate → contract-tests + integration-tests → build → rsync dist/
+#   Target VM    : receives dist/ only → pm2 reload (ZERO build/install on VM)
+#
+# Blue/Green additions (layered on top of live base pattern):
+#   - dist-prev backup before overwrite (enables 30-sec rollback)
+#   - .slot file tracks active slot
+#   - Pushgateway metric pushed via SSH to Internal Tools VM
+# =============================================================================
+
+name: Deploy Backend (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      service_name:
+        description: 'e.g. crm-be, core, inventory-be'
+        required: true
+        type: string
+      service_dir:
+        description: 'Absolute path on VM e.g. /github/neonbee/so360-crm-be'
+        required: true
+        type: string
+      port_dev:
+        required: true
+        type: number
+      port_staging:
+        required: true
+        type: number
+      health_path:
+        required: false
+        type: string
+        default: '/health'
+      node_version:
+        required: false
+        type: string
+        default: '22'
+    secrets:
+      CONTABO_SSH_KEY:              { required: true }
+      DIGITALOCEAN_SSH_KEY:         { required: true }
+      SERVER_IP:                    { required: true }
+      INTERNAL_TOOLS_VM:            { required: true }
+      SUPABASE_URL:                 { required: false }
+      SUPABASE_ANON_KEY:            { required: false }
+      SUPABASE_SERVICE_KEY:         { required: false }
+      JWT_SECRET:                   { required: false }
+      CORS_ORIGINS_DEV:             { required: false }
+      SUPABASE_URL_STAGING:         { required: false }
+      SUPABASE_ANON_KEY_STAGING:    { required: false }
+      SUPABASE_SERVICE_KEY_STAGING: { required: false }
+      JWT_SECRET_STAGING:           { required: false }
+      CORS_ORIGINS_STAGING:         { required: false }
+      PAT_TOKEN:                    { required: false }
+
+jobs:
+
+  # ── Gate: single merged job ────────────────────────────────────────────────
+  gate:
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+      - name: Install dependencies
+        run: npm install --legacy-peer-deps --no-audit --no-fund
+      - name: Run unit tests
+        env:
+          CI: 'true'
+        run: npm test -- --passWithNoTests --forceExit --ci
+      - name: Security audit
+        run: npm audit --audit-level=critical --omit=dev
+      - name: Check dependency licenses
+        run: >-
+          npx license-checker
+          --failOn "GPL-2.0;GPL-3.0;AGPL-3.0;LGPL-2.0;LGPL-2.1;LGPL-3.0"
+          --excludePrivatePackages
+      - name: Scan for secrets
+        run: |
+          rm -rf dist/ coverage/
+          GITLEAKS_VERSION="8.30.1"
+          if command -v gitleaks &>/dev/null; then
+            gitleaks detect --source . --verbose
+          else
+            curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" | tar -xz -C /tmp/
+            /tmp/gitleaks detect --source . --verbose
+          fi
+
+  # ── Parallel (both need gate) ──────────────────────────────────────────────
+  contract-tests:
+    name: API Contract Tests
+    runs-on: self-hosted
+    needs: [gate]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+      - name: Install dependencies
+        run: npm install --legacy-peer-deps
+      - name: Run contract tests
+        run: npm run test:contract -- --passWithNoTests --forceExit --ci
+        env:
+          NODE_ENV: test
+
+  integration-tests:
+    name: Integration Tests
+    runs-on: self-hosted
+    needs: [gate]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+      - name: Install dependencies
+        run: npm install --legacy-peer-deps
+      - name: Run integration tests
+        run: npm run test:integration -- --passWithNoTests --forceExit --ci
+        timeout-minutes: 15
+        env:
+          NODE_ENV: test
+          SO360_AUTH_BYPASS: 'true'
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          TEST_TENANT_ID: '3cf1c619-c8f6-49ac-9207-447418d5beee'
+          TEST_ORG_ID: '8317fe18-6ac4-4ac4-b71d-dc13122a905d'
+          TEST_USER_ID: '4a1832f4-f7bb-44bf-ad01-9431d8b14efc'
+
+  # ── Build + Deploy (ALL gates must pass) ───────────────────────────────────
+  build-deploy:
+    needs: [gate, contract-tests, integration-tests]
+    runs-on: self-hosted
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+
+      # Build on Contabo runner — generates dist/ here, never on target VM
+      - name: Install dependencies and build
+        run: |
+          LOCK_HASH=$(md5sum package-lock.json 2>/dev/null | cut -d' ' -f1 || echo 'nohash')
+          CACHE_FILE=".npm-ci-hash"
+          if [ -f "$CACHE_FILE" ] && [ "$(cat $CACHE_FILE)" = "$LOCK_HASH" ]; then
+            echo "node_modules cache hit — skipping install"
+          else
+            npm ci --legacy-peer-deps
+            echo "$LOCK_HASH" > "$CACHE_FILE"
+          fi
+          npm run build
+
+      - uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: |
+            ${{ secrets.CONTABO_SSH_KEY }}
+            ${{ secrets.DIGITALOCEAN_SSH_KEY }}
+
+      # ── Dev ──────────────────────────────────────────────────────────────
+      - name: Deploy to Dev
+        if: github.ref == 'refs/heads/develop'
+        env:
+          SERVER_IP: ${{ secrets.SERVER_IP }}
+          SERVICE_DIR: ${{ inputs.service_dir }}
+          SERVICE_NAME: ${{ inputs.service_name }}-dev
+          PORT: ${{ inputs.port_dev }}
+          HEALTH: ${{ inputs.health_path }}
+        run: |
+          ssh-keyscan -H $SERVER_IP >> ~/.ssh/known_hosts 2>/dev/null
+
+          CURRENT=$(ssh root@$SERVER_IP "cat '$SERVICE_DIR/.slot' 2>/dev/null || echo blue")
+          NEW_SLOT=$([[ "$CURRENT" == "blue" ]] && echo green || echo blue)
+          echo "Slot: $CURRENT → $NEW_SLOT"
+
+          # Backup dist before overwriting (Blue/Green rollback target)
+          ssh root@$SERVER_IP "
+            mkdir -p '$SERVICE_DIR/dist-prev' '$SERVICE_DIR/dist'
+            rsync -a --delete '$SERVICE_DIR/dist/' '$SERVICE_DIR/dist-prev/' 2>/dev/null || true
+          "
+
+          # Rsync dist/ only — source never touches target VM
+          ssh root@$SERVER_IP "mkdir -p '$SERVICE_DIR/dist'"
+          rsync -avz --delete dist/ "root@$SERVER_IP:$SERVICE_DIR/dist/"
+          rsync -avz package.json package-lock.json "root@$SERVER_IP:$SERVICE_DIR/"
+
+          ssh root@$SERVER_IP "SERVICE_DIR='$SERVICE_DIR' SERVICE_NAME='$SERVICE_NAME' PORT='$PORT' NEW_SLOT='$NEW_SLOT' bash -s" << 'DEPLOY_SCRIPT'
+            set -e
+            cd "$SERVICE_DIR"
+            export NVM_DIR="$HOME/.nvm"
+            [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+            nvm use 22
+            npm install --omit=dev --legacy-peer-deps
+            printf '%s\n' \
+              "NODE_ENV=development" \
+              "PORT=$PORT" \
+              "SUPABASE_URL=${{ secrets.SUPABASE_URL }}" \
+              "SUPABASE_KEY=${{ secrets.SUPABASE_ANON_KEY }}" \
+              "SUPABASE_ANON_KEY=${{ secrets.SUPABASE_ANON_KEY }}" \
+              "SUPABASE_SERVICE_KEY=${{ secrets.SUPABASE_SERVICE_KEY }}" \
+              "SUPABASE_SERVICE_ROLE_KEY=${{ secrets.SUPABASE_SERVICE_KEY }}" \
+              "JWT_SECRET=${{ secrets.JWT_SECRET }}" \
+              "CORS_ORIGINS=${{ secrets.CORS_ORIGINS_DEV }}" \
+              > .env
+            pm2 delete "$SERVICE_NAME" 2>/dev/null || true
+            MAIN_JS=$(find dist -name main.js | head -1)
+            PORT=$PORT pm2 start "$MAIN_JS" --name "$SERVICE_NAME" --cwd "$SERVICE_DIR" --instances 1 --max-memory-restart 400M --update-env
+            pm2 save
+            HEALTH_PATH="${{ inputs.health_path }}"
+            for i in {1..15}; do
+              curl -fsS "http://127.0.0.1:$PORT${HEALTH_PATH}" >/dev/null 2>&1 && echo "Health check passed" && break
+              [ "$i" -eq 15 ] && pm2 logs "$SERVICE_NAME" --lines 50 --nostream && exit 1
+              sleep 2
+            done
+            echo "$NEW_SLOT" > .slot
+            echo "Deployed $SERVICE_NAME on port $PORT (slot: $NEW_SLOT)"
+          DEPLOY_SCRIPT
+
+          # Push deploy metric to Pushgateway on Internal Tools VM
+          TOOLS=${{ secrets.INTERNAL_TOOLS_VM }}
+          ssh-keyscan -H $TOOLS >> ~/.ssh/known_hosts 2>/dev/null
+          TS=$(date -u +%s)
+          ssh root@$TOOLS "
+            printf 'deploy_active_slot{service=\"${{ inputs.service_name }}\",slot=\"${NEW_SLOT}\",env=\"dev\",commit=\"${GITHUB_SHA:0:8}\"} 1\n' | \
+              curl -s --data-binary @- http://localhost:9091/metrics/job/deploy/instance/${{ inputs.service_name }}-dev
+            printf 'deploy_timestamp{service=\"${{ inputs.service_name }}\",slot=\"${NEW_SLOT}\",env=\"dev\",commit=\"${GITHUB_SHA:0:8}\"} ${TS}\n' | \
+              curl -s --data-binary @- http://localhost:9091/metrics/job/deploy/instance/${{ inputs.service_name }}-dev
+          "
+
+      # ── Staging ──────────────────────────────────────────────────────────
+      - name: Deploy to Staging
+        if: github.ref == 'refs/heads/qa'
+        env:
+          SERVER_IP: ${{ secrets.SERVER_IP }}
+          SERVICE_DIR: ${{ inputs.service_dir }}
+          SERVICE_NAME: ${{ inputs.service_name }}-staging
+          PORT: ${{ inputs.port_staging }}
+          HEALTH: ${{ inputs.health_path }}
+        run: |
+          ssh-keyscan -H $SERVER_IP >> ~/.ssh/known_hosts 2>/dev/null
+
+          CURRENT=$(ssh root@$SERVER_IP "cat '$SERVICE_DIR/.slot' 2>/dev/null || echo blue")
+          NEW_SLOT=$([[ "$CURRENT" == "blue" ]] && echo green || echo blue)
+
+          ssh root@$SERVER_IP "
+            mkdir -p '$SERVICE_DIR/dist-prev' '$SERVICE_DIR/dist'
+            rsync -a --delete '$SERVICE_DIR/dist/' '$SERVICE_DIR/dist-prev/' 2>/dev/null || true
+          "
+
+          ssh root@$SERVER_IP "mkdir -p '$SERVICE_DIR/dist'"
+          rsync -avz --delete dist/ "root@$SERVER_IP:$SERVICE_DIR/dist/"
+          rsync -avz package.json package-lock.json "root@$SERVER_IP:$SERVICE_DIR/"
+
+          ssh root@$SERVER_IP "SERVICE_DIR='$SERVICE_DIR' SERVICE_NAME='$SERVICE_NAME' PORT='$PORT' NEW_SLOT='$NEW_SLOT' bash -s" << 'DEPLOY_SCRIPT'
+            set -e
+            cd "$SERVICE_DIR"
+            export NVM_DIR="$HOME/.nvm"
+            [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+            nvm use 22
+            npm install --omit=dev --legacy-peer-deps
+            printf '%s\n' \
+              "NODE_ENV=staging" \
+              "PORT=$PORT" \
+              "SUPABASE_URL=${{ secrets.SUPABASE_URL_STAGING }}" \
+              "SUPABASE_KEY=${{ secrets.SUPABASE_ANON_KEY_STAGING }}" \
+              "SUPABASE_ANON_KEY=${{ secrets.SUPABASE_ANON_KEY_STAGING }}" \
+              "SUPABASE_SERVICE_KEY=${{ secrets.SUPABASE_SERVICE_KEY_STAGING }}" \
+              "SUPABASE_SERVICE_ROLE_KEY=${{ secrets.SUPABASE_SERVICE_KEY_STAGING }}" \
+              "JWT_SECRET=${{ secrets.JWT_SECRET_STAGING }}" \
+              "CORS_ORIGINS=${{ secrets.CORS_ORIGINS_STAGING }}" \
+              > .env
+            pm2 delete "$SERVICE_NAME" 2>/dev/null || true
+            MAIN_JS=$(find dist -name main.js | head -1)
+            PORT=$PORT pm2 start "$MAIN_JS" --name "$SERVICE_NAME" --cwd "$SERVICE_DIR" --instances 1 --max-memory-restart 400M --update-env
+            pm2 save
+            HEALTH_PATH="${{ inputs.health_path }}"
+            for i in {1..15}; do
+              curl -fsS "http://127.0.0.1:$PORT${HEALTH_PATH}" >/dev/null 2>&1 && echo "Health check passed" && break
+              [ "$i" -eq 15 ] && pm2 logs "$SERVICE_NAME" --lines 50 --nostream && exit 1
+              sleep 2
+            done
+            echo "$NEW_SLOT" > .slot
+            echo "Deployed $SERVICE_NAME on port $PORT (slot: $NEW_SLOT)"
+          DEPLOY_SCRIPT
+
+          TOOLS=${{ secrets.INTERNAL_TOOLS_VM }}
+          ssh-keyscan -H $TOOLS >> ~/.ssh/known_hosts 2>/dev/null
+          TS=$(date -u +%s)
+          ssh root@$TOOLS "
+            printf 'deploy_active_slot{service=\"${{ inputs.service_name }}\",slot=\"${NEW_SLOT}\",env=\"staging\",commit=\"${GITHUB_SHA:0:8}\"} 1\n' | \
+              curl -s --data-binary @- http://localhost:9091/metrics/job/deploy/instance/${{ inputs.service_name }}-staging
+            printf 'deploy_timestamp{service=\"${{ inputs.service_name }}\",slot=\"${NEW_SLOT}\",env=\"staging\",commit=\"${GITHUB_SHA:0:8}\"} ${TS}\n' | \
+              curl -s --data-binary @- http://localhost:9091/metrics/job/deploy/instance/${{ inputs.service_name }}-staging
+          "
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "Service: ${{ inputs.service_name }} | Branch: ${{ github.ref_name }} | Status: ${{ job.status }}"
