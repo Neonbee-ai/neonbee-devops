@@ -157,7 +157,7 @@ jobs:
         run: |
           if [ -d ".ci-stubs/@so360" ]; then
             mkdir -p node_modules/@so360
-            cp -r .ci-stubs/@so360/* node_modules/@so360/
+            rm -rf node_modules/@so360/* && cp -r .ci-stubs/@so360/* node_modules/@so360/
             echo "Injected @so360 ci-stubs for test phase"
           fi
 
