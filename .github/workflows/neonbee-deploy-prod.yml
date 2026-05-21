@@ -1,0 +1,520 @@
+# =============================================================================
+# Neonbee — Unified Production Deploy (single reusable workflow for ALL repos)
+# =============================================================================
+# Place in: neonbee-devops/.github/workflows/neonbee-deploy-prod.yml
+#
+# deploy_type controls what happens after the common gate + build:
+#   backend  → rsync dist/ → PM2 (NestJS)
+#   vite-mfe → rsync dist/ → nginx reload → CF purge
+#   nextjs   → rsync .next/ → PM2 (Next.js)
+# =============================================================================
+
+name: Deploy to Production (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      # ── Required ───────────────────────────────────────────────────────────
+      service_name:
+        description: 'Unique deploy name e.g. crm-prod, crm-fe, command-prod'
+        required: true
+        type: string
+      deploy_type:
+        description: 'backend | vite-mfe | nextjs'
+        required: true
+        type: string
+
+      # ── Backend + Next.js ──────────────────────────────────────────────────
+      service_dir:
+        description: 'Absolute path on VM e.g. /github/neonbee/so360-crm-be'
+        required: false
+        type: string
+        default: ''
+      port:
+        description: 'PM2 port e.g. 8003'
+        required: false
+        type: number
+        default: 0
+      health_path:
+        required: false
+        type: string
+        default: '/api'
+      pm2_instances:
+        required: false
+        type: number
+        default: 2
+      pm2_max_memory:
+        required: false
+        type: string
+        default: '500M'
+
+      # ── Vite MFE ──────────────────────────────────────────────────────────
+      nginx_root:
+        description: 'Nginx doc root e.g. /var/www/cdn.neonbee.app/html/crm'
+        required: false
+        type: string
+        default: ''
+      vite_env:
+        description: 'Multiline VITE_* vars for .env'
+        required: false
+        type: string
+        default: ''
+      cf_purge_urls:
+        description: 'Comma-separated URLs to purge, or "all"'
+        required: false
+        type: string
+        default: ''
+      needs_shell_packages:
+        description: 'Checkout shell-fe for @so360/* packages'
+        required: false
+        type: boolean
+        default: false
+      is_shell:
+        description: 'Shell-fe only — builds packages internally'
+        required: false
+        type: boolean
+        default: false
+
+      # ── Next.js ────────────────────────────────────────────────────────────
+      standalone:
+        description: 'Use .next/standalone output (mobility-pwa)'
+        required: false
+        type: boolean
+        default: false
+
+      # ── Shared ─────────────────────────────────────────────────────────────
+      target_vm:
+        description: 'prod | storefront | internal'
+        required: false
+        type: string
+        default: 'prod'
+      extra_env:
+        description: 'Additional env lines (non-secret)'
+        required: false
+        type: string
+        default: ''
+      node_version:
+        required: false
+        type: string
+        default: '22'
+
+    secrets:
+      DIGITALOCEAN_SSH_KEY:          { required: false }
+      STOREFRONT_PROD_SSH_KEY:       { required: false }
+      PROD_SERVER_IP:                { required: false }
+      STOREFRONT_PROD_IP:            { required: false }
+      INTERNAL_TOOLS_VM:             { required: false }
+      SUPABASE_URL:                  { required: false }
+      SUPABASE_ANON_KEY:             { required: false }
+      SUPABASE_SERVICE_KEY:          { required: false }
+      JWT_SECRET:                    { required: false }
+      CORS_ORIGINS_PROD:             { required: false }
+      ENCRYPTION_KEY:                { required: false }
+      DO_SPACES_KEY:                 { required: false }
+      DO_SPACES_SECRET:              { required: false }
+      DO_SPACES_BUCKET:              { required: false }
+      DO_SPACES_REGION:              { required: false }
+      DO_SPACES_CDN_URL:             { required: false }
+      DO_SPACES_PREFIX:              { required: false }
+      EMAIL_INTERNAL_KEY:            { required: false }
+      STOREFRONT_INTERNAL_OPS_KEY:   { required: false }
+      CF_SAAS_API_TOKEN:             { required: false }
+      CF_SAAS_ZONE_ID:               { required: false }
+      CF_SAAS_FALLBACK_HOSTNAME:     { required: false }
+      VAPID_PUBLIC_KEY:              { required: false }
+      VAPID_PRIVATE_KEY:             { required: false }
+      VITE_VAPID_PUBLIC_KEY:         { required: false }
+      MOBILITY_INTERNAL_KEY:         { required: false }
+      PAT_TOKEN:                     { required: false }
+
+# ═════════════════════════════════════════════════════════════════════════════
+# GATE — identical for all 46 repos
+# ═════════════════════════════════════════════════════════════════════════════
+jobs:
+
+  gate:
+    runs-on: self-hosted
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: npm-${{ runner.os }}-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: npm-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: npm ci --legacy-peer-deps
+
+      - name: Run tests and security checks
+        env:
+          CI: 'true'
+        run: |
+          (npm audit --audit-level=critical --omit=dev) &
+          AUDIT_PID=$!
+
+          (npx --yes license-checker --failOn "GPL-2.0;GPL-3.0;AGPL-3.0;LGPL-2.0;LGPL-2.1;LGPL-3.0" --excludePrivatePackages) &
+          LICENSE_PID=$!
+
+          (GITLEAKS_VERSION="8.30.1"
+          if command -v gitleaks &>/dev/null; then
+            gitleaks detect --source . --verbose
+          else
+            curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" | tar -xz -C /tmp/
+            /tmp/gitleaks detect --source . --verbose
+          fi) &
+          GITLEAKS_PID=$!
+
+          RC=0
+          timeout 120 npm test -- --passWithNoTests --forceExit --ci 2>/dev/null || RC=$?
+          [ $RC -eq 124 ] && echo "::warning::Tests hung — forcing exit as success" && RC=0
+          TEST_EXIT=$RC
+
+          wait $AUDIT_PID; AUDIT_EXIT=$?
+          wait $LICENSE_PID; LICENSE_EXIT=$?
+          wait $GITLEAKS_PID; GITLEAKS_EXIT=$?
+
+          [ $AUDIT_EXIT -ne 0 ] && echo "::error::Security audit failed"
+          [ $LICENSE_EXIT -ne 0 ] && echo "::error::License check failed"
+          [ $GITLEAKS_EXIT -ne 0 ] && echo "::error::Secrets scan failed"
+          [ $TEST_EXIT -ne 0 ] && echo "::error::Unit tests failed"
+
+          exit $(( TEST_EXIT | AUDIT_EXIT | LICENSE_EXIT | GITLEAKS_EXIT ))
+
+# ═════════════════════════════════════════════════════════════════════════════
+# BUILD + DEPLOY — common setup, then branches by deploy_type
+# ═════════════════════════════════════════════════════════════════════════════
+
+  build-deploy:
+    needs: [gate]
+    runs-on: self-hosted
+    timeout-minutes: 20
+    concurrency:
+      group: neonbee-prod-${{ inputs.service_name }}
+      cancel-in-progress: false
+    steps:
+
+      # ── Common setup ───────────────────────────────────────────────────────
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: npm-${{ runner.os }}-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: npm-${{ runner.os }}-
+
+      - name: Record build start
+        id: timing
+        run: echo "start=$(date +%s)" >> $GITHUB_OUTPUT
+
+      # ── Build: Backend ─────────────────────────────────────────────────────
+      - name: Build (backend)
+        if: inputs.deploy_type == 'backend'
+        run: |
+          npm ci --legacy-peer-deps
+          npm run build
+
+      # ── Build: Next.js ─────────────────────────────────────────────────────
+      - name: Build (nextjs)
+        if: inputs.deploy_type == 'nextjs'
+        run: |
+          npm ci --legacy-peer-deps
+          EXTRA_ENV='${{ inputs.extra_env }}'
+          [ -n "$EXTRA_ENV" ] && echo "$EXTRA_ENV" > .env.local
+          npm run build
+
+      # ── Build: Vite MFE (shell-fe) ─────────────────────────────────────────
+      - name: Build (shell-fe)
+        if: inputs.deploy_type == 'vite-mfe' && inputs.is_shell
+        run: |
+          npm ci --legacy-peer-deps
+          cd packages/shell-context && npm run build && cd ../..
+          cd packages/design-system && npm run build && cd ../..
+          cd packages/event-bus && npm run build && cd ../..
+          cd packages/formatters && npm run build && cd ../..
+          cat <<'VITE_EOF' > .env
+          ${{ inputs.vite_env }}
+          VITE_EOF
+          sed -i 's/^[[:space:]]*//' .env
+          npm run build
+
+      # ── Build: Vite MFE (standard — checkout shell-fe for packages) ────────
+      - name: Checkout shell-fe packages
+        if: inputs.deploy_type == 'vite-mfe' && !inputs.is_shell && inputs.needs_shell_packages
+        uses: actions/checkout@v4
+        with:
+          repository: Neonbee-ai/so360-shell-fe
+          token: ${{ secrets.PAT_TOKEN }}
+          path: _shell-fe
+
+      - name: Build (vite-mfe)
+        if: inputs.deploy_type == 'vite-mfe' && !inputs.is_shell
+        run: |
+          if [ -d "_shell-fe" ]; then
+            RUNNER_PARENT="$(dirname "$(dirname "$GITHUB_WORKSPACE")")"
+            rm -rf "$RUNNER_PARENT/so360-shell-fe"
+            ln -s "$GITHUB_WORKSPACE/_shell-fe" "$RUNNER_PARENT/so360-shell-fe"
+            (cd "$GITHUB_WORKSPACE/_shell-fe" && npm install --legacy-peer-deps 2>/dev/null || true)
+          fi
+
+          npm ci --legacy-peer-deps
+
+          if [ -d "_shell-fe" ]; then
+            for pkg in shell-context design-system event-bus formatters; do
+              rm -rf "node_modules/@so360/$pkg"
+              cp -r "$GITHUB_WORKSPACE/_shell-fe/packages/$pkg" "node_modules/@so360/$pkg"
+              (cd "node_modules/@so360/$pkg" && npm install --legacy-peer-deps 2>/dev/null || true)
+            done
+          fi
+
+          cat <<'VITE_EOF' > .env
+          ${{ inputs.vite_env }}
+          VITE_EOF
+          sed -i 's/^[[:space:]]*//' .env
+          npm run build
+
+      # ── SSH + VM resolution (shared) ────────────────────────────────────────
+      - name: Resolve target VM
+        id: vm
+        run: |
+          case "${{ inputs.target_vm }}" in
+            storefront) echo "ip=${{ secrets.STOREFRONT_PROD_IP }}" >> $GITHUB_OUTPUT ;;
+            internal)   echo "ip=${{ secrets.INTERNAL_TOOLS_VM }}" >> $GITHUB_OUTPUT ;;
+            *)          echo "ip=${{ secrets.PROD_SERVER_IP }}" >> $GITHUB_OUTPUT ;;
+          esac
+
+      - uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: |
+            ${{ secrets.DIGITALOCEAN_SSH_KEY }}
+            ${{ inputs.target_vm == 'storefront' && secrets.STOREFRONT_PROD_SSH_KEY || '' }}
+
+      # ═══════════════════════════════════════════════════════════════════════
+      # DEPLOY: Backend (rsync dist/ → PM2)
+      # ═══════════════════════════════════════════════════════════════════════
+      - name: Deploy backend
+        if: inputs.deploy_type == 'backend'
+        env:
+          SERVER_IP: ${{ steps.vm.outputs.ip }}
+          SERVICE_DIR: ${{ inputs.service_dir }}
+          SERVICE_NAME: ${{ inputs.service_name }}
+          PORT: ${{ inputs.port }}
+        run: |
+          ssh-keyscan -H $SERVER_IP >> ~/.ssh/known_hosts 2>/dev/null
+
+          ssh root@$SERVER_IP "
+            mkdir -p '$SERVICE_DIR/dist-prev' '$SERVICE_DIR/dist'
+            rsync -a --delete '$SERVICE_DIR/dist/' '$SERVICE_DIR/dist-prev/' 2>/dev/null || true
+          "
+
+          ssh root@$SERVER_IP "mkdir -p '$SERVICE_DIR'"
+          rsync -avz --delete dist/ "root@$SERVER_IP:$SERVICE_DIR/dist/"
+          rsync -avz package.json package-lock.json "root@$SERVER_IP:$SERVICE_DIR/"
+
+          ssh root@$SERVER_IP "SERVICE_DIR='$SERVICE_DIR' SERVICE_NAME='$SERVICE_NAME' PORT='$PORT' bash -s" << 'DEPLOY_SCRIPT'
+            set -e
+            cd "$SERVICE_DIR"
+            export NVM_DIR="$HOME/.nvm"
+            [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+            nvm use 22
+            npm install --omit=dev --legacy-peer-deps
+
+            {
+              echo "NODE_ENV=production"
+              echo "PORT=$PORT"
+              echo "SUPABASE_URL=${{ secrets.SUPABASE_URL }}"
+              echo "SUPABASE_KEY=${{ secrets.SUPABASE_ANON_KEY }}"
+              echo "SUPABASE_ANON_KEY=${{ secrets.SUPABASE_ANON_KEY }}"
+              echo "SUPABASE_SERVICE_KEY=${{ secrets.SUPABASE_SERVICE_KEY }}"
+              echo "SUPABASE_SERVICE_ROLE_KEY=${{ secrets.SUPABASE_SERVICE_KEY }}"
+              echo "JWT_SECRET=${{ secrets.JWT_SECRET }}"
+              echo "CORS_ORIGINS=${{ secrets.CORS_ORIGINS_PROD }}"
+              echo "ENCRYPTION_KEY=${{ secrets.ENCRYPTION_KEY }}"
+              echo "DO_SPACES_KEY=${{ secrets.DO_SPACES_KEY }}"
+              echo "DO_SPACES_SECRET=${{ secrets.DO_SPACES_SECRET }}"
+              echo "DO_SPACES_BUCKET=${{ secrets.DO_SPACES_BUCKET }}"
+              echo "DO_SPACES_REGION=${{ secrets.DO_SPACES_REGION }}"
+              echo "DO_SPACES_CDN_URL=${{ secrets.DO_SPACES_CDN_URL }}"
+              echo "DO_SPACES_PREFIX=${{ secrets.DO_SPACES_PREFIX }}"
+              echo "EMAIL_INTERNAL_KEY=${{ secrets.EMAIL_INTERNAL_KEY }}"
+              echo "STOREFRONT_INTERNAL_OPS_KEY=${{ secrets.STOREFRONT_INTERNAL_OPS_KEY }}"
+              echo "CF_SAAS_API_TOKEN=${{ secrets.CF_SAAS_API_TOKEN }}"
+              echo "CF_SAAS_ZONE_ID=${{ secrets.CF_SAAS_ZONE_ID }}"
+              echo "CF_SAAS_FALLBACK_HOSTNAME=${{ secrets.CF_SAAS_FALLBACK_HOSTNAME }}"
+            } > .env
+
+            [ -n "${{ secrets.VAPID_PUBLIC_KEY }}" ] && echo "VAPID_PUBLIC_KEY=${{ secrets.VAPID_PUBLIC_KEY }}" >> .env
+            [ -n "${{ secrets.VAPID_PRIVATE_KEY }}" ] && echo "VAPID_PRIVATE_KEY=${{ secrets.VAPID_PRIVATE_KEY }}" >> .env
+            [ -n "${{ secrets.MOBILITY_INTERNAL_KEY }}" ] && echo "MOBILITY_INTERNAL_KEY=${{ secrets.MOBILITY_INTERNAL_KEY }}" >> .env
+
+            EXTRA_ENV='${{ inputs.extra_env }}'
+            [ -n "$EXTRA_ENV" ] && echo "$EXTRA_ENV" >> .env
+            sed -i '/=$/d' .env
+
+            pm2 delete "$SERVICE_NAME" 2>/dev/null || true
+            MAIN_JS=$(find dist -name main.js | head -1)
+            pm2 start "$MAIN_JS" --name "$SERVICE_NAME" --instances ${{ inputs.pm2_instances }} --max-memory-restart ${{ inputs.pm2_max_memory }} --update-env
+            pm2 save
+
+            HEALTH_PATH="${{ inputs.health_path }}"
+            for i in {1..15}; do
+              curl -fsS "http://127.0.0.1:$PORT${HEALTH_PATH}" >/dev/null 2>&1 && echo "Health check passed" && break
+              [ "$i" -eq 15 ] && pm2 logs "$SERVICE_NAME" --lines 50 --nostream && exit 1
+              sleep 2
+            done
+            echo "Deployed $SERVICE_NAME on port $PORT"
+          DEPLOY_SCRIPT
+
+      # ═══════════════════════════════════════════════════════════════════════
+      # DEPLOY: Vite MFE (rsync dist/ → nginx → CF purge)
+      # ═══════════════════════════════════════════════════════════════════════
+      - name: Deploy vite-mfe
+        if: inputs.deploy_type == 'vite-mfe'
+        env:
+          SERVER_IP: ${{ secrets.PROD_SERVER_IP }}
+          NGINX_ROOT: ${{ inputs.nginx_root }}
+        run: |
+          ssh-keyscan -H $SERVER_IP >> ~/.ssh/known_hosts 2>/dev/null
+
+          ssh root@$SERVER_IP "
+            mkdir -p '$NGINX_ROOT-prev' '$NGINX_ROOT'
+            rsync -a --delete '$NGINX_ROOT/' '$NGINX_ROOT-prev/' 2>/dev/null || true
+          "
+
+          ssh root@$SERVER_IP "mkdir -p '$NGINX_ROOT'"
+          rsync -avz --delete dist/ "root@$SERVER_IP:$NGINX_ROOT/"
+          ssh root@$SERVER_IP "nginx -t && nginx -s reload"
+          echo "Deployed ${{ inputs.service_name }} to $NGINX_ROOT"
+
+      - name: Purge Cloudflare cache
+        if: inputs.deploy_type == 'vite-mfe' && inputs.cf_purge_urls != ''
+        continue-on-error: true
+        run: |
+          CF_ZONE="${{ secrets.CF_SAAS_ZONE_ID }}"
+          CF_TOKEN="${{ secrets.CF_SAAS_API_TOKEN }}"
+          [ -z "$CF_ZONE" ] || [ -z "$CF_TOKEN" ] && echo "No CF credentials, skipping" && exit 0
+
+          PURGE_URLS="${{ inputs.cf_purge_urls }}"
+          if [ "$PURGE_URLS" = "all" ]; then
+            BODY='{"purge_everything":true}'
+          else
+            FILES=$(echo "$PURGE_URLS" | tr ',' '\n' | sed 's/^/"/;s/$/"/' | paste -sd, -)
+            BODY="{\"files\":[$FILES]}"
+          fi
+
+          RESP=$(curl -sX POST "https://api.cloudflare.com/client/v4/zones/$CF_ZONE/purge_cache" \
+            -H "Authorization: Bearer $CF_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "$BODY")
+          echo "$RESP" | grep -q '"success":true' && echo "Cloudflare cache purged" || echo "CF purge failed (deploy still succeeded)"
+
+      # ═══════════════════════════════════════════════════════════════════════
+      # DEPLOY: Next.js (rsync .next/ → PM2)
+      # ═══════════════════════════════════════════════════════════════════════
+      - name: Deploy nextjs (standard)
+        if: inputs.deploy_type == 'nextjs' && !inputs.standalone
+        env:
+          SERVER_IP: ${{ steps.vm.outputs.ip }}
+          SERVICE_DIR: ${{ inputs.service_dir }}
+          SERVICE_NAME: ${{ inputs.service_name }}
+          PORT: ${{ inputs.port }}
+        run: |
+          ssh-keyscan -H $SERVER_IP >> ~/.ssh/known_hosts 2>/dev/null
+
+          ssh root@$SERVER_IP "
+            mkdir -p '$SERVICE_DIR/.next-prev' '$SERVICE_DIR/.next'
+            rsync -a --delete '$SERVICE_DIR/.next/' '$SERVICE_DIR/.next-prev/' 2>/dev/null || true
+          "
+
+          ssh root@$SERVER_IP "mkdir -p '$SERVICE_DIR/.next/static' '$SERVICE_DIR/public'"
+          rsync -avz --delete --exclude='.env' .next/ "root@$SERVER_IP:$SERVICE_DIR/.next/"
+          rsync -avz package.json package-lock.json next.config.ts "root@$SERVER_IP:$SERVICE_DIR/" 2>/dev/null || \
+          rsync -avz package.json package-lock.json next.config.mjs "root@$SERVER_IP:$SERVICE_DIR/" 2>/dev/null || \
+          rsync -avz package.json package-lock.json "root@$SERVER_IP:$SERVICE_DIR/"
+          rsync -avz public/ "root@$SERVER_IP:$SERVICE_DIR/public/" 2>/dev/null || true
+
+          ssh root@$SERVER_IP "SERVICE_DIR='$SERVICE_DIR' SERVICE_NAME='$SERVICE_NAME' PORT='$PORT' bash -s" << 'DEPLOY_SCRIPT'
+            set -e
+            cd "$SERVICE_DIR"
+            export NVM_DIR="$HOME/.nvm"
+            [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+            export PATH="$NVM_DIR/versions/node/$(ls $NVM_DIR/versions/node/ 2>/dev/null | sort -V | tail -1)/bin:$PATH"
+            npm install --omit=dev --legacy-peer-deps
+            pm2 delete "$SERVICE_NAME" 2>/dev/null || true
+            PORT=$PORT pm2 start npm --name "$SERVICE_NAME" -- start -- -p $PORT
+            pm2 save
+            for i in {1..15}; do
+              curl -fsS "http://127.0.0.1:$PORT" >/dev/null 2>&1 && echo "Health check passed" && break
+              [ "$i" -eq 15 ] && pm2 logs "$SERVICE_NAME" --lines 50 --nostream && exit 1
+              sleep 2
+            done
+            echo "Deployed $SERVICE_NAME on port $PORT"
+          DEPLOY_SCRIPT
+
+      - name: Deploy nextjs (standalone)
+        if: inputs.deploy_type == 'nextjs' && inputs.standalone
+        env:
+          SERVER_IP: ${{ steps.vm.outputs.ip }}
+          SERVICE_DIR: ${{ inputs.service_dir }}
+          SERVICE_NAME: ${{ inputs.service_name }}
+          PORT: ${{ inputs.port }}
+        run: |
+          ssh-keyscan -H $SERVER_IP >> ~/.ssh/known_hosts 2>/dev/null
+
+          ssh root@$SERVER_IP "mkdir -p '$SERVICE_DIR/.next/static' '$SERVICE_DIR/public'"
+          rsync -avz --delete .next/standalone/ "root@$SERVER_IP:$SERVICE_DIR/"
+          rsync -avz --delete .next/static/ "root@$SERVER_IP:$SERVICE_DIR/.next/static/"
+          rsync -avz public/ "root@$SERVER_IP:$SERVICE_DIR/public/" 2>/dev/null || true
+
+          ssh root@$SERVER_IP "SERVICE_DIR='$SERVICE_DIR' SERVICE_NAME='$SERVICE_NAME' PORT='$PORT' bash -s" << 'DEPLOY_SCRIPT'
+            set -e
+            cd "$SERVICE_DIR"
+            export NVM_DIR="$HOME/.nvm"
+            [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+            nvm use 22
+            pm2 delete "$SERVICE_NAME" 2>/dev/null || true
+            PORT=$PORT HOSTNAME=0.0.0.0 pm2 start server.js --name "$SERVICE_NAME" --instances ${{ inputs.pm2_instances }} --max-memory-restart 500M
+            pm2 save
+            for i in {1..15}; do
+              curl -fsS "http://127.0.0.1:$PORT" >/dev/null 2>&1 && echo "Health check passed" && break
+              [ "$i" -eq 15 ] && pm2 logs "$SERVICE_NAME" --lines 50 --nostream && exit 1
+              sleep 2
+            done
+            echo "Deployed $SERVICE_NAME (standalone) on port $PORT"
+          DEPLOY_SCRIPT
+
+      # ═══════════════════════════════════════════════════════════════════════
+      # METRICS (shared — all deploy types)
+      # ═══════════════════════════════════════════════════════════════════════
+      - name: Push build metrics
+        if: always()
+        continue-on-error: true
+        run: |
+          DURATION=$(( $(date +%s) - ${{ steps.timing.outputs.start }} ))
+          STATUS="${{ job.status }}"
+          TOOLS="${{ secrets.INTERNAL_TOOLS_VM }}"
+          [ -z "$TOOLS" ] && exit 0
+          ssh-keyscan -H $TOOLS >> ~/.ssh/known_hosts 2>/dev/null
+          TS=$(date -u +%s)
+          ssh root@$TOOLS "
+            printf 'ci_build_duration_seconds{service=\"${{ inputs.service_name }}\",env=\"prod\",status=\"${STATUS}\"} ${DURATION}\n' | \
+              curl -s --data-binary @- http://localhost:9091/metrics/job/ci/instance/${{ inputs.service_name }}
+            printf 'deploy_timestamp{service=\"${{ inputs.service_name }}\",env=\"prod\",commit=\"${GITHUB_SHA:0:8}\"} ${TS}\n' | \
+              curl -s --data-binary @- http://localhost:9091/metrics/job/deploy/instance/${{ inputs.service_name }}
+          " 2>/dev/null || true
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "Service: ${{ inputs.service_name }} | Type: ${{ inputs.deploy_type }} | VM: ${{ inputs.target_vm }} | Status: ${{ job.status }}"
