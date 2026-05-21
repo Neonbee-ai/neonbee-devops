@@ -151,7 +151,9 @@ jobs:
           restore-keys: npm-${{ runner.os }}-
 
       - name: Install dependencies
-        run: npm ci --legacy-peer-deps
+        run: |
+          rm -rf node_modules
+          npm ci --legacy-peer-deps
 
       - name: Inject ci-stubs for MFE repos
         run: |
@@ -235,6 +237,7 @@ jobs:
       - name: Build (backend)
         if: inputs.deploy_type == 'backend'
         run: |
+          rm -rf node_modules
           npm ci --legacy-peer-deps
           npm run build
 
@@ -242,6 +245,7 @@ jobs:
       - name: Build (nextjs)
         if: inputs.deploy_type == 'nextjs'
         run: |
+          rm -rf node_modules
           npm ci --legacy-peer-deps
           EXTRA_ENV='${{ inputs.extra_env }}'
           [ -n "$EXTRA_ENV" ] && echo "$EXTRA_ENV" > .env.local
@@ -258,6 +262,7 @@ jobs:
       - name: Build (shell-fe)
         if: inputs.deploy_type == 'vite-mfe' && inputs.is_shell
         run: |
+          rm -rf node_modules
           npm ci --legacy-peer-deps
           cd packages/shell-context && npm run build && cd ../..
           cd packages/design-system && npm run build && cd ../..
@@ -294,6 +299,7 @@ jobs:
             (cd "$GITHUB_WORKSPACE/_shell-fe" && npm install --legacy-peer-deps 2>/dev/null || true)
           fi
 
+          rm -rf node_modules
           npm ci --legacy-peer-deps
 
           if [ -d "_shell-fe" ]; then
