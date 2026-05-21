@@ -69,8 +69,13 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ inputs.node_version }}
+      - uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: npm-${{ runner.os }}-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: npm-${{ runner.os }}-
       - name: Install dependencies
-        run: npm install --legacy-peer-deps --no-audit --no-fund
+        run: npm ci --legacy-peer-deps
       - name: Run unit tests
         env:
           CI: 'true'
@@ -103,8 +108,13 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ inputs.node_version }}
+      - uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: npm-${{ runner.os }}-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: npm-${{ runner.os }}-
       - name: Install dependencies
-        run: npm install --legacy-peer-deps
+        run: npm ci --legacy-peer-deps
       - name: Run contract tests
         run: npm run test:contract -- --passWithNoTests --forceExit --ci
         env:
@@ -119,8 +129,13 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ inputs.node_version }}
+      - uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: npm-${{ runner.os }}-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: npm-${{ runner.os }}-
       - name: Install dependencies
-        run: npm install --legacy-peer-deps
+        run: npm ci --legacy-peer-deps
       - name: Run integration tests
         run: npm run test:integration -- --passWithNoTests --forceExit --ci
         timeout-minutes: 15
@@ -140,6 +155,9 @@ jobs:
     needs: [gate, contract-tests, integration-tests]
     runs-on: self-hosted
     timeout-minutes: 20
+    concurrency:
+      group: neonbee-deploy-${{ github.ref_name }}
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
 
@@ -147,17 +165,19 @@ jobs:
         with:
           node-version: ${{ inputs.node_version }}
 
-      # Build on Contabo runner — generates dist/ here, never on target VM
+      - uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: npm-${{ runner.os }}-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: npm-${{ runner.os }}-
+
+      - name: Record build start
+        id: timing
+        run: echo "start=$(date +%s)" >> $GITHUB_OUTPUT
+
       - name: Install dependencies and build
         run: |
-          LOCK_HASH=$(md5sum package-lock.json 2>/dev/null | cut -d' ' -f1 || echo 'nohash')
-          CACHE_FILE=".npm-ci-hash"
-          if [ -f "$CACHE_FILE" ] && [ "$(cat $CACHE_FILE)" = "$LOCK_HASH" ]; then
-            echo "node_modules cache hit — skipping install"
-          else
-            npm ci --legacy-peer-deps
-            echo "$LOCK_HASH" > "$CACHE_FILE"
-          fi
+          npm ci --legacy-peer-deps
           npm run build
 
       - uses: webfactory/ssh-agent@v0.9.0
@@ -301,6 +321,18 @@ jobs:
             printf 'deploy_timestamp{service=\"${{ inputs.service_name }}\",slot=\"${NEW_SLOT}\",env=\"staging\",commit=\"${GITHUB_SHA:0:8}\"} ${TS}\n' | \
               curl -s --data-binary @- http://localhost:9091/metrics/job/deploy/instance/${{ inputs.service_name }}-staging
           "
+
+      - name: Push build metrics
+        if: always()
+        continue-on-error: true
+        run: |
+          DURATION=$(( $(date +%s) - ${{ steps.timing.outputs.start }} ))
+          STATUS="${{ job.status }}"
+          TOOLS=${{ secrets.INTERNAL_TOOLS_VM }}
+          ssh root@$TOOLS "
+            printf 'ci_build_duration_seconds{service=\"${{ inputs.service_name }}\",env=\"${{ github.ref_name }}\",status=\"${STATUS}\"} ${DURATION}\n' | \
+              curl -s --data-binary @- http://localhost:9091/metrics/job/ci/instance/${{ inputs.service_name }}
+          " 2>/dev/null || true
 
       - name: Summary
         if: always()
