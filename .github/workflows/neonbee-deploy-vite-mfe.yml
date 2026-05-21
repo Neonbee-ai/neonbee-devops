@@ -74,6 +74,13 @@ jobs:
           restore-keys: npm-${{ runner.os }}-
       - name: Install dependencies
         run: npm ci --legacy-peer-deps
+      - name: Inject ci-stubs for MFE repos
+        run: |
+          if [ -d ".ci-stubs/@so360" ]; then
+            mkdir -p node_modules/@so360
+            cp -r .ci-stubs/@so360/* node_modules/@so360/
+            echo "Injected @so360 ci-stubs for test phase"
+          fi
       - name: Run unit tests
         env:
           CI: 'true'
