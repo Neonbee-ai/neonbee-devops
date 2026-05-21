@@ -181,7 +181,8 @@ jobs:
           GITLEAKS_PID=$!
 
           RC=0
-          if [ -f vitest.config.ts ] || [ -f vitest.config.js ] || [ -f vitest.config.mts ] || grep -q '"vitest"' package.json 2>/dev/null; then
+          TEST_SCRIPT=$(node -e "console.log(require('./package.json').scripts?.test || '')" 2>/dev/null)
+          if echo "$TEST_SCRIPT" | grep -q "vitest"; then
             timeout 120 npm test -- --passWithNoTests 2>/dev/null || RC=$?
           else
             timeout 120 npm test -- --passWithNoTests --forceExit --ci 2>/dev/null || RC=$?
