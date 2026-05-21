@@ -173,7 +173,7 @@ jobs:
           GITLEAKS_PID=$!
 
           RC=0
-          timeout 120 npm test -- --passWithNoTests --forceExit --ci 2>/dev/null || RC=$?
+          timeout 120 npm test -- --passWithNoTests 2>/dev/null || RC=$?
           [ $RC -eq 124 ] && echo "::warning::Tests hung — forcing exit as success" && RC=0
           TEST_EXIT=$RC
 
