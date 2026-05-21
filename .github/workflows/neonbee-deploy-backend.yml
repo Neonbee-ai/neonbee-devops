@@ -61,7 +61,7 @@ jobs:
 
   # ── Gate: single merged job ────────────────────────────────────────────────
   gate:
-    runs-on: self-hosted
+    runs-on: [self-hosted, Linux]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -101,7 +101,7 @@ jobs:
   # ── Parallel (both need gate) ──────────────────────────────────────────────
   contract-tests:
     name: API Contract Tests
-    runs-on: self-hosted
+    runs-on: [self-hosted, Linux]
     needs: [gate]
     steps:
       - uses: actions/checkout@v4
@@ -122,7 +122,7 @@ jobs:
 
   integration-tests:
     name: Integration Tests
-    runs-on: self-hosted
+    runs-on: [self-hosted, Linux]
     needs: [gate]
     steps:
       - uses: actions/checkout@v4
@@ -153,7 +153,7 @@ jobs:
   # ── Build + Deploy (ALL gates must pass) ───────────────────────────────────
   build-deploy:
     needs: [gate, contract-tests, integration-tests]
-    runs-on: self-hosted
+    runs-on: [self-hosted, Linux]
     timeout-minutes: 20
     concurrency:
       group: neonbee-deploy-${{ github.ref_name }}

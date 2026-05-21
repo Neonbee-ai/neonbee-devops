@@ -133,7 +133,7 @@ on:
 jobs:
 
   gate:
-    runs-on: self-hosted
+    runs-on: [self-hosted, Linux]
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -194,7 +194,7 @@ jobs:
 
   build-deploy:
     needs: [gate]
-    runs-on: self-hosted
+    runs-on: [self-hosted, Linux]
     timeout-minutes: 20
     concurrency:
       group: neonbee-prod-${{ inputs.service_name }}
