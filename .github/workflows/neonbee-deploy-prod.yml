@@ -173,7 +173,11 @@ jobs:
           GITLEAKS_PID=$!
 
           RC=0
-          timeout 120 npm test -- --passWithNoTests 2>/dev/null || RC=$?
+          if [ -f vitest.config.ts ] || [ -f vitest.config.js ] || [ -f vitest.config.mts ] || grep -q '"vitest"' package.json 2>/dev/null; then
+            timeout 120 npm test -- --passWithNoTests 2>/dev/null || RC=$?
+          else
+            timeout 120 npm test -- --passWithNoTests --forceExit --ci 2>/dev/null || RC=$?
+          fi
           [ $RC -eq 124 ] && echo "::warning::Tests hung — forcing exit as success" && RC=0
           TEST_EXIT=$RC
 
