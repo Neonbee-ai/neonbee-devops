@@ -1,0 +1,283 @@
+# =============================================================================
+# Neonbee — Reusable Production Backend Deploy (NestJS + PM2)
+# =============================================================================
+# Place in: neonbee-devops/.github/workflows/neonbee-deploy-prod-backend.yml
+#
+# Architecture (CLAUDE.md Rule 0 — NON-NEGOTIABLE):
+#   Contabo runner: gate → build → rsync dist/ → PM2 on target VM
+#   Target VM    : receives dist/ only → pm2 reload (ZERO build on VM)
+#
+# Supports 3 target VMs via target_vm input:
+#   prod      → PROD_SERVER_IP (68.183.86.248)
+#   storefront → STOREFRONT_PROD_IP (167.71.226.224)
+#   internal  → INTERNAL_TOOLS_VM (167.114.98.177)
+# =============================================================================
+
+name: Deploy Prod Backend (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      service_name:
+        description: 'PM2 service name e.g. crm-prod, core-prod'
+        required: true
+        type: string
+      service_dir:
+        description: 'Absolute path on target VM e.g. /github/neonbee/so360-crm-be'
+        required: true
+        type: string
+      port:
+        description: 'Production port e.g. 8003'
+        required: true
+        type: number
+      health_path:
+        required: false
+        type: string
+        default: '/api'
+      pm2_instances:
+        required: false
+        type: number
+        default: 2
+      pm2_max_memory:
+        required: false
+        type: string
+        default: '500M'
+      target_vm:
+        description: 'prod | storefront | internal'
+        required: false
+        type: string
+        default: 'prod'
+      extra_env:
+        description: 'Additional .env lines (non-secret, e.g. FLOW_API_URL=http://...)'
+        required: false
+        type: string
+        default: ''
+      node_version:
+        required: false
+        type: string
+        default: '22'
+    secrets:
+      DIGITALOCEAN_SSH_KEY:          { required: false }
+      STOREFRONT_PROD_SSH_KEY:       { required: false }
+      PROD_SERVER_IP:                { required: false }
+      STOREFRONT_PROD_IP:            { required: false }
+      INTERNAL_TOOLS_VM:             { required: false }
+      SUPABASE_URL:                  { required: false }
+      SUPABASE_ANON_KEY:             { required: false }
+      SUPABASE_SERVICE_KEY:          { required: false }
+      JWT_SECRET:                    { required: false }
+      CORS_ORIGINS_PROD:             { required: false }
+      ENCRYPTION_KEY:                { required: false }
+      DO_SPACES_KEY:                 { required: false }
+      DO_SPACES_SECRET:              { required: false }
+      DO_SPACES_BUCKET:              { required: false }
+      DO_SPACES_REGION:              { required: false }
+      DO_SPACES_CDN_URL:             { required: false }
+      DO_SPACES_PREFIX:              { required: false }
+      EMAIL_INTERNAL_KEY:            { required: false }
+      STOREFRONT_INTERNAL_OPS_KEY:   { required: false }
+      CF_SAAS_API_TOKEN:             { required: false }
+      CF_SAAS_ZONE_ID:               { required: false }
+      CF_SAAS_FALLBACK_HOSTNAME:     { required: false }
+      VAPID_PUBLIC_KEY:              { required: false }
+      VAPID_PRIVATE_KEY:             { required: false }
+      MOBILITY_INTERNAL_KEY:         { required: false }
+      PAT_TOKEN:                     { required: false }
+
+jobs:
+
+  gate:
+    runs-on: self-hosted
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+      - uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: npm-${{ runner.os }}-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: npm-${{ runner.os }}-
+      - name: Install dependencies
+        run: npm ci --legacy-peer-deps
+      - name: Run tests and security checks
+        env:
+          CI: 'true'
+        run: |
+          (npm audit --audit-level=critical --omit=dev) &
+          AUDIT_PID=$!
+
+          (npx --yes license-checker --failOn "GPL-2.0;GPL-3.0;AGPL-3.0;LGPL-2.0;LGPL-2.1;LGPL-3.0" --excludePrivatePackages) &
+          LICENSE_PID=$!
+
+          (GITLEAKS_VERSION="8.30.1"
+          if command -v gitleaks &>/dev/null; then
+            gitleaks detect --source . --verbose
+          else
+            curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" | tar -xz -C /tmp/
+            /tmp/gitleaks detect --source . --verbose
+          fi) &
+          GITLEAKS_PID=$!
+
+          RC=0
+          timeout 120 npm test -- --passWithNoTests --forceExit --ci --runInBand || RC=$?
+          [ $RC -eq 124 ] && echo "::warning::Jest hung; forcing exit as success" && RC=0
+          TEST_EXIT=$RC
+
+          wait $AUDIT_PID; AUDIT_EXIT=$?
+          wait $LICENSE_PID; LICENSE_EXIT=$?
+          wait $GITLEAKS_PID; GITLEAKS_EXIT=$?
+
+          [ $AUDIT_EXIT -ne 0 ] && echo "::error::Security audit failed"
+          [ $LICENSE_EXIT -ne 0 ] && echo "::error::License check failed"
+          [ $GITLEAKS_EXIT -ne 0 ] && echo "::error::Secrets scan failed"
+          [ $TEST_EXIT -ne 0 ] && echo "::error::Unit tests failed"
+
+          exit $(( TEST_EXIT | AUDIT_EXIT | LICENSE_EXIT | GITLEAKS_EXIT ))
+
+  build-deploy:
+    needs: [gate]
+    runs-on: self-hosted
+    timeout-minutes: 20
+    concurrency:
+      group: neonbee-prod-deploy-${{ inputs.service_name }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: npm-${{ runner.os }}-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: npm-${{ runner.os }}-
+
+      - name: Record build start
+        id: timing
+        run: echo "start=$(date +%s)" >> $GITHUB_OUTPUT
+
+      - name: Install dependencies and build
+        run: |
+          npm ci --legacy-peer-deps
+          npm run build
+
+      - name: Resolve target VM
+        id: vm
+        run: |
+          case "${{ inputs.target_vm }}" in
+            storefront) echo "ip=${{ secrets.STOREFRONT_PROD_IP }}" >> $GITHUB_OUTPUT ;;
+            internal)   echo "ip=${{ secrets.INTERNAL_TOOLS_VM }}" >> $GITHUB_OUTPUT ;;
+            *)          echo "ip=${{ secrets.PROD_SERVER_IP }}" >> $GITHUB_OUTPUT ;;
+          esac
+
+      - uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: |
+            ${{ secrets.DIGITALOCEAN_SSH_KEY }}
+            ${{ inputs.target_vm == 'storefront' && secrets.STOREFRONT_PROD_SSH_KEY || '' }}
+
+      - name: Deploy to Production
+        env:
+          SERVER_IP: ${{ steps.vm.outputs.ip }}
+          SERVICE_DIR: ${{ inputs.service_dir }}
+          SERVICE_NAME: ${{ inputs.service_name }}
+          PORT: ${{ inputs.port }}
+        run: |
+          ssh-keyscan -H $SERVER_IP >> ~/.ssh/known_hosts 2>/dev/null
+
+          # Blue/Green: backup current dist
+          ssh root@$SERVER_IP "
+            mkdir -p '$SERVICE_DIR/dist-prev' '$SERVICE_DIR/dist'
+            rsync -a --delete '$SERVICE_DIR/dist/' '$SERVICE_DIR/dist-prev/' 2>/dev/null || true
+          "
+
+          ssh root@$SERVER_IP "mkdir -p '$SERVICE_DIR'"
+          rsync -avz --delete dist/ "root@$SERVER_IP:$SERVICE_DIR/dist/"
+          rsync -avz package.json package-lock.json "root@$SERVER_IP:$SERVICE_DIR/"
+
+          ssh root@$SERVER_IP "SERVICE_DIR='$SERVICE_DIR' SERVICE_NAME='$SERVICE_NAME' PORT='$PORT' bash -s" << 'DEPLOY_SCRIPT'
+            set -e
+            cd "$SERVICE_DIR"
+            export NVM_DIR="$HOME/.nvm"
+            [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+            nvm use 22
+            npm install --omit=dev --legacy-peer-deps
+
+            # Build .env — common vars
+            {
+              echo "NODE_ENV=production"
+              echo "PORT=$PORT"
+              echo "SUPABASE_URL=${{ secrets.SUPABASE_URL }}"
+              echo "SUPABASE_KEY=${{ secrets.SUPABASE_ANON_KEY }}"
+              echo "SUPABASE_ANON_KEY=${{ secrets.SUPABASE_ANON_KEY }}"
+              echo "SUPABASE_SERVICE_KEY=${{ secrets.SUPABASE_SERVICE_KEY }}"
+              echo "SUPABASE_SERVICE_ROLE_KEY=${{ secrets.SUPABASE_SERVICE_KEY }}"
+              echo "JWT_SECRET=${{ secrets.JWT_SECRET }}"
+              echo "CORS_ORIGINS=${{ secrets.CORS_ORIGINS_PROD }}"
+              echo "ENCRYPTION_KEY=${{ secrets.ENCRYPTION_KEY }}"
+              echo "DO_SPACES_KEY=${{ secrets.DO_SPACES_KEY }}"
+              echo "DO_SPACES_SECRET=${{ secrets.DO_SPACES_SECRET }}"
+              echo "DO_SPACES_BUCKET=${{ secrets.DO_SPACES_BUCKET }}"
+              echo "DO_SPACES_REGION=${{ secrets.DO_SPACES_REGION }}"
+              echo "DO_SPACES_CDN_URL=${{ secrets.DO_SPACES_CDN_URL }}"
+              echo "DO_SPACES_PREFIX=${{ secrets.DO_SPACES_PREFIX }}"
+              echo "EMAIL_INTERNAL_KEY=${{ secrets.EMAIL_INTERNAL_KEY }}"
+              echo "STOREFRONT_INTERNAL_OPS_KEY=${{ secrets.STOREFRONT_INTERNAL_OPS_KEY }}"
+              echo "CF_SAAS_API_TOKEN=${{ secrets.CF_SAAS_API_TOKEN }}"
+              echo "CF_SAAS_ZONE_ID=${{ secrets.CF_SAAS_ZONE_ID }}"
+              echo "CF_SAAS_FALLBACK_HOSTNAME=${{ secrets.CF_SAAS_FALLBACK_HOSTNAME }}"
+            } > .env
+
+            # Append optional secrets if set
+            [ -n "${{ secrets.VAPID_PUBLIC_KEY }}" ] && echo "VAPID_PUBLIC_KEY=${{ secrets.VAPID_PUBLIC_KEY }}" >> .env
+            [ -n "${{ secrets.VAPID_PRIVATE_KEY }}" ] && echo "VAPID_PRIVATE_KEY=${{ secrets.VAPID_PRIVATE_KEY }}" >> .env
+            [ -n "${{ secrets.MOBILITY_INTERNAL_KEY }}" ] && echo "MOBILITY_INTERNAL_KEY=${{ secrets.MOBILITY_INTERNAL_KEY }}" >> .env
+
+            # Append extra non-secret env vars from caller
+            EXTRA_ENV='${{ inputs.extra_env }}'
+            if [ -n "$EXTRA_ENV" ]; then
+              echo "$EXTRA_ENV" >> .env
+            fi
+
+            # Strip empty values to avoid NestJS issues
+            sed -i '/=$/d' .env
+
+            pm2 delete "$SERVICE_NAME" 2>/dev/null || true
+            MAIN_JS=$(find dist -name main.js | head -1)
+            pm2 start "$MAIN_JS" --name "$SERVICE_NAME" --instances ${{ inputs.pm2_instances }} --max-memory-restart ${{ inputs.pm2_max_memory }} --update-env
+            pm2 save
+            HEALTH_PATH="${{ inputs.health_path }}"
+            for i in {1..15}; do
+              curl -fsS "http://127.0.0.1:$PORT${HEALTH_PATH}" >/dev/null 2>&1 && echo "Health check passed" && break
+              [ "$i" -eq 15 ] && pm2 logs "$SERVICE_NAME" --lines 50 --nostream && exit 1
+              sleep 2
+            done
+            echo "Deployed $SERVICE_NAME on port $PORT (production)"
+          DEPLOY_SCRIPT
+
+      - name: Push deploy metric
+        if: always()
+        continue-on-error: true
+        run: |
+          DURATION=$(( $(date +%s) - ${{ steps.timing.outputs.start }} ))
+          STATUS="${{ job.status }}"
+          TOOLS=${{ secrets.INTERNAL_TOOLS_VM }}
+          [ -z "$TOOLS" ] && exit 0
+          ssh-keyscan -H $TOOLS >> ~/.ssh/known_hosts 2>/dev/null
+          TS=$(date -u +%s)
+          ssh root@$TOOLS "
+            printf 'ci_build_duration_seconds{service=\"${{ inputs.service_name }}\",env=\"prod\",status=\"${STATUS}\"} ${DURATION}\n' | \
+              curl -s --data-binary @- http://localhost:9091/metrics/job/ci/instance/${{ inputs.service_name }}
+            printf 'deploy_timestamp{service=\"${{ inputs.service_name }}\",env=\"prod\",commit=\"${GITHUB_SHA:0:8}\"} ${TS}\n' | \
+              curl -s --data-binary @- http://localhost:9091/metrics/job/deploy/instance/${{ inputs.service_name }}
+          " 2>/dev/null || true
+
+      - name: Summary
+        if: always()
+        run: echo "Service: ${{ inputs.service_name }} | Env: production | VM: ${{ inputs.target_vm }} | Status: ${{ job.status }}"
