@@ -258,4 +258,5 @@ jobs:
 
       - name: Summary
         if: always()
-        run: echo "Service: ${{ inputs.service_name }} | Env: production | Status: ${{ job.status }}"
+        run: |
+          echo "Service: ${{ inputs.service_name }} | Env: production | Status: ${{ job.status }}"

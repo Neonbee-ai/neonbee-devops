@@ -44,7 +44,7 @@ on:
       CONTABO_SSH_KEY:              { required: true }
       DIGITALOCEAN_SSH_KEY:         { required: true }
       SERVER_IP:                    { required: true }
-      INTERNAL_TOOLS_VM:            { required: true }
+      INTERNAL_TOOLS_VM:            { required: false }
       SUPABASE_URL:                 { required: false }
       SUPABASE_ANON_KEY:            { required: false }
       SUPABASE_SERVICE_KEY:         { required: false }
