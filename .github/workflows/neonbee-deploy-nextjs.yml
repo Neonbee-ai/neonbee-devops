@@ -68,7 +68,7 @@ jobs:
       - name: Run unit tests
         env:
           CI: 'true'
-        run: npm test -- --passWithNoTests --forceExit --ci
+        run: npm test -- --passWithNoTests
       - name: Security audit
         run: npm audit --audit-level=critical --omit=dev
       - name: Check dependency licenses
