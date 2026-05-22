@@ -232,6 +232,8 @@ jobs:
               "CORS_ORIGINS=${{ secrets.CORS_ORIGINS_DEV }}" \
               > .env
             pm2 delete "$SERVICE_NAME" 2>/dev/null || true
+            fuser -k "$PORT/tcp" 2>/dev/null || true
+            sleep 1
             MAIN_JS=$(find dist -name main.js | head -1)
             PORT=$PORT pm2 start "$MAIN_JS" --name "$SERVICE_NAME" --cwd "$SERVICE_DIR" --instances 1 --max-memory-restart 400M --update-env
             pm2 save
@@ -299,6 +301,8 @@ jobs:
               "CORS_ORIGINS=${{ secrets.CORS_ORIGINS_STAGING }}" \
               > .env
             pm2 delete "$SERVICE_NAME" 2>/dev/null || true
+            fuser -k "$PORT/tcp" 2>/dev/null || true
+            sleep 1
             MAIN_JS=$(find dist -name main.js | head -1)
             PORT=$PORT pm2 start "$MAIN_JS" --name "$SERVICE_NAME" --cwd "$SERVICE_DIR" --instances 1 --max-memory-restart 400M --update-env
             pm2 save
