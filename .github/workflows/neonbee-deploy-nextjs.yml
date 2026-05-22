@@ -39,6 +39,11 @@ on:
         required: false
         type: string
         default: '22'
+      extra_env:
+        description: 'Additional env lines written to .env.local before build'
+        required: false
+        type: string
+        default: ''
     secrets:
       CONTABO_SSH_KEY:      { required: true }
       DIGITALOCEAN_SSH_KEY: { required: true }
@@ -113,6 +118,8 @@ jobs:
 
       - name: Install dependencies and build
         run: |
+          EXTRA_ENV='${{ inputs.extra_env }}'
+          [ -n "$EXTRA_ENV" ] && echo "$EXTRA_ENV" > .env.local
           npm ci --legacy-peer-deps
           npm run build
 
