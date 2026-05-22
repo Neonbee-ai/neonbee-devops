@@ -92,7 +92,7 @@ jobs:
     needs: [gate]
     runs-on: [self-hosted, Linux]
     concurrency:
-      group: neonbee-deploy-${{ github.ref_name }}
+      group: neonbee-deploy-${{ inputs.service_name }}-${{ github.ref_name }}
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
