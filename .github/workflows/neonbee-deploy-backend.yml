@@ -141,6 +141,7 @@ jobs:
         timeout-minutes: 15
         env:
           NODE_ENV: test
+          NODE_OPTIONS: --experimental-vm-modules
           SO360_AUTH_BYPASS: 'true'
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
