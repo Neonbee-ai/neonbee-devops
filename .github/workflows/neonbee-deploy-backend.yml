@@ -236,6 +236,7 @@ jobs:
             sleep 3
             fuser -k "$PORT/tcp" 2>/dev/null || true
             lsof -ti :"$PORT" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
+            ss -Hlptn "sport = :$PORT" 2>/dev/null | grep -oP '(?<=pid=)\d+' | sort -u | xargs -r kill -9 2>/dev/null || true
             sleep 2
             MAIN_JS=$(find dist -name main.js | head -1)
             PORT=$PORT pm2 start "$MAIN_JS" --name "$SERVICE_NAME" --cwd "$SERVICE_DIR" --instances 1 --max-memory-restart 400M --update-env
@@ -308,6 +309,7 @@ jobs:
             sleep 3
             fuser -k "$PORT/tcp" 2>/dev/null || true
             lsof -ti :"$PORT" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
+            ss -Hlptn "sport = :$PORT" 2>/dev/null | grep -oP '(?<=pid=)\d+' | sort -u | xargs -r kill -9 2>/dev/null || true
             sleep 2
             MAIN_JS=$(find dist -name main.js | head -1)
             PORT=$PORT pm2 start "$MAIN_JS" --name "$SERVICE_NAME" --cwd "$SERVICE_DIR" --instances 1 --max-memory-restart 400M --update-env
