@@ -195,14 +195,16 @@ jobs:
 
           # Push deploy metric to Pushgateway on Internal Tools VM
           TOOLS=${{ secrets.INTERNAL_TOOLS_VM }}
-          ssh-keyscan -H $TOOLS >> ~/.ssh/known_hosts 2>/dev/null
-          TS=$(date -u +%s)
-          [ -n "$TOOLS" ] && ssh root@$TOOLS "
-            printf 'deploy_active_slot{service=\"${{ inputs.service_name }}\",slot=\"green\",env=\"dev\",commit=\"${GITHUB_SHA:0:8}\"} 1\n' | \
-              curl -s --data-binary @- http://localhost:9091/metrics/job/deploy/instance/${{ inputs.service_name }}-dev
-            printf 'deploy_timestamp{service=\"${{ inputs.service_name }}\",slot=\"green\",env=\"dev\",commit=\"${GITHUB_SHA:0:8}\"} ${TS}\n' | \
-              curl -s --data-binary @- http://localhost:9091/metrics/job/deploy/instance/${{ inputs.service_name }}-dev
-          " || true
+          if [ -n "$TOOLS" ]; then
+            ssh-keyscan -H $TOOLS >> ~/.ssh/known_hosts 2>/dev/null
+            TS=$(date -u +%s)
+            ssh root@$TOOLS "
+              printf 'deploy_active_slot{service=\"${{ inputs.service_name }}\",slot=\"green\",env=\"dev\",commit=\"${GITHUB_SHA:0:8}\"} 1\n' | \
+                curl -s --data-binary @- http://localhost:9091/metrics/job/deploy/instance/${{ inputs.service_name }}-dev
+              printf 'deploy_timestamp{service=\"${{ inputs.service_name }}\",slot=\"green\",env=\"dev\",commit=\"${GITHUB_SHA:0:8}\"} ${TS}\n' | \
+                curl -s --data-binary @- http://localhost:9091/metrics/job/deploy/instance/${{ inputs.service_name }}-dev
+            " 2>/dev/null || true
+          fi
 
       # ── Staging ──────────────────────────────────────────────────────────
       - name: Deploy to Staging
@@ -233,14 +235,16 @@ jobs:
           VERIFY
 
           TOOLS=${{ secrets.INTERNAL_TOOLS_VM }}
-          ssh-keyscan -H $TOOLS >> ~/.ssh/known_hosts 2>/dev/null
-          TS=$(date -u +%s)
-          [ -n "$TOOLS" ] && ssh root@$TOOLS "
-            printf 'deploy_active_slot{service=\"${{ inputs.service_name }}\",slot=\"green\",env=\"staging\",commit=\"${GITHUB_SHA:0:8}\"} 1\n' | \
-              curl -s --data-binary @- http://localhost:9091/metrics/job/deploy/instance/${{ inputs.service_name }}-staging
-            printf 'deploy_timestamp{service=\"${{ inputs.service_name }}\",slot=\"green\",env=\"staging\",commit=\"${GITHUB_SHA:0:8}\"} ${TS}\n' | \
-              curl -s --data-binary @- http://localhost:9091/metrics/job/deploy/instance/${{ inputs.service_name }}-staging
-          " || true
+          if [ -n "$TOOLS" ]; then
+            ssh-keyscan -H $TOOLS >> ~/.ssh/known_hosts 2>/dev/null
+            TS=$(date -u +%s)
+            ssh root@$TOOLS "
+              printf 'deploy_active_slot{service=\"${{ inputs.service_name }}\",slot=\"green\",env=\"staging\",commit=\"${GITHUB_SHA:0:8}\"} 1\n' | \
+                curl -s --data-binary @- http://localhost:9091/metrics/job/deploy/instance/${{ inputs.service_name }}-staging
+              printf 'deploy_timestamp{service=\"${{ inputs.service_name }}\",slot=\"green\",env=\"staging\",commit=\"${GITHUB_SHA:0:8}\"} ${TS}\n' | \
+                curl -s --data-binary @- http://localhost:9091/metrics/job/deploy/instance/${{ inputs.service_name }}-staging
+            " 2>/dev/null || true
+          fi
 
       - name: Push build metrics
         if: always()
