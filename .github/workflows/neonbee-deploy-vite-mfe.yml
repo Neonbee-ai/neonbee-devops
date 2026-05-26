@@ -196,7 +196,7 @@ jobs:
           # Push deploy metric to Pushgateway on Internal Tools VM
           TOOLS=${{ secrets.INTERNAL_TOOLS_VM }}
           if [ -n "$TOOLS" ]; then
-            ssh-keyscan -H $TOOLS >> ~/.ssh/known_hosts 2>/dev/null
+            ssh-keyscan -H $TOOLS >> ~/.ssh/known_hosts 2>/dev/null || true
             TS=$(date -u +%s)
             ssh root@$TOOLS "
               printf 'deploy_active_slot{service=\"${{ inputs.service_name }}\",slot=\"green\",env=\"dev\",commit=\"${GITHUB_SHA:0:8}\"} 1\n' | \
@@ -236,7 +236,7 @@ jobs:
 
           TOOLS=${{ secrets.INTERNAL_TOOLS_VM }}
           if [ -n "$TOOLS" ]; then
-            ssh-keyscan -H $TOOLS >> ~/.ssh/known_hosts 2>/dev/null
+            ssh-keyscan -H $TOOLS >> ~/.ssh/known_hosts 2>/dev/null || true
             TS=$(date -u +%s)
             ssh root@$TOOLS "
               printf 'deploy_active_slot{service=\"${{ inputs.service_name }}\",slot=\"green\",env=\"staging\",commit=\"${GITHUB_SHA:0:8}\"} 1\n' | \
