@@ -231,12 +231,12 @@ jobs:
               "JWT_SECRET=${{ secrets.JWT_SECRET }}" \
               "CORS_ORIGINS=${{ secrets.CORS_ORIGINS_DEV }}" \
               > .env
+            pm2 stop "$SERVICE_NAME" 2>/dev/null || true
             pm2 delete "$SERVICE_NAME" 2>/dev/null || true
+            sleep 3
+            fuser -k "$PORT/tcp" 2>/dev/null || true
+            lsof -ti :"$PORT" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
             sleep 2
-            fuser -k "$PORT/tcp" 2>/dev/null || \
-              lsof -ti :"$PORT" 2>/dev/null | xargs -r kill -9 2>/dev/null || \
-              true
-            sleep 1
             MAIN_JS=$(find dist -name main.js | head -1)
             PORT=$PORT pm2 start "$MAIN_JS" --name "$SERVICE_NAME" --cwd "$SERVICE_DIR" --instances 1 --max-memory-restart 400M --update-env
             pm2 save
@@ -303,12 +303,12 @@ jobs:
               "JWT_SECRET=${{ secrets.JWT_SECRET_STAGING }}" \
               "CORS_ORIGINS=${{ secrets.CORS_ORIGINS_STAGING }}" \
               > .env
+            pm2 stop "$SERVICE_NAME" 2>/dev/null || true
             pm2 delete "$SERVICE_NAME" 2>/dev/null || true
+            sleep 3
+            fuser -k "$PORT/tcp" 2>/dev/null || true
+            lsof -ti :"$PORT" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
             sleep 2
-            fuser -k "$PORT/tcp" 2>/dev/null || \
-              lsof -ti :"$PORT" 2>/dev/null | xargs -r kill -9 2>/dev/null || \
-              true
-            sleep 1
             MAIN_JS=$(find dist -name main.js | head -1)
             PORT=$PORT pm2 start "$MAIN_JS" --name "$SERVICE_NAME" --cwd "$SERVICE_DIR" --instances 1 --max-memory-restart 400M --update-env
             pm2 save
