@@ -184,7 +184,7 @@ jobs:
           IS_MFE="${{ inputs.is_mfe }}"
           ssh root@$SERVER_IP "bash -s" << VERIFY
             set -e
-            if [ "$IS_MFE" = "true" ] && [ ! -f "$NGINX_ROOT/remoteEntry.js" ]; then
+            if [ "$IS_MFE" = "true" ] && [ ! -f "$NGINX_ROOT/assets/remoteEntry.js" ]; then
               echo "remoteEntry.js missing — restoring backup"
               rsync -a --delete "${NGINX_ROOT}-prev/" "$NGINX_ROOT/"
               exit 1
@@ -224,7 +224,7 @@ jobs:
           IS_MFE="${{ inputs.is_mfe }}"
           ssh root@$SERVER_IP "bash -s" << VERIFY
             set -e
-            if [ "$IS_MFE" = "true" ] && [ ! -f "$NGINX_ROOT/remoteEntry.js" ]; then
+            if [ "$IS_MFE" = "true" ] && [ ! -f "$NGINX_ROOT/assets/remoteEntry.js" ]; then
               echo "remoteEntry.js missing — restoring backup"
               rsync -a --delete "${NGINX_ROOT}-prev/" "$NGINX_ROOT/"
               exit 1
