@@ -1,0 +1,20 @@
+name: Validate Reusable Workflows
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    runs-on: [self-hosted, Linux]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate workflow YAML syntax
+        run: |
+          for f in .github/workflows/*.yml; do
+            echo "Checking $f..."
+            python3 -c "import yaml, sys; yaml.safe_load(open('$f'))" && echo "OK: $f" || { echo "FAIL: $f"; exit 1; }
+          done
+          echo "All workflow files are valid YAML."
