@@ -138,6 +138,10 @@ jobs:
       - name: Install + build (dev)
         if: github.ref == 'refs/heads/main'
         run: |
+          # Remove stale so360-shell-fe symlink from previous prod deploys so
+          # vite.config.ts aliases fall back to node_modules/@so360/ stubs.
+          RUNNER_PARENT="$(dirname "$(dirname "$GITHUB_WORKSPACE")")"
+          rm -rf "$RUNNER_PARENT/so360-shell-fe" 2>/dev/null || true
           npm ci --legacy-peer-deps
           mkdir -p node_modules/@so360
           rm -rf node_modules/@so360/* && cp -r .ci-stubs/@so360/* node_modules/@so360/ 2>/dev/null || true
@@ -151,6 +155,8 @@ jobs:
       - name: Install + build (staging)
         if: github.ref == 'refs/heads/qa'
         run: |
+          RUNNER_PARENT="$(dirname "$(dirname "$GITHUB_WORKSPACE")")"
+          rm -rf "$RUNNER_PARENT/so360-shell-fe" 2>/dev/null || true
           npm ci --legacy-peer-deps
           mkdir -p node_modules/@so360
           rm -rf node_modules/@so360/* && cp -r .ci-stubs/@so360/* node_modules/@so360/ 2>/dev/null || true
