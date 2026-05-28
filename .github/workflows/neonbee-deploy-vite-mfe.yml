@@ -85,6 +85,8 @@ jobs:
         env:
           CI: 'true'
         run: npm test
+      - name: Lint
+        run: npm run lint --if-present
       - name: Security audit
         run: npm audit --audit-level=critical --omit=dev
       - name: Check dependency licenses
