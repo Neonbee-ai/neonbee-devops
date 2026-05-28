@@ -216,6 +216,20 @@ jobs:
       cancel-in-progress: false
     steps:
 
+      # ── Remove stale workspace symlink from cross-repo builds ───────────────
+      # The "Build (vite-mfe)" step for MFE repos creates a symlink at
+      # _work/so360-shell-fe so file: deps resolve. If a prior job left that
+      # symlink on this runner, actions/checkout for so360-shell-fe itself
+      # fails with "already exists". Remove it before every checkout.
+      - name: Remove stale workspace symlink
+        shell: bash
+        run: |
+          WS_PARENT="$(dirname "$GITHUB_WORKSPACE")"
+          if [ -L "$WS_PARENT" ]; then
+            echo "Removing stale symlink at $WS_PARENT"
+            rm -f "$WS_PARENT"
+          fi
+
       # ── Common setup ───────────────────────────────────────────────────────
       - uses: actions/checkout@v4
 
@@ -321,6 +335,13 @@ jobs:
           } >> .env
           sed -i '/=$/d' .env
           npm run build
+
+          # Remove the symlink after build so subsequent shell-fe runs on this
+          # runner can create their workspace directory at the same path.
+          if [ -d "_shell-fe" ]; then
+            RUNNER_PARENT="$(dirname "$(dirname "$GITHUB_WORKSPACE")")"
+            rm -f "$RUNNER_PARENT/so360-shell-fe" 2>/dev/null || true
+          fi
 
       # ── SSH + VM resolution (shared) ────────────────────────────────────────
       - name: Resolve target VM
