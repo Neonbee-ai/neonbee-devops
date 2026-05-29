@@ -110,12 +110,12 @@ on:
       JWT_SECRET:                    { required: false }
       CORS_ORIGINS_PROD:             { required: false }
       ENCRYPTION_KEY:                { required: false }
-      DO_SPACES_KEY:                 { required: false }
-      DO_SPACES_SECRET:              { required: false }
-      DO_SPACES_BUCKET:              { required: false }
-      DO_SPACES_REGION:              { required: false }
-      DO_SPACES_CDN_URL:             { required: false }
-      DO_SPACES_PREFIX:              { required: false }
+      CF_R2_ACCOUNT_ID:              { required: false }
+      CF_R2_ACCESS_KEY_ID:           { required: false }
+      CF_R2_SECRET_ACCESS_KEY:       { required: false }
+      CF_R2_BUCKET:                  { required: false }
+      CF_R2_PUBLIC_URL:              { required: false }
+      CF_R2_PREFIX:                  { required: false }
       EMAIL_INTERNAL_KEY:            { required: false }
       STOREFRONT_INTERNAL_OPS_KEY:   { required: false }
       CF_SAAS_API_TOKEN:             { required: false }
@@ -400,12 +400,12 @@ jobs:
               echo "JWT_SECRET=${{ secrets.JWT_SECRET }}"
               echo "CORS_ORIGINS=${{ secrets.CORS_ORIGINS_PROD }}"
               echo "ENCRYPTION_KEY=${{ secrets.ENCRYPTION_KEY }}"
-              echo "DO_SPACES_KEY=${{ secrets.DO_SPACES_KEY }}"
-              echo "DO_SPACES_SECRET=${{ secrets.DO_SPACES_SECRET }}"
-              echo "DO_SPACES_BUCKET=${{ secrets.DO_SPACES_BUCKET }}"
-              echo "DO_SPACES_REGION=${{ secrets.DO_SPACES_REGION }}"
-              echo "DO_SPACES_CDN_URL=${{ secrets.DO_SPACES_CDN_URL }}"
-              echo "DO_SPACES_PREFIX=${{ secrets.DO_SPACES_PREFIX }}"
+              echo "CF_R2_ACCOUNT_ID=${{ secrets.CF_R2_ACCOUNT_ID }}"
+              echo "CF_R2_ACCESS_KEY_ID=${{ secrets.CF_R2_ACCESS_KEY_ID }}"
+              echo "CF_R2_SECRET_ACCESS_KEY=${{ secrets.CF_R2_SECRET_ACCESS_KEY }}"
+              echo "CF_R2_BUCKET=${{ secrets.CF_R2_BUCKET }}"
+              echo "CF_R2_PUBLIC_URL=${{ secrets.CF_R2_PUBLIC_URL }}"
+              echo "CF_R2_PREFIX=${{ secrets.CF_R2_PREFIX }}"
               echo "EMAIL_INTERNAL_KEY=${{ secrets.EMAIL_INTERNAL_KEY }}"
               echo "STOREFRONT_INTERNAL_OPS_KEY=${{ secrets.STOREFRONT_INTERNAL_OPS_KEY }}"
               echo "CF_SAAS_API_TOKEN=${{ secrets.CF_SAAS_API_TOKEN }}"
