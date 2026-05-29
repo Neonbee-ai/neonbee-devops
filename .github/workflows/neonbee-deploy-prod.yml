@@ -116,6 +116,11 @@ on:
       CF_R2_BUCKET:                  { required: false }
       CF_R2_PUBLIC_URL:              { required: false }
       CF_R2_PREFIX:                  { required: false }
+      BUNNY_STORAGE_HOSTNAME:        { required: false }
+      BUNNY_STORAGE_ZONE:            { required: false }
+      BUNNY_ACCESS_KEY:              { required: false }
+      BUNNY_PULL_ZONE_URL:           { required: false }
+      BUNNY_PREFIX:                  { required: false }
       EMAIL_INTERNAL_KEY:            { required: false }
       STOREFRONT_INTERNAL_OPS_KEY:   { required: false }
       CF_SAAS_API_TOKEN:             { required: false }
@@ -406,6 +411,11 @@ jobs:
               echo "CF_R2_BUCKET=${{ secrets.CF_R2_BUCKET }}"
               echo "CF_R2_PUBLIC_URL=${{ secrets.CF_R2_PUBLIC_URL }}"
               echo "CF_R2_PREFIX=${{ secrets.CF_R2_PREFIX }}"
+              echo "BUNNY_STORAGE_HOSTNAME=${{ secrets.BUNNY_STORAGE_HOSTNAME }}"
+              echo "BUNNY_STORAGE_ZONE=${{ secrets.BUNNY_STORAGE_ZONE }}"
+              echo "BUNNY_ACCESS_KEY=${{ secrets.BUNNY_ACCESS_KEY }}"
+              echo "BUNNY_PULL_ZONE_URL=${{ secrets.BUNNY_PULL_ZONE_URL }}"
+              echo "BUNNY_PREFIX=${{ secrets.BUNNY_PREFIX }}"
               echo "EMAIL_INTERNAL_KEY=${{ secrets.EMAIL_INTERNAL_KEY }}"
               echo "STOREFRONT_INTERNAL_OPS_KEY=${{ secrets.STOREFRONT_INTERNAL_OPS_KEY }}"
               echo "CF_SAAS_API_TOKEN=${{ secrets.CF_SAAS_API_TOKEN }}"
