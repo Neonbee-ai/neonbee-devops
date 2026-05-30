@@ -131,7 +131,7 @@ jobs:
 
       # ── Dev ──────────────────────────────────────────────────────────────
       - name: Deploy to Dev
-        if: github.ref == 'refs/heads/main'
+        if: github.ref == 'refs/heads/develop'
         env:
           SERVER_IP: ${{ secrets.SERVER_IP }}
           SERVICE_DIR: ${{ inputs.service_dir }}
