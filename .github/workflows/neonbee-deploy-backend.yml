@@ -55,6 +55,7 @@ on:
       SUPABASE_SERVICE_KEY_STAGING: { required: false }
       JWT_SECRET_STAGING:           { required: false }
       CORS_ORIGINS_STAGING:         { required: false }
+      ENCRYPTION_KEY:               { required: false }
       PAT_TOKEN:                    { required: false }
 
 jobs:
@@ -232,6 +233,7 @@ jobs:
               "SUPABASE_SERVICE_KEY=${{ secrets.SUPABASE_SERVICE_KEY }}" \
               "SUPABASE_SERVICE_ROLE_KEY=${{ secrets.SUPABASE_SERVICE_KEY }}" \
               "JWT_SECRET=${{ secrets.JWT_SECRET }}" \
+              "ENCRYPTION_KEY=${{ secrets.ENCRYPTION_KEY }}" \
               "CORS_ORIGINS=${{ secrets.CORS_ORIGINS_DEV }}" \
               > .env
             pm2 stop "$SERVICE_NAME" 2>/dev/null || true
@@ -307,6 +309,7 @@ jobs:
               "SUPABASE_SERVICE_KEY=${{ secrets.SUPABASE_SERVICE_KEY_STAGING }}" \
               "SUPABASE_SERVICE_ROLE_KEY=${{ secrets.SUPABASE_SERVICE_KEY_STAGING }}" \
               "JWT_SECRET=${{ secrets.JWT_SECRET_STAGING }}" \
+              "ENCRYPTION_KEY=${{ secrets.ENCRYPTION_KEY }}" \
               "CORS_ORIGINS=${{ secrets.CORS_ORIGINS_STAGING }}" \
               > .env
             pm2 stop "$SERVICE_NAME" 2>/dev/null || true
@@ -357,4 +360,3 @@ jobs:
         if: always()
         run: |
           echo "Service: ${{ inputs.service_name }} | Branch: ${{ github.ref_name }} | Status: ${{ job.status }}"
-
