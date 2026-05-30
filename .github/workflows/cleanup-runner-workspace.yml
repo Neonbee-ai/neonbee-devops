@@ -1,0 +1,36 @@
+name: Cleanup Runner Workspace
+
+on:
+  workflow_dispatch:
+    inputs:
+      repo_workspace:
+        description: 'Repository workspace directory under the runner _work folder'
+        required: true
+        type: string
+
+jobs:
+  cleanup:
+    runs-on: [self-hosted, Linux]
+    timeout-minutes: 5
+    steps:
+      - name: Remove stale workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          repo_workspace="${{ inputs.repo_workspace }}"
+          if [[ ! "$repo_workspace" =~ ^[A-Za-z0-9._-]+$ ]]; then
+            echo "::error::Invalid repo_workspace: $repo_workspace"
+            exit 1
+          fi
+
+          work_root="$(dirname "$(dirname "$GITHUB_WORKSPACE")")"
+          target="$work_root/$repo_workspace"
+
+          if [ "$target" = "$work_root" ] || [ "$target" = "/" ]; then
+            echo "::error::Refusing to remove unsafe target: $target"
+            exit 1
+          fi
+
+          echo "Removing stale runner workspace: $target"
+          rm -rf -- "$target"
