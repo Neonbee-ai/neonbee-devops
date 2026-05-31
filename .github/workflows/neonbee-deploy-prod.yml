@@ -266,6 +266,10 @@ jobs:
         run: |
           rm -rf node_modules
           npm ci --legacy-peer-deps
+          if [ -d ".ci-stubs/@so360" ]; then
+            mkdir -p node_modules/@so360
+            rm -rf node_modules/@so360/* && cp -r .ci-stubs/@so360/* node_modules/@so360/ 2>/dev/null || true
+          fi
           EXTRA_ENV='${{ inputs.extra_env }}'
           [ -n "$EXTRA_ENV" ] && echo "$EXTRA_ENV" > .env.local
           {
@@ -320,6 +324,11 @@ jobs:
 
           rm -rf node_modules
           npm ci --legacy-peer-deps
+
+          if [ -d ".ci-stubs/@so360" ] && [ ! -d "_shell-fe" ]; then
+            mkdir -p node_modules/@so360
+            rm -rf node_modules/@so360/* && cp -r .ci-stubs/@so360/* node_modules/@so360/ 2>/dev/null || true
+          fi
 
           if [ -d "_shell-fe" ]; then
             for pkg in shell-context design-system event-bus formatters; do
