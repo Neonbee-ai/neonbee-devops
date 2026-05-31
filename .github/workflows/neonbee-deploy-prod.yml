@@ -270,6 +270,14 @@ jobs:
             mkdir -p node_modules/@so360
             rm -rf node_modules/@so360/* && cp -r .ci-stubs/@so360/* node_modules/@so360/ 2>/dev/null || true
           fi
+          if [ -f ".ci-stubs/@so360/theme/src/theme.css" ]; then
+            RUNNER_PARENT="$(dirname "$(dirname "$GITHUB_WORKSPACE")")"
+            WORKSPACE_PARENT="$(dirname "$GITHUB_WORKSPACE")"
+            mkdir -p "$RUNNER_PARENT/so360-shell-fe/packages/theme/src"
+            cp .ci-stubs/@so360/theme/src/theme.css "$RUNNER_PARENT/so360-shell-fe/packages/theme/src/" 2>/dev/null || true
+            mkdir -p "$WORKSPACE_PARENT/so360-shell-fe/packages/theme/src"
+            cp .ci-stubs/@so360/theme/src/theme.css "$WORKSPACE_PARENT/so360-shell-fe/packages/theme/src/" 2>/dev/null || true
+          fi
           EXTRA_ENV='${{ inputs.extra_env }}'
           [ -n "$EXTRA_ENV" ] && echo "$EXTRA_ENV" > .env.local
           {
@@ -331,11 +339,21 @@ jobs:
           fi
 
           if [ -d "_shell-fe" ]; then
-            for pkg in shell-context design-system event-bus formatters; do
+            for pkg in shell-context design-system event-bus formatters theme; do
               rm -rf "node_modules/@so360/$pkg"
               cp -r "$GITHUB_WORKSPACE/_shell-fe/packages/$pkg" "node_modules/@so360/$pkg"
               (cd "node_modules/@so360/$pkg" && npm install --legacy-peer-deps 2>/dev/null || true)
             done
+          fi
+
+          # Create so360-shell-fe theme CSS path for @import compatibility
+          if [ ! -d "_shell-fe" ] && [ -f ".ci-stubs/@so360/theme/src/theme.css" ]; then
+            RUNNER_PARENT="$(dirname "$(dirname "$GITHUB_WORKSPACE")")"
+            WORKSPACE_PARENT="$(dirname "$GITHUB_WORKSPACE")"
+            mkdir -p "$RUNNER_PARENT/so360-shell-fe/packages/theme/src"
+            cp .ci-stubs/@so360/theme/src/theme.css "$RUNNER_PARENT/so360-shell-fe/packages/theme/src/" 2>/dev/null || true
+            mkdir -p "$WORKSPACE_PARENT/so360-shell-fe/packages/theme/src"
+            cp .ci-stubs/@so360/theme/src/theme.css "$WORKSPACE_PARENT/so360-shell-fe/packages/theme/src/" 2>/dev/null || true
           fi
 
           cat <<'VITE_EOF' > .env
