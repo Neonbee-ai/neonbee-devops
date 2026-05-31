@@ -142,14 +142,16 @@ jobs:
         run: |
           # Remove stale so360-shell-fe symlink from previous prod deploys so
           # vite.config.ts aliases fall back to node_modules/@so360/ stubs.
-          # Guard: never remove the live checkout — when the shell-fe repo
-          # itself builds, this path IS $GITHUB_WORKSPACE and removing it would
-          # delete the cwd (uv_cwd ENOENT on the next npm command).
+          # Guard: never remove a path that CONTAINS the live checkout. The
+          # runner layout is _work/<repo>/<repo>, so for the shell-fe repo the
+          # candidate path (_work/so360-shell-fe) is the PARENT of $GITHUB_WORKSPACE
+          # — removing it deletes the cwd (uv_cwd ENOENT on the next npm command).
           RUNNER_PARENT="$(dirname "$(dirname "$GITHUB_WORKSPACE")")"
           STALE_PKG="$RUNNER_PARENT/so360-shell-fe"
-          if [ "$STALE_PKG" != "$GITHUB_WORKSPACE" ]; then
-            rm -rf "$STALE_PKG" 2>/dev/null || true
-          fi
+          case "$GITHUB_WORKSPACE/" in
+            "$STALE_PKG"/*) echo "Skipping stale-pkg removal: $STALE_PKG contains the live checkout" ;;
+            *) rm -rf "$STALE_PKG" 2>/dev/null || true ;;
+          esac
           npm ci --legacy-peer-deps
           mkdir -p node_modules/@so360
           rm -rf node_modules/@so360/* && cp -r .ci-stubs/@so360/* node_modules/@so360/ 2>/dev/null || true
@@ -163,12 +165,13 @@ jobs:
       - name: Install + build (staging)
         if: github.ref == 'refs/heads/qa'
         run: |
-          # Guard: never remove the live checkout (see dev step comment).
+          # Guard: never remove a path that contains the live checkout (see dev step).
           RUNNER_PARENT="$(dirname "$(dirname "$GITHUB_WORKSPACE")")"
           STALE_PKG="$RUNNER_PARENT/so360-shell-fe"
-          if [ "$STALE_PKG" != "$GITHUB_WORKSPACE" ]; then
-            rm -rf "$STALE_PKG" 2>/dev/null || true
-          fi
+          case "$GITHUB_WORKSPACE/" in
+            "$STALE_PKG"/*) echo "Skipping stale-pkg removal: $STALE_PKG contains the live checkout" ;;
+            *) rm -rf "$STALE_PKG" 2>/dev/null || true ;;
+          esac
           npm ci --legacy-peer-deps
           mkdir -p node_modules/@so360
           rm -rf node_modules/@so360/* && cp -r .ci-stubs/@so360/* node_modules/@so360/ 2>/dev/null || true
