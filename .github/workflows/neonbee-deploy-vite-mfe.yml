@@ -138,7 +138,7 @@ jobs:
 
       # Build on Contabo runner — dist/ generated here, never on target VM
       - name: Install + build (dev)
-        if: github.ref == 'refs/heads/develop'
+        if: github.ref == 'refs/heads/main'
         run: |
           # Remove stale so360-shell-fe symlink from previous prod deploys so
           # vite.config.ts aliases fall back to node_modules/@so360/ stubs.
@@ -184,7 +184,7 @@ jobs:
 
       # ── Dev ──────────────────────────────────────────────────────────────
       - name: Deploy to Dev
-        if: github.ref == 'refs/heads/develop'
+        if: github.ref == 'refs/heads/main'
         env:
           SERVER_IP: ${{ secrets.SERVER_IP }}
           NGINX_ROOT: ${{ inputs.nginx_root_dev }}
