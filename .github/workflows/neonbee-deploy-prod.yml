@@ -141,6 +141,19 @@ jobs:
     runs-on: [self-hosted, Linux]
     timeout-minutes: 20
     steps:
+      # ── Remove stale workspace symlink from cross-repo builds ───────────────
+      # A failed/cancelled vite-mfe build can leave a dangling symlink at
+      # _work/<service> (see build-deploy). Left in place, it breaks checkout
+      # and hashFiles for the next gate run on this runner. Remove it first.
+      - name: Remove stale workspace symlink
+        shell: bash
+        run: |
+          WS_PARENT="$(dirname "$GITHUB_WORKSPACE")"
+          if [ -L "$WS_PARENT" ]; then
+            echo "Removing stale symlink at $WS_PARENT"
+            rm -f "$WS_PARENT"
+          fi
+
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -152,7 +165,7 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: ~/.npm
-          key: npm-${{ runner.os }}-${{ hashFiles('**/package-lock.json') }}
+          key: npm-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
           restore-keys: npm-${{ runner.os }}-
 
       - name: Install dependencies
@@ -245,7 +258,7 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: ~/.npm
-          key: npm-${{ runner.os }}-${{ hashFiles('**/package-lock.json') }}
+          key: npm-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
           restore-keys: npm-${{ runner.os }}-
 
       - name: Record build start
