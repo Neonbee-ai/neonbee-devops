@@ -57,6 +57,26 @@ on:
       CORS_ORIGINS_STAGING:         { required: false }
       ENCRYPTION_KEY:               { required: false }
       PAT_TOKEN:                    { required: false }
+      # Bunny CDN (media uploads — projects, people-connect, etc.)
+      BUNNY_STORAGE_HOSTNAME:       { required: false }
+      BUNNY_STORAGE_ZONE:           { required: false }
+      BUNNY_ACCESS_KEY:             { required: false }
+      BUNNY_PULL_ZONE_URL:          { required: false }
+      BUNNY_PREFIX:                 { required: false }
+      # Cloudflare R2 (document storage — documents-be, sign, etc.)
+      CF_R2_ACCOUNT_ID:             { required: false }
+      CF_R2_ACCESS_KEY_ID:          { required: false }
+      CF_R2_SECRET_ACCESS_KEY:      { required: false }
+      CF_R2_BUCKET:                 { required: false }
+      CF_R2_PUBLIC_URL:             { required: false }
+      CF_R2_PREFIX:                 { required: false }
+      # Inter-service auth keys
+      INTERNAL_SERVICE_KEY:         { required: false }
+      EMAIL_INTERNAL_KEY:           { required: false }
+      STOREFRONT_INTERNAL_OPS_KEY:  { required: false }
+      MOBILITY_INTERNAL_KEY:        { required: false }
+      VAPID_PUBLIC_KEY:             { required: false }
+      VAPID_PRIVATE_KEY:            { required: false }
 
 jobs:
 
@@ -231,18 +251,53 @@ jobs:
             [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
             nvm use 22
             npm install --omit=dev --legacy-peer-deps
-            printf '%s\n' \
-              "NODE_ENV=development" \
-              "PORT=$PORT" \
-              "SUPABASE_URL=${{ secrets.SUPABASE_URL }}" \
-              "SUPABASE_KEY=${{ secrets.SUPABASE_ANON_KEY }}" \
-              "SUPABASE_ANON_KEY=${{ secrets.SUPABASE_ANON_KEY }}" \
-              "SUPABASE_SERVICE_KEY=${{ secrets.SUPABASE_SERVICE_KEY }}" \
-              "SUPABASE_SERVICE_ROLE_KEY=${{ secrets.SUPABASE_SERVICE_KEY }}" \
-              "JWT_SECRET=${{ secrets.JWT_SECRET }}" \
-              "ENCRYPTION_KEY=${{ secrets.ENCRYPTION_KEY }}" \
-              "CORS_ORIGINS=${{ secrets.CORS_ORIGINS_DEV }}" \
-              > .env
+
+            # ── Write CI-managed vars ────────────────────────────────────────
+            {
+              echo "NODE_ENV=development"
+              echo "PORT=$PORT"
+              echo "SUPABASE_URL=${{ secrets.SUPABASE_URL }}"
+              echo "SUPABASE_KEY=${{ secrets.SUPABASE_ANON_KEY }}"
+              echo "SUPABASE_ANON_KEY=${{ secrets.SUPABASE_ANON_KEY }}"
+              echo "SUPABASE_SERVICE_KEY=${{ secrets.SUPABASE_SERVICE_KEY }}"
+              echo "SUPABASE_SERVICE_ROLE_KEY=${{ secrets.SUPABASE_SERVICE_KEY }}"
+              echo "JWT_SECRET=${{ secrets.JWT_SECRET }}"
+              echo "ENCRYPTION_KEY=${{ secrets.ENCRYPTION_KEY }}"
+              echo "CORS_ORIGINS=${{ secrets.CORS_ORIGINS_DEV }}"
+            } > .env.ci
+
+            # ── Append optional secrets (only when the GitHub secret is set) ─
+            [ -n "${{ secrets.BUNNY_STORAGE_HOSTNAME }}" ]      && echo "BUNNY_STORAGE_HOSTNAME=${{ secrets.BUNNY_STORAGE_HOSTNAME }}"           >> .env.ci
+            [ -n "${{ secrets.BUNNY_STORAGE_ZONE }}" ]          && echo "BUNNY_STORAGE_ZONE=${{ secrets.BUNNY_STORAGE_ZONE }}"                   >> .env.ci
+            [ -n "${{ secrets.BUNNY_ACCESS_KEY }}" ]            && echo "BUNNY_ACCESS_KEY=${{ secrets.BUNNY_ACCESS_KEY }}"                       >> .env.ci
+            [ -n "${{ secrets.BUNNY_PULL_ZONE_URL }}" ]         && echo "BUNNY_PULL_ZONE_URL=${{ secrets.BUNNY_PULL_ZONE_URL }}"                 >> .env.ci
+            [ -n "${{ secrets.BUNNY_PREFIX }}" ]                && echo "BUNNY_PREFIX=${{ secrets.BUNNY_PREFIX }}"                               >> .env.ci
+            [ -n "${{ secrets.CF_R2_ACCOUNT_ID }}" ]            && echo "CF_R2_ACCOUNT_ID=${{ secrets.CF_R2_ACCOUNT_ID }}"                       >> .env.ci
+            [ -n "${{ secrets.CF_R2_ACCESS_KEY_ID }}" ]         && echo "CF_R2_ACCESS_KEY_ID=${{ secrets.CF_R2_ACCESS_KEY_ID }}"                 >> .env.ci
+            [ -n "${{ secrets.CF_R2_SECRET_ACCESS_KEY }}" ]     && echo "CF_R2_SECRET_ACCESS_KEY=${{ secrets.CF_R2_SECRET_ACCESS_KEY }}"         >> .env.ci
+            [ -n "${{ secrets.CF_R2_BUCKET }}" ]                && echo "CF_R2_BUCKET=${{ secrets.CF_R2_BUCKET }}"                               >> .env.ci
+            [ -n "${{ secrets.CF_R2_PUBLIC_URL }}" ]            && echo "CF_R2_PUBLIC_URL=${{ secrets.CF_R2_PUBLIC_URL }}"                       >> .env.ci
+            [ -n "${{ secrets.CF_R2_PREFIX }}" ]                && echo "CF_R2_PREFIX=${{ secrets.CF_R2_PREFIX }}"                               >> .env.ci
+            [ -n "${{ secrets.INTERNAL_SERVICE_KEY }}" ]        && echo "INTERNAL_SERVICE_KEY=${{ secrets.INTERNAL_SERVICE_KEY }}"               >> .env.ci
+            [ -n "${{ secrets.EMAIL_INTERNAL_KEY }}" ]          && echo "EMAIL_INTERNAL_KEY=${{ secrets.EMAIL_INTERNAL_KEY }}"                   >> .env.ci
+            [ -n "${{ secrets.STOREFRONT_INTERNAL_OPS_KEY }}" ] && echo "STOREFRONT_INTERNAL_OPS_KEY=${{ secrets.STOREFRONT_INTERNAL_OPS_KEY }}" >> .env.ci
+            [ -n "${{ secrets.MOBILITY_INTERNAL_KEY }}" ]       && echo "MOBILITY_INTERNAL_KEY=${{ secrets.MOBILITY_INTERNAL_KEY }}"             >> .env.ci
+            [ -n "${{ secrets.VAPID_PUBLIC_KEY }}" ]            && echo "VAPID_PUBLIC_KEY=${{ secrets.VAPID_PUBLIC_KEY }}"                       >> .env.ci
+            [ -n "${{ secrets.VAPID_PRIVATE_KEY }}" ]           && echo "VAPID_PRIVATE_KEY=${{ secrets.VAPID_PRIVATE_KEY }}"                     >> .env.ci
+
+            # Strip any KEY= lines where the secret wasn't set
+            sed -i '/=$/d' .env.ci
+
+            # ── PERMANENT FIX: Merge server-side secrets CI doesn't own ─────
+            # Keys already on the server but absent from .env.ci are preserved.
+            # This prevents future deployments from silently wiping secrets
+            # that were added to the server after the workflow was last updated.
+            if [ -f .env ]; then
+              CI_KEYS=$(sed 's/=.*//' .env.ci | tr '\n' '|' | sed 's/|$//')
+              [ -n "$CI_KEYS" ] && grep -vE "^(${CI_KEYS})=" .env >> .env.ci 2>/dev/null || true
+            fi
+            mv .env.ci .env
+
             pm2 stop "$SERVICE_NAME" 2>/dev/null || true
             pm2 delete "$SERVICE_NAME" 2>/dev/null || true
             sleep 3
@@ -307,18 +362,50 @@ jobs:
             [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
             nvm use 22
             npm install --omit=dev --legacy-peer-deps
-            printf '%s\n' \
-              "NODE_ENV=staging" \
-              "PORT=$PORT" \
-              "SUPABASE_URL=${{ secrets.SUPABASE_URL_STAGING }}" \
-              "SUPABASE_KEY=${{ secrets.SUPABASE_ANON_KEY_STAGING }}" \
-              "SUPABASE_ANON_KEY=${{ secrets.SUPABASE_ANON_KEY_STAGING }}" \
-              "SUPABASE_SERVICE_KEY=${{ secrets.SUPABASE_SERVICE_KEY_STAGING }}" \
-              "SUPABASE_SERVICE_ROLE_KEY=${{ secrets.SUPABASE_SERVICE_KEY_STAGING }}" \
-              "JWT_SECRET=${{ secrets.JWT_SECRET_STAGING }}" \
-              "ENCRYPTION_KEY=${{ secrets.ENCRYPTION_KEY }}" \
-              "CORS_ORIGINS=${{ secrets.CORS_ORIGINS_STAGING }}" \
-              > .env
+
+            # ── Write CI-managed vars ────────────────────────────────────────
+            {
+              echo "NODE_ENV=staging"
+              echo "PORT=$PORT"
+              echo "SUPABASE_URL=${{ secrets.SUPABASE_URL_STAGING }}"
+              echo "SUPABASE_KEY=${{ secrets.SUPABASE_ANON_KEY_STAGING }}"
+              echo "SUPABASE_ANON_KEY=${{ secrets.SUPABASE_ANON_KEY_STAGING }}"
+              echo "SUPABASE_SERVICE_KEY=${{ secrets.SUPABASE_SERVICE_KEY_STAGING }}"
+              echo "SUPABASE_SERVICE_ROLE_KEY=${{ secrets.SUPABASE_SERVICE_KEY_STAGING }}"
+              echo "JWT_SECRET=${{ secrets.JWT_SECRET_STAGING }}"
+              echo "ENCRYPTION_KEY=${{ secrets.ENCRYPTION_KEY }}"
+              echo "CORS_ORIGINS=${{ secrets.CORS_ORIGINS_STAGING }}"
+            } > .env.ci
+
+            # ── Append optional secrets (only when the GitHub secret is set) ─
+            [ -n "${{ secrets.BUNNY_STORAGE_HOSTNAME }}" ]      && echo "BUNNY_STORAGE_HOSTNAME=${{ secrets.BUNNY_STORAGE_HOSTNAME }}"           >> .env.ci
+            [ -n "${{ secrets.BUNNY_STORAGE_ZONE }}" ]          && echo "BUNNY_STORAGE_ZONE=${{ secrets.BUNNY_STORAGE_ZONE }}"                   >> .env.ci
+            [ -n "${{ secrets.BUNNY_ACCESS_KEY }}" ]            && echo "BUNNY_ACCESS_KEY=${{ secrets.BUNNY_ACCESS_KEY }}"                       >> .env.ci
+            [ -n "${{ secrets.BUNNY_PULL_ZONE_URL }}" ]         && echo "BUNNY_PULL_ZONE_URL=${{ secrets.BUNNY_PULL_ZONE_URL }}"                 >> .env.ci
+            [ -n "${{ secrets.BUNNY_PREFIX }}" ]                && echo "BUNNY_PREFIX=${{ secrets.BUNNY_PREFIX }}"                               >> .env.ci
+            [ -n "${{ secrets.CF_R2_ACCOUNT_ID }}" ]            && echo "CF_R2_ACCOUNT_ID=${{ secrets.CF_R2_ACCOUNT_ID }}"                       >> .env.ci
+            [ -n "${{ secrets.CF_R2_ACCESS_KEY_ID }}" ]         && echo "CF_R2_ACCESS_KEY_ID=${{ secrets.CF_R2_ACCESS_KEY_ID }}"                 >> .env.ci
+            [ -n "${{ secrets.CF_R2_SECRET_ACCESS_KEY }}" ]     && echo "CF_R2_SECRET_ACCESS_KEY=${{ secrets.CF_R2_SECRET_ACCESS_KEY }}"         >> .env.ci
+            [ -n "${{ secrets.CF_R2_BUCKET }}" ]                && echo "CF_R2_BUCKET=${{ secrets.CF_R2_BUCKET }}"                               >> .env.ci
+            [ -n "${{ secrets.CF_R2_PUBLIC_URL }}" ]            && echo "CF_R2_PUBLIC_URL=${{ secrets.CF_R2_PUBLIC_URL }}"                       >> .env.ci
+            [ -n "${{ secrets.CF_R2_PREFIX }}" ]                && echo "CF_R2_PREFIX=${{ secrets.CF_R2_PREFIX }}"                               >> .env.ci
+            [ -n "${{ secrets.INTERNAL_SERVICE_KEY }}" ]        && echo "INTERNAL_SERVICE_KEY=${{ secrets.INTERNAL_SERVICE_KEY }}"               >> .env.ci
+            [ -n "${{ secrets.EMAIL_INTERNAL_KEY }}" ]          && echo "EMAIL_INTERNAL_KEY=${{ secrets.EMAIL_INTERNAL_KEY }}"                   >> .env.ci
+            [ -n "${{ secrets.STOREFRONT_INTERNAL_OPS_KEY }}" ] && echo "STOREFRONT_INTERNAL_OPS_KEY=${{ secrets.STOREFRONT_INTERNAL_OPS_KEY }}" >> .env.ci
+            [ -n "${{ secrets.MOBILITY_INTERNAL_KEY }}" ]       && echo "MOBILITY_INTERNAL_KEY=${{ secrets.MOBILITY_INTERNAL_KEY }}"             >> .env.ci
+            [ -n "${{ secrets.VAPID_PUBLIC_KEY }}" ]            && echo "VAPID_PUBLIC_KEY=${{ secrets.VAPID_PUBLIC_KEY }}"                       >> .env.ci
+            [ -n "${{ secrets.VAPID_PRIVATE_KEY }}" ]           && echo "VAPID_PRIVATE_KEY=${{ secrets.VAPID_PRIVATE_KEY }}"                     >> .env.ci
+
+            # Strip any KEY= lines where the secret wasn't set
+            sed -i '/=$/d' .env.ci
+
+            # ── PERMANENT FIX: Merge server-side secrets CI doesn't own ─────
+            if [ -f .env ]; then
+              CI_KEYS=$(sed 's/=.*//' .env.ci | tr '\n' '|' | sed 's/|$//')
+              [ -n "$CI_KEYS" ] && grep -vE "^(${CI_KEYS})=" .env >> .env.ci 2>/dev/null || true
+            fi
+            mv .env.ci .env
+
             pm2 stop "$SERVICE_NAME" 2>/dev/null || true
             pm2 delete "$SERVICE_NAME" 2>/dev/null || true
             sleep 3
