@@ -122,6 +122,7 @@ on:
       BUNNY_PULL_ZONE_URL:           { required: false }
       BUNNY_PREFIX:                  { required: false }
       EMAIL_INTERNAL_KEY:            { required: false }
+      DOCS_INTERNAL_SERVICE_KEY:     { required: false }
       STOREFRONT_INTERNAL_OPS_KEY:   { required: false }
       CF_SAAS_API_TOKEN:             { required: false }
       CF_SAAS_ZONE_ID:               { required: false }
@@ -466,6 +467,8 @@ jobs:
             [ -n "${{ secrets.VAPID_PUBLIC_KEY }}" ] && echo "VAPID_PUBLIC_KEY=${{ secrets.VAPID_PUBLIC_KEY }}" >> .env
             [ -n "${{ secrets.VAPID_PRIVATE_KEY }}" ] && echo "VAPID_PRIVATE_KEY=${{ secrets.VAPID_PRIVATE_KEY }}" >> .env
             [ -n "${{ secrets.MOBILITY_INTERNAL_KEY }}" ] && echo "MOBILITY_INTERNAL_KEY=${{ secrets.MOBILITY_INTERNAL_KEY }}" >> .env
+            [ -n "${{ secrets.DOCS_INTERNAL_SERVICE_KEY }}" ] && echo "DOCS_INTERNAL_SERVICE_KEY=${{ secrets.DOCS_INTERNAL_SERVICE_KEY }}" >> .env
+            [ -n "${{ secrets.DOCS_INTERNAL_SERVICE_KEY }}" ] && echo "INTERNAL_SERVICE_KEY=${{ secrets.DOCS_INTERNAL_SERVICE_KEY }}" >> .env
 
             EXTRA_ENV='${{ inputs.extra_env }}'
             [ -n "$EXTRA_ENV" ] && echo "$EXTRA_ENV" >> .env
