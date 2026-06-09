@@ -470,6 +470,7 @@ jobs:
             [ -n "${{ secrets.MOBILITY_INTERNAL_KEY }}" ]        && echo "MOBILITY_INTERNAL_KEY=${{ secrets.MOBILITY_INTERNAL_KEY }}"               >> .env.ci
             [ -n "${{ secrets.INTERNAL_SERVICE_KEY }}" ]         && echo "INTERNAL_SERVICE_KEY=${{ secrets.INTERNAL_SERVICE_KEY }}"                 >> .env.ci
             [ -n "${{ secrets.DOCS_INTERNAL_SERVICE_KEY }}" ]    && echo "DOCS_INTERNAL_SERVICE_KEY=${{ secrets.DOCS_INTERNAL_SERVICE_KEY }}"       >> .env.ci
+            [ -n "${{ secrets.INBOX_SERVICE_KEY }}" ]            && echo "INBOX_SERVICE_KEY=${{ secrets.INBOX_SERVICE_KEY }}"                       >> .env.ci
 
             EXTRA_ENV='${{ inputs.extra_env }}'
             [ -n "$EXTRA_ENV" ] && echo "$EXTRA_ENV" >> .env.ci

@@ -280,6 +280,7 @@ jobs:
             [ -n "${{ secrets.CF_R2_PREFIX }}" ]                && echo "CF_R2_PREFIX=${{ secrets.CF_R2_PREFIX }}"                               >> .env.ci
             [ -n "${{ secrets.INTERNAL_SERVICE_KEY }}" ]        && echo "INTERNAL_SERVICE_KEY=${{ secrets.INTERNAL_SERVICE_KEY }}"               >> .env.ci
             [ -n "${{ secrets.EMAIL_INTERNAL_KEY }}" ]          && echo "EMAIL_INTERNAL_KEY=${{ secrets.EMAIL_INTERNAL_KEY }}"                   >> .env.ci
+            [ -n "${{ secrets.INBOX_SERVICE_KEY }}" ]           && echo "INBOX_SERVICE_KEY=${{ secrets.INBOX_SERVICE_KEY }}"                     >> .env.ci
             [ -n "${{ secrets.STOREFRONT_INTERNAL_OPS_KEY }}" ] && echo "STOREFRONT_INTERNAL_OPS_KEY=${{ secrets.STOREFRONT_INTERNAL_OPS_KEY }}" >> .env.ci
             [ -n "${{ secrets.MOBILITY_INTERNAL_KEY }}" ]       && echo "MOBILITY_INTERNAL_KEY=${{ secrets.MOBILITY_INTERNAL_KEY }}"             >> .env.ci
             [ -n "${{ secrets.VAPID_PUBLIC_KEY }}" ]            && echo "VAPID_PUBLIC_KEY=${{ secrets.VAPID_PUBLIC_KEY }}"                       >> .env.ci
@@ -391,6 +392,7 @@ jobs:
             [ -n "${{ secrets.CF_R2_PREFIX }}" ]                && echo "CF_R2_PREFIX=${{ secrets.CF_R2_PREFIX }}"                               >> .env.ci
             [ -n "${{ secrets.INTERNAL_SERVICE_KEY }}" ]        && echo "INTERNAL_SERVICE_KEY=${{ secrets.INTERNAL_SERVICE_KEY }}"               >> .env.ci
             [ -n "${{ secrets.EMAIL_INTERNAL_KEY }}" ]          && echo "EMAIL_INTERNAL_KEY=${{ secrets.EMAIL_INTERNAL_KEY }}"                   >> .env.ci
+            [ -n "${{ secrets.INBOX_SERVICE_KEY }}" ]           && echo "INBOX_SERVICE_KEY=${{ secrets.INBOX_SERVICE_KEY }}"                     >> .env.ci
             [ -n "${{ secrets.STOREFRONT_INTERNAL_OPS_KEY }}" ] && echo "STOREFRONT_INTERNAL_OPS_KEY=${{ secrets.STOREFRONT_INTERNAL_OPS_KEY }}" >> .env.ci
             [ -n "${{ secrets.MOBILITY_INTERNAL_KEY }}" ]       && echo "MOBILITY_INTERNAL_KEY=${{ secrets.MOBILITY_INTERNAL_KEY }}"             >> .env.ci
             [ -n "${{ secrets.VAPID_PUBLIC_KEY }}" ]            && echo "VAPID_PUBLIC_KEY=${{ secrets.VAPID_PUBLIC_KEY }}"                       >> .env.ci
