@@ -75,6 +75,7 @@ on:
       EMAIL_INTERNAL_KEY:           { required: false }
       STOREFRONT_INTERNAL_OPS_KEY:  { required: false }
       MOBILITY_INTERNAL_KEY:        { required: false }
+      CHAT_INTERNAL_KEY:            { required: false }
       VAPID_PUBLIC_KEY:             { required: false }
       VAPID_PRIVATE_KEY:            { required: false }
 
@@ -283,6 +284,7 @@ jobs:
             [ -n "${{ secrets.INBOX_SERVICE_KEY }}" ]           && echo "INBOX_SERVICE_KEY=${{ secrets.INBOX_SERVICE_KEY }}"                     >> .env.ci
             [ -n "${{ secrets.STOREFRONT_INTERNAL_OPS_KEY }}" ] && echo "STOREFRONT_INTERNAL_OPS_KEY=${{ secrets.STOREFRONT_INTERNAL_OPS_KEY }}" >> .env.ci
             [ -n "${{ secrets.MOBILITY_INTERNAL_KEY }}" ]       && echo "MOBILITY_INTERNAL_KEY=${{ secrets.MOBILITY_INTERNAL_KEY }}"             >> .env.ci
+            [ -n "${{ secrets.CHAT_INTERNAL_KEY }}" ]           && echo "CHAT_INTERNAL_KEY=${{ secrets.CHAT_INTERNAL_KEY }}"                     >> .env.ci
             [ -n "${{ secrets.VAPID_PUBLIC_KEY }}" ]            && echo "VAPID_PUBLIC_KEY=${{ secrets.VAPID_PUBLIC_KEY }}"                       >> .env.ci
             [ -n "${{ secrets.VAPID_PRIVATE_KEY }}" ]           && echo "VAPID_PRIVATE_KEY=${{ secrets.VAPID_PRIVATE_KEY }}"                     >> .env.ci
 
