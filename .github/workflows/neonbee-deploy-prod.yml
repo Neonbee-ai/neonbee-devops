@@ -135,6 +135,13 @@ on:
       PAT_TOKEN:                     { required: false }
       INTERNAL_SERVICE_KEY:          { required: false }
 
+# Allow Node.js 20 actions (checkout, setup-node, cache, ssh-agent) to run on
+# self-hosted runners where the runner enforces Node.js 24 (enforced from
+# June 16 2026 on runner ≥ 2.335.0). Remove once all action deps are upgraded
+# to Node.js 24-native versions.
+env:
+  ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: true
+
 # ═════════════════════════════════════════════════════════════════════════════
 # GATE — identical for all 46 repos
 # ═════════════════════════════════════════════════════════════════════════════

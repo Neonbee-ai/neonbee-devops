@@ -55,6 +55,9 @@ on:
       INTERNAL_TOOLS_VM:    { required: false }
       PAT_TOKEN:            { required: false }
 
+env:
+  ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: true
+
 jobs:
 
   # ── Gate: single merged job ────────────────────────────────────────────────
