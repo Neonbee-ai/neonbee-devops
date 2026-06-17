@@ -362,6 +362,9 @@ jobs:
           fi
 
           if [ -d "_shell-fe" ]; then
+            # Ensure the scoped dir exists even when npm ci failed to create it
+            # (e.g. when the file: dep for @so360/cross-link couldn't resolve).
+            mkdir -p node_modules/@so360
             for pkg in shell-context design-system event-bus formatters theme; do
               rm -rf "node_modules/@so360/$pkg"
               cp -r "$GITHUB_WORKSPACE/_shell-fe/packages/$pkg" "node_modules/@so360/$pkg"
