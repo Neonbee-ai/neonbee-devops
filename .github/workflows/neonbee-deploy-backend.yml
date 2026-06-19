@@ -216,11 +216,14 @@ jobs:
           npm ci --legacy-peer-deps
           npm run build
 
-      - uses: webfactory/ssh-agent@v0.9.0
-        with:
-          ssh-private-key: |
-            ${{ secrets.CONTABO_SSH_KEY }}
-            ${{ secrets.DIGITALOCEAN_SSH_KEY }}
+      - name: Setup SSH agent
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          eval "$(ssh-agent -s)"
+          echo "${{ secrets.CONTABO_SSH_KEY }}" | ssh-add -
+          echo "${{ secrets.DIGITALOCEAN_SSH_KEY }}" | ssh-add - 2>/dev/null || true
+          echo "SSH_AUTH_SOCK=$SSH_AUTH_SOCK" >> "$GITHUB_ENV"
+          echo "SSH_AGENT_PID=$SSH_AGENT_PID" >> "$GITHUB_ENV"
 
       # ── Dev ──────────────────────────────────────────────────────────────
       - name: Deploy to Dev
