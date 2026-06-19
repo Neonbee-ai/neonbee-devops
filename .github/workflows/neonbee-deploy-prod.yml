@@ -215,11 +215,16 @@ jobs:
           RC=0
           TEST_SCRIPT=$(node -e "console.log(require('./package.json').scripts?.test || '')" 2>/dev/null)
           if echo "$TEST_SCRIPT" | grep -q "vitest"; then
-            timeout 120 npm test -- --passWithNoTests 2>/dev/null || RC=$?
+            EXTRA_FLAGS="--passWithNoTests"
           else
-            timeout 120 npm test -- --passWithNoTests --forceExit --ci 2>/dev/null || RC=$?
+            EXTRA_FLAGS="--passWithNoTests --forceExit --ci"
           fi
-          [ $RC -eq 124 ] && echo "::warning::Tests hung — forcing exit as success" && RC=0
+          if command -v timeout &>/dev/null; then
+            timeout 120 npm test -- $EXTRA_FLAGS 2>/dev/null || RC=$?
+            [ $RC -eq 124 ] && echo "::warning::Tests hung — forcing exit as success" && RC=0
+          else
+            npm test -- $EXTRA_FLAGS 2>/dev/null || RC=$?
+          fi
           TEST_EXIT=$RC
 
           wait $AUDIT_PID; AUDIT_EXIT=$?
