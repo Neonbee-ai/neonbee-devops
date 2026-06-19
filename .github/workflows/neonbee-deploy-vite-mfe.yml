@@ -71,6 +71,7 @@ jobs:
         with:
           node-version: ${{ inputs.node_version }}
       - uses: actions/cache@v4
+        if: runner.os == 'Linux'
         with:
           path: ~/.npm
           key: npm-${{ runner.os }}-${{ hashFiles('**/package-lock.json') }}
@@ -127,6 +128,7 @@ jobs:
           node-version: ${{ inputs.node_version }}
 
       - uses: actions/cache@v4
+        if: runner.os == 'Linux'
         with:
           path: ~/.npm
           key: npm-${{ runner.os }}-${{ hashFiles('**/package-lock.json') }}
