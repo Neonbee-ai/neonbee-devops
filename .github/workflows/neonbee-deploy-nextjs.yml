@@ -91,7 +91,10 @@ jobs:
           if command -v gitleaks &>/dev/null; then
             gitleaks detect --source . --verbose
           else
-            curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" | tar -xz -C /tmp/
+            _GL_OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+            _GL_ARCH=$(uname -m)
+            case "$_GL_ARCH" in x86_64) _GL_ARCH="x64" ;; arm64|aarch64) _GL_ARCH="arm64" ;; esac
+            curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_${_GL_OS}_${_GL_ARCH}.tar.gz" | tar -xz -C /tmp/
             /tmp/gitleaks detect --source . --verbose
           fi
 
