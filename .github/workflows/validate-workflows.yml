@@ -8,11 +8,12 @@ on:
 
 jobs:
   lint:
-    runs-on: [self-hosted, Linux]
+    runs-on: [self-hosted, contabo]
     steps:
       - uses: actions/checkout@v4
       - name: Validate workflow YAML syntax
         run: |
+          pip3 install pyyaml -q --break-system-packages 2>/dev/null || pip3 install pyyaml -q 2>/dev/null || true
           for f in .github/workflows/*.yml; do
             echo "Checking $f..."
             python3 -c "import yaml, sys; yaml.safe_load(open('$f'))" && echo "OK: $f" || { echo "FAIL: $f"; exit 1; }

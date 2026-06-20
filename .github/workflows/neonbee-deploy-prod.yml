@@ -351,6 +351,8 @@ jobs:
           repository: Neonbee-ai/so360-shell-fe
           token: ${{ secrets.PAT_TOKEN }}
           path: _shell-fe
+          fetch-depth: 1
+          sparse-checkout: packages
 
       - name: Build (vite-mfe)
         if: inputs.deploy_type == 'vite-mfe' && !inputs.is_shell
