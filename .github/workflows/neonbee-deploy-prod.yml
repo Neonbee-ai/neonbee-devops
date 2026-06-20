@@ -318,7 +318,7 @@ jobs:
             echo "NEXT_PUBLIC_VAPID_KEY=${{ secrets.VAPID_PUBLIC_KEY }}"
             echo "PROD_IP=${{ secrets.PROD_SERVER_IP }}"
           } >> .env.local
-          sed -i '/=$/d' .env.local
+          sed '/=$/d' .env.local > .env.local.tmp && mv .env.local.tmp .env.local
           npm run build
 
       # ── Build: Vite MFE (shell-fe) ─────────────────────────────────────────
@@ -334,13 +334,13 @@ jobs:
           cat <<'VITE_EOF' > .env
           ${{ inputs.vite_env }}
           VITE_EOF
-          sed -i 's/^[[:space:]]*//' .env
+          sed 's/^[[:space:]]*//' .env > .env.tmp && mv .env.tmp .env
           {
             echo "VITE_SUPABASE_URL=${{ secrets.SUPABASE_URL }}"
             echo "VITE_SUPABASE_ANON_KEY=${{ secrets.SUPABASE_ANON_KEY }}"
             echo "VITE_VAPID_PUBLIC_KEY=${{ secrets.VITE_VAPID_PUBLIC_KEY }}"
           } >> .env
-          sed -i '/=$/d' .env
+          sed '/=$/d' .env > .env.tmp && mv .env.tmp .env
           npm run build
 
       # ── Build: Vite MFE (standard — checkout shell-fe for packages) ────────
@@ -394,13 +394,13 @@ jobs:
           cat <<'VITE_EOF' > .env
           ${{ inputs.vite_env }}
           VITE_EOF
-          sed -i 's/^[[:space:]]*//' .env
+          sed 's/^[[:space:]]*//' .env > .env.tmp && mv .env.tmp .env
           {
             echo "VITE_SUPABASE_URL=${{ secrets.SUPABASE_URL }}"
             echo "VITE_SUPABASE_ANON_KEY=${{ secrets.SUPABASE_ANON_KEY }}"
             echo "VITE_VAPID_PUBLIC_KEY=${{ secrets.VITE_VAPID_PUBLIC_KEY }}"
           } >> .env
-          sed -i '/=$/d' .env
+          sed '/=$/d' .env > .env.tmp && mv .env.tmp .env
           npm run build
 
           # Remove the symlink after build so subsequent shell-fe runs on this
