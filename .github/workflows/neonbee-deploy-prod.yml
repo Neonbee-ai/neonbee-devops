@@ -147,7 +147,7 @@ env:
 jobs:
 
   gate:
-    runs-on: [self-hosted, Linux]
+    runs-on: [self-hosted, contabo]
     timeout-minutes: 20
     steps:
       # ── Remove stale workspace symlink from cross-repo builds ───────────────
@@ -245,7 +245,7 @@ jobs:
 
   build-deploy:
     needs: [gate]
-    runs-on: [self-hosted, Linux]
+    runs-on: [self-hosted, contabo]
     timeout-minutes: 20
     concurrency:
       group: neonbee-prod-${{ inputs.service_name }}
