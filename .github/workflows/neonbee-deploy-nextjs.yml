@@ -58,7 +58,7 @@ jobs:
 
   # ── Gate: single merged job ────────────────────────────────────────────────
   gate:
-    runs-on: [self-hosted, Linux]
+    runs-on: [self-hosted, contabo]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -102,7 +102,7 @@ jobs:
   # ── Build + Deploy (gate must pass) ───────────────────────────────────────
   build-deploy:
     needs: [gate]
-    runs-on: [self-hosted, Linux]
+    runs-on: [self-hosted, contabo]
     concurrency:
       group: neonbee-deploy-${{ inputs.service_name }}-${{ github.ref_name }}
       cancel-in-progress: false
