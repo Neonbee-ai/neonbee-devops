@@ -344,15 +344,18 @@ jobs:
           npm run build
 
       # ── Build: Vite MFE (standard — checkout shell-fe for packages) ────────
+      # Use raw git clone (git smart-HTTP protocol) instead of actions/checkout
+      # to avoid hitting the GitHub REST API rate limit (5 000 req/hr per PAT).
+      # Multiple FE repos building concurrently exhaust the limit via checkout@v4's
+      # preliminary REST calls; plain git clone bypasses the REST API entirely.
       - name: Checkout shell-fe packages
         if: inputs.deploy_type == 'vite-mfe' && !inputs.is_shell && inputs.needs_shell_packages
-        uses: actions/checkout@v4
-        with:
-          repository: Neonbee-ai/so360-shell-fe
-          token: ${{ secrets.PAT_TOKEN }}
-          path: _shell-fe
-          fetch-depth: 1
-          sparse-checkout: packages
+        run: |
+          rm -rf _shell-fe
+          git clone --depth 1 --filter=blob:none --sparse \
+            "https://x-access-token:${{ secrets.PAT_TOKEN }}@github.com/Neonbee-ai/so360-shell-fe.git" \
+            _shell-fe
+          cd _shell-fe && git sparse-checkout set packages
 
       - name: Build (vite-mfe)
         if: inputs.deploy_type == 'vite-mfe' && !inputs.is_shell
