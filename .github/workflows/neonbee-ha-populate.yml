@@ -70,7 +70,7 @@ jobs:
           HA_IP: ${{ secrets.HA_VM_IP }}
         run: |
           DIRS=(
-            /github/neonbee/so360-core-be
+            /github/neonbee/so360-core
             /github/neonbee/so360-crm-be
             /github/neonbee/so360-inventory-be
             /github/neonbee/so360-accounting-be
@@ -83,7 +83,7 @@ jobs:
             /github/neonbee/so360-insight-be
             /github/neonbee/so360-subscription-be
             /github/neonbee/so360-forms-be
-            /github/neonbee/so360-dailystore-be
+            /github/neonbee/so360-dailystore-admin-be
             /github/neonbee/so360-fulfillment-be
             /github/neonbee/so360-support-be
             /github/neonbee/so360-manufacturing-be
@@ -122,7 +122,7 @@ jobs:
             nvm use 22
 
             SERVICES=(
-              "core-ha:/github/neonbee/so360-core-be:8000"
+              "core-ha:/github/neonbee/so360-core:8000"
               "crm-ha:/github/neonbee/so360-crm-be:8003"
               "inventory-ha:/github/neonbee/so360-inventory-be:8006"
               "accounting-ha:/github/neonbee/so360-accounting-be:8008"
@@ -135,7 +135,7 @@ jobs:
               "insight-ha:/github/neonbee/so360-insight-be:8023"
               "subscription-ha:/github/neonbee/so360-subscription-be:8026"
               "forms-ha:/github/neonbee/so360-forms-be:8027"
-              "dailystore-ha:/github/neonbee/so360-dailystore-be:8029"
+              "dailystore-ha:/github/neonbee/so360-dailystore-admin-be:8029"
               "fulfillment-ha:/github/neonbee/so360-fulfillment-be:8032"
               "support-ha:/github/neonbee/so360-support-be:8033"
               "manufacturing-ha:/github/neonbee/so360-manufacturing-be:8034"
