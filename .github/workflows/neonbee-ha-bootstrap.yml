@@ -1,0 +1,149 @@
+# =============================================================================
+# Neonbee — HA Standby Bootstrap (one-time provisioning, workflow_dispatch only)
+# =============================================================================
+# Run ONCE to prepare the Dev VM (84.247.131.148) as the warm standby.
+#
+# Prerequisites (manual, before running this workflow):
+#   1. Copy /etc/ssl/cloudflare/neonbee.app.crt and neonbee.app.key from prod VM
+#      to /etc/ssl/cloudflare/ on Dev VM
+#   2. Confirm nvm + Node 22 is installed on Dev VM
+# =============================================================================
+
+name: "Bootstrap HA Standby VM"
+
+on:
+  workflow_dispatch:
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  bootstrap:
+    runs-on: [self-hosted, contabo]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.CONTABO_SSH_KEY }}
+
+      - name: Verify HA VM connectivity
+        env:
+          HA_IP: ${{ secrets.HA_VM_IP }}
+        run: |
+          [ -z "$HA_IP" ] && echo "ERROR: HA_VM_IP secret is not set" && exit 1
+          ssh-keyscan -H $HA_IP >> ~/.ssh/known_hosts 2>/dev/null
+          ssh root@$HA_IP "echo 'HA VM reachable: $(hostname)'"
+
+      - name: Check port availability on HA VM
+        env:
+          HA_IP: ${{ secrets.HA_VM_IP }}
+        run: |
+          ssh root@$HA_IP "
+            CONFLICTS=\$(netstat -tlnp 2>/dev/null | grep -E ':(800[0-9]|801[0-9]|802[0-9]|803[0-9]|804[0-9]) ' || true)
+            if [ -n \"\$CONFLICTS\" ]; then
+              echo 'WARNING: Some 8xxx ports already in use:'
+              echo \"\$CONFLICTS\"
+            else
+              echo 'All 8xxx ports are free'
+            fi
+          "
+
+      - name: Create web root directories
+        env:
+          HA_IP: ${{ secrets.HA_VM_IP }}
+        run: |
+          ssh root@$HA_IP "
+            set -e
+            mkdir -p /var/www/cdn.neonbee.app/html/{crm,inventory,accounting,projects,timesheet,dailystore-admin,people,neura,flow,insight,inbox,support,fulfillment,forms,manufacturing,documents,sign,chat,p}
+            mkdir -p /var/www/dashboard.neonbee.app/html
+            mkdir -p /var/www/sso.neonbee.app/html
+            echo 'Web root directories ready'
+          "
+
+      - name: Verify Cloudflare cert on HA VM
+        env:
+          HA_IP: ${{ secrets.HA_VM_IP }}
+        run: |
+          ssh root@$HA_IP "
+            if [ -f /etc/ssl/cloudflare/neonbee.app.crt ] && [ -f /etc/ssl/cloudflare/neonbee.app.key ]; then
+              echo 'Cloudflare origin cert present'
+              openssl x509 -in /etc/ssl/cloudflare/neonbee.app.crt -noout -subject -dates 2>/dev/null || true
+            else
+              echo 'WARNING: Cloudflare origin cert missing at /etc/ssl/cloudflare/'
+              echo 'Copy from prod VM: scp root@68.183.86.248:/etc/ssl/cloudflare/neonbee.app.{crt,key} /etc/ssl/cloudflare/'
+              exit 1
+            fi
+          "
+
+      - name: Install nginx (if not present)
+        env:
+          HA_IP: ${{ secrets.HA_VM_IP }}
+        run: |
+          ssh root@$HA_IP "
+            if ! command -v nginx &>/dev/null; then
+              apt-get update -q && apt-get install -y nginx
+              echo 'nginx installed'
+            else
+              echo \"nginx already present: \$(nginx -v 2>&1)\"
+            fi
+            systemctl enable nginx
+          "
+
+      - name: Create nginx api-proxy-headers snippet
+        env:
+          HA_IP: ${{ secrets.HA_VM_IP }}
+        run: |
+          ssh root@$HA_IP "
+            mkdir -p /etc/nginx/snippets
+            if [ ! -f /etc/nginx/snippets/api-proxy-headers.conf ]; then
+              printf '%s\n' \
+                'proxy_set_header Host \$host;' \
+                'proxy_set_header X-Real-IP \$remote_addr;' \
+                'proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;' \
+                'proxy_set_header X-Forwarded-Proto \$scheme;' \
+                'proxy_read_timeout 30s;' \
+                > /etc/nginx/snippets/api-proxy-headers.conf
+              echo 'Created api-proxy-headers.conf'
+            else
+              echo 'api-proxy-headers.conf already exists'
+            fi
+          "
+
+      - name: Deploy HA nginx configs
+        env:
+          HA_IP: ${{ secrets.HA_VM_IP }}
+        run: |
+          ssh-keyscan -H $HA_IP >> ~/.ssh/known_hosts 2>/dev/null
+          for conf in nginx/ha-api.neonbee.app.conf nginx/ha-cdn.neonbee.app.conf nginx/ha-dashboard.neonbee.app.conf nginx/ha-sso.neonbee.app.conf; do
+            DEST_NAME=$(basename $conf | sed 's/^ha-//')
+            rsync -avz "$conf" "root@$HA_IP:/etc/nginx/sites-available/$DEST_NAME"
+            echo "Deployed $conf -> /etc/nginx/sites-available/$DEST_NAME"
+          done
+          ssh root@$HA_IP "
+            set -e
+            cd /etc/nginx/sites-enabled
+            for conf in api.neonbee.app.conf cdn.neonbee.app.conf dashboard.neonbee.app.conf sso.neonbee.app.conf; do
+              [ -f /etc/nginx/sites-available/\$conf ] && ln -sf /etc/nginx/sites-available/\$conf \$conf || true
+            done
+            nginx -t && nginx -s reload
+            echo 'nginx reloaded with HA configs'
+          "
+
+      - name: Verify nvm + Node 22
+        env:
+          HA_IP: ${{ secrets.HA_VM_IP }}
+        run: |
+          ssh root@$HA_IP "
+            export NVM_DIR=\"\$HOME/.nvm\"
+            [ -s \"\$NVM_DIR/nvm.sh\" ] && \. \"\$NVM_DIR/nvm.sh\"
+            nvm use 22 && echo \"Node: \$(node -v) | npm: \$(npm -v)\" || echo 'WARNING: nvm/node 22 not found'
+          "
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "Bootstrap complete. Next steps:"
+          echo "  1. Trigger so360-core prod deploy to populate HA backends"
+          echo "  2. Run Setup Cloudflare Load Balancer workflow"
