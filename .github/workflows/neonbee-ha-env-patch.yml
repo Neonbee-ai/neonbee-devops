@@ -44,7 +44,7 @@ jobs:
           echo "CHANNEL_KEY present: $([ -n "$CHANNEL_KEY" ] && echo yes || echo MISSING)"
 
           [ -z "$DOCS_KEY" ] && echo "ERROR: DOCS_INTERNAL_SERVICE_KEY not found on prod" && exit 1
-          [ -z "$CHANNEL_KEY" ] && echo "ERROR: CHANNEL_ENCRYPTION_KEY not found on prod" && exit 1
+          [ -z "$CHANNEL_KEY" ] && echo "WARNING: CHANNEL_ENCRYPTION_KEY not found on prod — skipping dailystore patch"
 
           echo "::add-mask::$DOCS_KEY"
           echo "::add-mask::$CHANNEL_KEY"
@@ -71,13 +71,17 @@ jobs:
               echo "Patched DOCS_INTERNAL_SERVICE_KEY in \$DIR"
             done
 
-            # dailystore needs CHANNEL_ENCRYPTION_KEY
-            DIR=/github/neonbee/so360-dailystore-admin-be
-            if [ -f "\$DIR/.env" ]; then
-              grep -q '^CHANNEL_ENCRYPTION_KEY=' "\$DIR/.env" && \
-                sed -i "s|^CHANNEL_ENCRYPTION_KEY=.*|CHANNEL_ENCRYPTION_KEY=\$CHANNEL_KEY|" "\$DIR/.env" || \
-                echo "CHANNEL_ENCRYPTION_KEY=\$CHANNEL_KEY" >> "\$DIR/.env"
-              echo "Patched CHANNEL_ENCRYPTION_KEY in \$DIR"
+            # dailystore needs CHANNEL_ENCRYPTION_KEY (skip if not on prod)
+            if [ -n "$CHANNEL_KEY" ]; then
+              DIR=/github/neonbee/so360-dailystore-admin-be
+              if [ -f "\$DIR/.env" ]; then
+                grep -q '^CHANNEL_ENCRYPTION_KEY=' "\$DIR/.env" && \
+                  sed -i "s|^CHANNEL_ENCRYPTION_KEY=.*|CHANNEL_ENCRYPTION_KEY=\$CHANNEL_KEY|" "\$DIR/.env" || \
+                  echo "CHANNEL_ENCRYPTION_KEY=\$CHANNEL_KEY" >> "\$DIR/.env"
+                echo "Patched CHANNEL_ENCRYPTION_KEY in \$DIR"
+              fi
+            else
+              echo "SKIP dailystore CHANNEL_ENCRYPTION_KEY (not set on prod)"
             fi
 
             # Restart affected services
