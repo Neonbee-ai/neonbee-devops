@@ -43,7 +43,12 @@ jobs:
         run: |
           echo "Setting prod-vm enabled=$PROD_ENABLED"
 
-          RESP=$(curl -sf -X PUT \
+          # First verify the pool still exists and get current state
+          POOL_CHECK=$(curl -s "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT/load_balancers/pools/${{ env.POOL_ID }}" \
+            -H "Authorization: Bearer $CF_TOKEN")
+          echo "Pool check: $POOL_CHECK" | python3 -c "import sys,json; d=json.load(sys.stdin.read().split('Pool check: ',1)[1].strip() if 'Pool check: ' in sys.stdin.read() else sys.stdin.read()); print('Pool exists:', d.get('success'))" 2>/dev/null || echo "Pool check: $POOL_CHECK" | head -c 200
+
+          RESP=$(curl -s -X PUT \
             "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT/load_balancers/pools/${{ env.POOL_ID }}" \
             -H "Authorization: Bearer $CF_TOKEN" \
             -H "Content-Type: application/json" \
@@ -56,6 +61,7 @@ jobs:
               \"enabled\": true,
               \"description\": \"neonbee-ha-failover\"
             }")
+          echo "CF API raw response (truncated): $(echo "$RESP" | head -c 300)"
 
           echo "$RESP" | python3 -c "
           import sys, json
