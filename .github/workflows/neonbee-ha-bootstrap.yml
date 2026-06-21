@@ -62,19 +62,21 @@ jobs:
             echo 'Web root directories ready'
           "
 
-      - name: Verify Cloudflare cert on HA VM
+      - name: Copy Cloudflare cert from Prod → HA VM
         env:
           HA_IP: ${{ secrets.HA_VM_IP }}
         run: |
+          ssh root@$HA_IP "mkdir -p /etc/ssl/cloudflare"
+          # Copy cert files from Prod VM to HA VM via agent-forwarded SSH
+          ssh -A root@68.183.86.248 "
+            rsync -az -e 'ssh -o StrictHostKeyChecking=no' \
+              /etc/ssl/cloudflare/neonbee.app.crt \
+              /etc/ssl/cloudflare/neonbee.app.key \
+              root@$HA_IP:/etc/ssl/cloudflare/
+          "
           ssh root@$HA_IP "
-            if [ -f /etc/ssl/cloudflare/neonbee.app.crt ] && [ -f /etc/ssl/cloudflare/neonbee.app.key ]; then
-              echo 'Cloudflare origin cert present'
-              openssl x509 -in /etc/ssl/cloudflare/neonbee.app.crt -noout -subject -dates 2>/dev/null || true
-            else
-              echo 'WARNING: Cloudflare origin cert missing at /etc/ssl/cloudflare/'
-              echo 'Copy from prod VM: scp root@68.183.86.248:/etc/ssl/cloudflare/neonbee.app.{crt,key} /etc/ssl/cloudflare/'
-              exit 1
-            fi
+            openssl x509 -in /etc/ssl/cloudflare/neonbee.app.crt -noout -subject -dates
+            echo 'Cloudflare origin cert installed on HA VM'
           "
 
       - name: Install nginx (if not present)
