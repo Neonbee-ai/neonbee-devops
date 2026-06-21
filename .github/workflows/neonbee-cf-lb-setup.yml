@@ -62,17 +62,17 @@ jobs:
           CF_TOKEN: ${{ steps.creds.outputs.token }}
           CF_ACCOUNT: ${{ steps.creds.outputs.account_id }}
         run: |
-          RESP=$(curl -sf "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT/load_balancers/monitors" \
+          echo "Account ID: $CF_ACCOUNT"
+          echo "Token prefix: ${CF_TOKEN:0:8}..."
+          RESP=$(curl -s "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT/load_balancers/monitors" \
             -H "Authorization: Bearer $CF_TOKEN" \
-            -H "Content-Type: application/json" 2>/dev/null)
+            -H "Content-Type: application/json")
+          echo "CF API response: $RESP"
           if echo "$RESP" | grep -q '"success":true'; then
             echo "Token has Load Balancing access"
           else
             CODE=$(echo "$RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('errors',[{}])[0].get('code','?'))" 2>/dev/null)
             echo "ERROR: CF token lacks Load Balancing permissions (code: $CODE)"
-            echo "Create a token with Account:Load Balancing:Edit + Zone:Load Balancing:Edit"
-            echo "Add as org secret CF_LB_API_TOKEN and re-run this workflow"
-            echo "$RESP"
             exit 1
           fi
 
