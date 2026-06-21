@@ -1,0 +1,232 @@
+# =============================================================================
+# Neonbee — HA Standby Populate (one-time, workflow_dispatch only)
+# =============================================================================
+# Copies all prod artifacts directly from Prod VM → Dev VM (no rebuild).
+# Run AFTER neonbee-ha-bootstrap.yml completes.
+#
+# What it does:
+#   1. rsync frontends:  Prod /var/www/* → Dev VM (same paths)
+#   2. rsync backends:   Prod /github/neonbee/*/dist/ → Dev VM (skip .env)
+#   3. npm install + write .env from secrets + start PM2 with -ha suffix
+#   4. nginx reload on Dev VM
+# =============================================================================
+
+name: "HA Standby — Populate from Prod"
+
+on:
+  workflow_dispatch:
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  PROD_IP: '68.183.86.248'
+
+jobs:
+  populate:
+    runs-on: [self-hosted, contabo]
+    timeout-minutes: 30
+    steps:
+      - uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: |
+            ${{ secrets.DIGITALOCEAN_SSH_KEY }}
+            ${{ secrets.CONTABO_SSH_KEY }}
+
+      - name: Setup known hosts
+        env:
+          HA_IP: ${{ secrets.HA_VM_IP }}
+        run: |
+          ssh-keyscan -H ${{ env.PROD_IP }} >> ~/.ssh/known_hosts 2>/dev/null
+          ssh-keyscan -H $HA_IP >> ~/.ssh/known_hosts 2>/dev/null
+          # Allow Prod VM to reach HA VM directly for rsync
+          ssh root@${{ env.PROD_IP }} "ssh-keyscan -H $HA_IP >> ~/.ssh/known_hosts 2>/dev/null || true"
+          echo "Known hosts ready"
+
+      # ── Frontends: Prod → HA VM ─────────────────────────────────────────────
+      - name: Sync frontends (Prod → HA VM)
+        env:
+          HA_IP: ${{ secrets.HA_VM_IP }}
+        run: |
+          ssh root@$HA_IP "mkdir -p \
+            /var/www/cdn.neonbee.app/html \
+            /var/www/dashboard.neonbee.app/html \
+            /var/www/sso.neonbee.app/html"
+
+          # Agent-forwarded SSH: rsync directly Prod → HA (no runner intermediary)
+          ssh -A root@${{ env.PROD_IP }} "
+            rsync -az --delete -e 'ssh -o StrictHostKeyChecking=no' \
+              /var/www/cdn.neonbee.app/html/ root@$HA_IP:/var/www/cdn.neonbee.app/html/
+            rsync -az --delete -e 'ssh -o StrictHostKeyChecking=no' \
+              /var/www/dashboard.neonbee.app/html/ root@$HA_IP:/var/www/dashboard.neonbee.app/html/
+            rsync -az --delete -e 'ssh -o StrictHostKeyChecking=no' \
+              /var/www/sso.neonbee.app/html/ root@$HA_IP:/var/www/sso.neonbee.app/html/
+            echo 'Frontend rsync complete'
+          "
+          ssh root@$HA_IP "nginx -t && nginx -s reload"
+          echo "Frontends synced + nginx reloaded"
+
+      # ── Backends: rsync dist/ Prod → HA VM ─────────────────────────────────
+      - name: Sync backend dist/ (Prod → HA VM)
+        env:
+          HA_IP: ${{ secrets.HA_VM_IP }}
+        run: |
+          DIRS=(
+            /github/neonbee/so360-core-be
+            /github/neonbee/so360-crm-be
+            /github/neonbee/so360-inventory-be
+            /github/neonbee/so360-accounting-be
+            /github/neonbee/so360-projects-be
+            /github/neonbee/so360-timesheet-be
+            /github/neonbee/so360-people-connect-be
+            /github/neonbee/so360-inbox-be
+            /github/neonbee/so360-neura-be
+            /github/neonbee/so360-flow-be
+            /github/neonbee/so360-insight-be
+            /github/neonbee/so360-subscription-be
+            /github/neonbee/so360-forms-be
+            /github/neonbee/so360-dailystore-be
+            /github/neonbee/so360-fulfillment-be
+            /github/neonbee/so360-support-be
+            /github/neonbee/so360-manufacturing-be
+            /github/neonbee/so360-chat-be
+            /github/neonbee/so360-documents-be
+            /github/neonbee/so360-sign-be
+            /github/neonbee/so360-mobility-be
+            /github/neonbee/so360-folio-be
+          )
+          for DIR in "${DIRS[@]}"; do
+            echo "=== Syncing $DIR ==="
+            ssh root@$HA_IP "mkdir -p '$DIR'"
+            ssh -A root@${{ env.PROD_IP }} "
+              if [ -d '$DIR/dist' ]; then
+                rsync -az --delete -e 'ssh -o StrictHostKeyChecking=no' \
+                  '$DIR/dist/' 'root@$HA_IP:$DIR/dist/'
+                rsync -az -e 'ssh -o StrictHostKeyChecking=no' \
+                  '$DIR/package.json' '$DIR/package-lock.json' \
+                  'root@$HA_IP:$DIR/' 2>/dev/null || true
+                echo 'Synced $DIR'
+              else
+                echo 'SKIP: $DIR/dist not found on Prod'
+              fi
+            " || echo "WARNING: sync failed for $DIR"
+          done
+          echo "All backend dist/ synced"
+
+      # ── npm install + .env + PM2 on HA VM (parallel per service) ───────────
+      - name: Install deps + write .env + start PM2 on HA VM
+        env:
+          HA_IP: ${{ secrets.HA_VM_IP }}
+        run: |
+          ssh root@$HA_IP "bash -s" << 'SETUP_ALL'
+            export NVM_DIR="$HOME/.nvm"
+            [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+            nvm use 22
+
+            SERVICES=(
+              "core-ha:/github/neonbee/so360-core-be:8000"
+              "crm-ha:/github/neonbee/so360-crm-be:8003"
+              "inventory-ha:/github/neonbee/so360-inventory-be:8006"
+              "accounting-ha:/github/neonbee/so360-accounting-be:8008"
+              "projects-ha:/github/neonbee/so360-projects-be:8010"
+              "timesheet-ha:/github/neonbee/so360-timesheet-be:8012"
+              "people-connect-ha:/github/neonbee/so360-people-connect-be:8015"
+              "inbox-ha:/github/neonbee/so360-inbox-be:8017"
+              "neura-ha:/github/neonbee/so360-neura-be:8018"
+              "flow-ha:/github/neonbee/so360-flow-be:8021"
+              "insight-ha:/github/neonbee/so360-insight-be:8023"
+              "subscription-ha:/github/neonbee/so360-subscription-be:8026"
+              "forms-ha:/github/neonbee/so360-forms-be:8027"
+              "dailystore-ha:/github/neonbee/so360-dailystore-be:8029"
+              "fulfillment-ha:/github/neonbee/so360-fulfillment-be:8032"
+              "support-ha:/github/neonbee/so360-support-be:8033"
+              "manufacturing-ha:/github/neonbee/so360-manufacturing-be:8034"
+              "chat-ha:/github/neonbee/so360-chat-be:8036"
+              "documents-ha:/github/neonbee/so360-documents-be:8037"
+              "sign-ha:/github/neonbee/so360-sign-be:8038"
+              "mobility-ha:/github/neonbee/so360-mobility-be:8040"
+              "folio-ha:/github/neonbee/so360-folio-be:8044"
+            )
+
+            setup_service() {
+              local NAME=$1 DIR=$2 PORT=$3
+              [ -d "$DIR/dist" ] || { echo "SKIP $NAME: $DIR/dist not found"; return 0; }
+              cd "$DIR"
+              npm install --omit=dev --legacy-peer-deps --silent 2>/dev/null
+
+              {
+                echo "NODE_ENV=production"
+                echo "PORT=$PORT"
+                echo "SUPABASE_URL=${{ secrets.SUPABASE_URL }}"
+                echo "SUPABASE_KEY=${{ secrets.SUPABASE_ANON_KEY }}"
+                echo "SUPABASE_ANON_KEY=${{ secrets.SUPABASE_ANON_KEY }}"
+                echo "SUPABASE_SERVICE_KEY=${{ secrets.SUPABASE_SERVICE_KEY }}"
+                echo "SUPABASE_SERVICE_ROLE_KEY=${{ secrets.SUPABASE_SERVICE_KEY }}"
+                echo "JWT_SECRET=${{ secrets.JWT_SECRET }}"
+                echo "CORS_ORIGINS=${{ secrets.CORS_ORIGINS_PROD }}"
+                echo "ENCRYPTION_KEY=${{ secrets.ENCRYPTION_KEY }}"
+                echo "CF_R2_ACCOUNT_ID=${{ secrets.CF_R2_ACCOUNT_ID }}"
+                echo "CF_R2_ACCESS_KEY_ID=${{ secrets.CF_R2_ACCESS_KEY_ID }}"
+                echo "CF_R2_SECRET_ACCESS_KEY=${{ secrets.CF_R2_SECRET_ACCESS_KEY }}"
+                echo "CF_R2_BUCKET=${{ secrets.CF_R2_BUCKET }}"
+                echo "CF_R2_PUBLIC_URL=${{ secrets.CF_R2_PUBLIC_URL }}"
+                echo "CF_R2_PREFIX=${{ secrets.CF_R2_PREFIX }}"
+                echo "BUNNY_STORAGE_HOSTNAME=${{ secrets.BUNNY_STORAGE_HOSTNAME }}"
+                echo "BUNNY_STORAGE_ZONE=${{ secrets.BUNNY_STORAGE_ZONE }}"
+                echo "BUNNY_ACCESS_KEY=${{ secrets.BUNNY_ACCESS_KEY }}"
+                echo "BUNNY_PULL_ZONE_URL=${{ secrets.BUNNY_PULL_ZONE_URL }}"
+                echo "BUNNY_PREFIX=${{ secrets.BUNNY_PREFIX }}"
+                echo "EMAIL_INTERNAL_KEY=${{ secrets.EMAIL_INTERNAL_KEY }}"
+                echo "STOREFRONT_INTERNAL_OPS_KEY=${{ secrets.STOREFRONT_INTERNAL_OPS_KEY }}"
+                echo "CF_SAAS_API_TOKEN=${{ secrets.CF_SAAS_API_TOKEN }}"
+                echo "CF_SAAS_ZONE_ID=${{ secrets.CF_SAAS_ZONE_ID }}"
+                echo "CF_SAAS_FALLBACK_HOSTNAME=${{ secrets.CF_SAAS_FALLBACK_HOSTNAME }}"
+                echo "VAPID_PUBLIC_KEY=${{ secrets.VAPID_PUBLIC_KEY }}"
+                echo "VAPID_PRIVATE_KEY=${{ secrets.VAPID_PRIVATE_KEY }}"
+                echo "MOBILITY_INTERNAL_KEY=${{ secrets.MOBILITY_INTERNAL_KEY }}"
+                echo "INTERNAL_SERVICE_KEY=${{ secrets.INTERNAL_SERVICE_KEY }}"
+                echo "DOCS_INTERNAL_SERVICE_KEY=${{ secrets.DOCS_INTERNAL_SERVICE_KEY }}"
+                echo "CHAT_INTERNAL_KEY=${{ secrets.CHAT_INTERNAL_KEY }}"
+              } > .env.ci
+              sed -i '/=$/d' .env.ci
+
+              # Preserve any server-side-only keys not owned by CI
+              if [ -f .env ]; then
+                CI_KEYS=$(sed 's/=.*//' .env.ci | tr '\n' '|' | sed 's/|$//')
+                [ -n "$CI_KEYS" ] && grep -vE "^(${CI_KEYS})=" .env >> .env.ci 2>/dev/null || true
+              fi
+              mv .env.ci .env
+
+              pm2 delete "$NAME" 2>/dev/null || true
+              MAIN_JS=$(find dist -name main.js | head -1)
+              [ -z "$MAIN_JS" ] && echo "ERROR: main.js not found for $NAME" && return 1
+              pm2 start "$MAIN_JS" --name "$NAME" --instances 2 --max-memory-restart 500M --update-env
+              echo "Started $NAME on :$PORT"
+            }
+
+            # Run all services in parallel
+            PIDS=()
+            for SVC in "${SERVICES[@]}"; do
+              IFS=':' read -r NAME DIR PORT <<< "$SVC"
+              setup_service "$NAME" "$DIR" "$PORT" &
+              PIDS+=($!)
+            done
+
+            # Wait for all and collect results
+            FAILED=0
+            for PID in "${PIDS[@]}"; do
+              wait $PID || FAILED=$((FAILED+1))
+            done
+
+            pm2 save
+            echo "Setup complete. Failed: $FAILED"
+            [ $FAILED -gt 0 ] && exit 1 || exit 0
+          SETUP_ALL
+
+      - name: Summary
+        if: always()
+        env:
+          HA_IP: ${{ secrets.HA_VM_IP }}
+        run: |
+          echo "=== HA VM PM2 processes ==="
+          ssh root@$HA_IP "pm2 list" || true
+          echo "=== nginx status ==="
+          ssh root@$HA_IP "nginx -t 2>&1 && echo 'nginx OK'" || true
