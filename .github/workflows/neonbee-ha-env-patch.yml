@@ -1,8 +1,17 @@
 # =============================================================================
-# Neonbee — HA Env Patch (workflow_dispatch)
+# Neonbee — HA Env Sync (workflow_dispatch)
 # =============================================================================
-# Reads missing env vars from Prod VM and writes them to HA VM .env files,
-# then restarts affected PM2 processes.
+# Rsyncs all .env files directly from Prod VM → HA VM (agent-forwarded rsync),
+# then restarts all 22 PM2 processes with the correct PORT.
+#
+# Why rsync instead of selective patching:
+#   Prod .env files contain cross-service URL vars (CORE_SERVICE_URL,
+#   TIMESHEET_SERVICE_URL, etc.) that the populate workflow never writes.
+#   Without these, modules fall back to dev-port defaults and cannot reach
+#   each other → 403 "Core API unreachable". Full rsync captures everything.
+#
+#   Prod and HA use identical 8xxx ports, so Prod .env files are correct
+#   for HA with no modification.
 # =============================================================================
 
 name: "HA Standby — Patch Missing Env Vars"
@@ -31,101 +40,36 @@ jobs:
         run: |
           ssh-keyscan -H ${{ env.PROD_IP }} >> ~/.ssh/known_hosts 2>/dev/null
           ssh-keyscan -H $HA_IP >> ~/.ssh/known_hosts 2>/dev/null
+          # Allow Prod VM to reach HA VM directly for rsync
+          ssh root@${{ env.PROD_IP }} "ssh-keyscan -H $HA_IP >> ~/.ssh/known_hosts 2>/dev/null || true"
 
-      - name: Read missing secrets from Prod VM + patch HA VM
+      - name: Rsync .env files Prod → HA VM
         env:
           HA_IP: ${{ secrets.HA_VM_IP }}
         run: |
-          # Read all missing keys from prod VM
-          # DOCS key lives in core (core generates/holds it)
-          DOCS_KEY=$(ssh root@${{ env.PROD_IP }} "grep '^DOCS_INTERNAL_SERVICE_KEY=' /github/neonbee/so360-core/.env 2>/dev/null | cut -d= -f2-")
-          # Module-to-module auth keys live in module .env files — grep first match across all
-          INTERNAL_KEY=$(ssh root@${{ env.PROD_IP }} "grep -h '^INTERNAL_SERVICE_KEY=' /github/neonbee/*/.env 2>/dev/null | head -1 | cut -d= -f2-")
-          CHAT_KEY=$(ssh root@${{ env.PROD_IP }} "grep -h '^CHAT_INTERNAL_KEY=' /github/neonbee/*/.env 2>/dev/null | head -1 | cut -d= -f2-")
-          MOBILITY_KEY=$(ssh root@${{ env.PROD_IP }} "grep -h '^MOBILITY_INTERNAL_KEY=' /github/neonbee/*/.env 2>/dev/null | head -1 | cut -d= -f2-")
-          CHANNEL_KEY=$(ssh root@${{ env.PROD_IP }} "grep -h '^CHANNEL_ENCRYPTION_KEY=' /github/neonbee/*/.env 2>/dev/null | head -1 | cut -d= -f2-")
+          # Use agent-forwarded SSH: rsync runs on Prod VM, pushes to HA VM directly
+          ssh -A root@${{ env.PROD_IP }} "
+            SYNCED=0
+            SKIPPED=0
+            for DIR in /github/neonbee/so360-*; do
+              [ -f \"\$DIR/.env\" ] || { SKIPPED=\$((SKIPPED+1)); continue; }
+              rsync -az --no-perms -e 'ssh -o StrictHostKeyChecking=no' \
+                \"\$DIR/.env\" \"root@$HA_IP:\$DIR/.env\" && \
+                echo \"Synced \$(basename \$DIR)/.env\" && SYNCED=\$((SYNCED+1)) || \
+                echo \"WARN: failed \$DIR/.env\"
+            done
+            echo \"Done: \$SYNCED synced, \$SKIPPED skipped (no .env on prod)\"
+          "
 
-          echo "DOCS_KEY present:     $([ -n "$DOCS_KEY" ] && echo yes || echo MISSING)"
-          echo "INTERNAL_KEY present: $([ -n "$INTERNAL_KEY" ] && echo yes || echo MISSING)"
-          echo "CHAT_KEY present:     $([ -n "$CHAT_KEY" ] && echo yes || echo MISSING)"
-          echo "MOBILITY_KEY present: $([ -n "$MOBILITY_KEY" ] && echo yes || echo MISSING)"
-          echo "CHANNEL_KEY present:  $([ -n "$CHANNEL_KEY" ] && echo yes || echo MISSING)"
-
-          [ -z "$DOCS_KEY" ] && echo "ERROR: DOCS_INTERNAL_SERVICE_KEY not found on prod" && exit 1
-          [ -z "$INTERNAL_KEY" ] && echo "WARNING: INTERNAL_SERVICE_KEY not found on prod — modules may fail permission checks"
-
-          echo "::add-mask::$DOCS_KEY"
-          echo "::add-mask::$INTERNAL_KEY"
-          echo "::add-mask::$CHAT_KEY"
-          echo "::add-mask::$MOBILITY_KEY"
-          echo "::add-mask::$CHANNEL_KEY"
-
-          # Patch HA VM — all 22 services
-          ssh root@$HA_IP "bash -s" << PATCH
-            export NVM_DIR="\$HOME/.nvm"
-            [ -s "\$NVM_DIR/nvm.sh" ] && \. "\$NVM_DIR/nvm.sh"
+      - name: Restart all HA services with correct PORT
+        env:
+          HA_IP: ${{ secrets.HA_VM_IP }}
+        run: |
+          ssh root@$HA_IP "bash -s" << 'RESTART'
+            export NVM_DIR="$HOME/.nvm"
+            [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
             nvm use 22
 
-            DOCS_KEY="$DOCS_KEY"
-            INTERNAL_KEY="$INTERNAL_KEY"
-            CHAT_KEY="$CHAT_KEY"
-            MOBILITY_KEY="$MOBILITY_KEY"
-            CHANNEL_KEY="$CHANNEL_KEY"
-
-            patch_key() {
-              local FILE="\$1" KEY="\$2" VAL="\$3"
-              [ -f "\$FILE" ] || return
-              [ -z "\$VAL" ] && return
-              grep -q "^\${KEY}=" "\$FILE" && \
-                sed -i "s|^\${KEY}=.*|\${KEY}=\${VAL}|" "\$FILE" || \
-                echo "\${KEY}=\${VAL}" >> "\$FILE"
-            }
-
-            ALL_DIRS=(
-              /github/neonbee/so360-core
-              /github/neonbee/so360-crm-be
-              /github/neonbee/so360-inventory-be
-              /github/neonbee/so360-accounting-be
-              /github/neonbee/so360-projects-be
-              /github/neonbee/so360-timesheet-be
-              /github/neonbee/so360-people-connect-be
-              /github/neonbee/so360-inbox-be
-              /github/neonbee/so360-neura-be
-              /github/neonbee/so360-flow-be
-              /github/neonbee/so360-insight-be
-              /github/neonbee/so360-subscription-be
-              /github/neonbee/so360-forms-be
-              /github/neonbee/so360-dailystore-admin-be
-              /github/neonbee/so360-fulfillment-be
-              /github/neonbee/so360-support-be
-              /github/neonbee/so360-manufacturing-be
-              /github/neonbee/so360-chat-be
-              /github/neonbee/so360-documents-be
-              /github/neonbee/so360-sign-be
-              /github/neonbee/so360-mobility-be
-              /github/neonbee/so360-folio-be
-            )
-
-            for DIR in "\${ALL_DIRS[@]}"; do
-              patch_key "\$DIR/.env" "INTERNAL_SERVICE_KEY" "\$INTERNAL_KEY"
-              patch_key "\$DIR/.env" "CHAT_INTERNAL_KEY"    "\$CHAT_KEY"
-              patch_key "\$DIR/.env" "MOBILITY_INTERNAL_KEY" "\$MOBILITY_KEY"
-              echo "Patched \$DIR"
-            done
-
-            # DOCS key only for services that use it
-            for DIR in /github/neonbee/so360-core \
-                       /github/neonbee/so360-crm-be \
-                       /github/neonbee/so360-accounting-be \
-                       /github/neonbee/so360-projects-be \
-                       /github/neonbee/so360-documents-be; do
-              patch_key "\$DIR/.env" "DOCS_INTERNAL_SERVICE_KEY" "\$DOCS_KEY"
-            done
-
-            # CHANNEL key for dailystore
-            patch_key /github/neonbee/so360-dailystore-admin-be/.env "CHANNEL_ENCRYPTION_KEY" "\$CHANNEL_KEY"
-
-            # Restart all HA services with correct PORT
             SERVICES=(
               'core-ha:8000' 'crm-ha:8003' 'inventory-ha:8006' 'accounting-ha:8008'
               'projects-ha:8010' 'timesheet-ha:8012' 'people-connect-ha:8015'
@@ -135,14 +79,15 @@ jobs:
               'chat-ha:8036' 'documents-ha:8037' 'sign-ha:8038'
               'mobility-ha:8040' 'folio-ha:8044'
             )
-            for SVC in "\${SERVICES[@]}"; do
-              NAME=\${SVC%%:*}; PORT=\${SVC##*:}
-              PORT=\$PORT pm2 restart "\$NAME" --update-env 2>/dev/null && echo "Restarted \$NAME :\$PORT" || echo "SKIP \$NAME"
+            for SVC in "${SERVICES[@]}"; do
+              NAME=${SVC%%:*}; PORT=${SVC##*:}
+              PORT=$PORT pm2 restart "$NAME" --update-env 2>/dev/null && \
+                echo "Restarted $NAME :$PORT" || echo "SKIP $NAME"
             done
 
             pm2 save
-            echo "Patch complete"
-          PATCH
+            echo "Restart complete"
+          RESTART
 
       - name: Verify services are up
         env:
@@ -151,7 +96,7 @@ jobs:
           sleep 20
           ssh root@$HA_IP "
             echo '=== Port check ==='
-            for PORT in 8000 8003 8008 8010 8029 8037; do
+            for PORT in 8000 8003 8006 8008 8010 8012 8015 8017 8021 8026 8029 8037; do
               ss -tlnp | grep -q \":\$PORT \" && echo \"OK :\$PORT\" || echo \"FAIL :\$PORT\"
             done
           "
