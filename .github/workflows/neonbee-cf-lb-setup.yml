@@ -1,0 +1,259 @@
+# =============================================================================
+# Neonbee — Cloudflare Load Balancer Setup (one-time, workflow_dispatch)
+# =============================================================================
+# Creates Cloudflare Load Balancers for the 4 prod zones with:
+#   Primary origin: Prod VM (68.183.86.248)
+#   Fallback origin: HA Standby VM (84.247.131.148)
+#
+# Steering policy: "off" (failover — all traffic to primary until unhealthy)
+# Health monitor:  GET / with Host: <zone> every 60s, failover after 2 failures
+#
+# IDEMPOTENT: checks if resources already exist before creating.
+# SAFE:       exits with clear error if CF token lacks Load Balancing permissions.
+#
+# Required token permissions (CF_SAAS_API_TOKEN must have):
+#   Account → Load Balancing: Read + Write
+#   Zone    → Load Balancing: Read + Write
+#   Zone    → DNS: Edit
+#
+# If CF_SAAS_API_TOKEN lacks LB permissions, create a new token at:
+#   https://dash.cloudflare.com/profile/api-tokens
+# and add it as org secret CF_LB_API_TOKEN — the workflow prefers CF_LB_API_TOKEN
+# if set, falls back to CF_SAAS_API_TOKEN.
+# =============================================================================
+
+name: Setup Cloudflare Load Balancer (HA Failover)
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run — show API calls without applying changes'
+        type: boolean
+        default: false
+      teardown:
+        description: 'Teardown mode — DELETE existing LBs, pools, and monitor'
+        type: boolean
+        default: false
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  PROD_IP: '68.183.86.248'
+  HA_IP: '84.247.131.148'
+
+jobs:
+  cf-lb-setup:
+    runs-on: [self-hosted, contabo]
+    timeout-minutes: 10
+    steps:
+      - name: Resolve CF credentials
+        id: creds
+        run: |
+          TOKEN="${{ secrets.CF_LB_API_TOKEN }}"
+          [ -z "$TOKEN" ] && TOKEN="${{ secrets.CF_SAAS_API_TOKEN }}"
+          echo "::add-mask::$TOKEN"
+          echo "token=$TOKEN" >> $GITHUB_OUTPUT
+          echo "account_id=${{ secrets.CF_R2_ACCOUNT_ID }}" >> $GITHUB_OUTPUT
+          echo "zone_id=${{ secrets.CF_SAAS_ZONE_ID }}" >> $GITHUB_OUTPUT
+
+      - name: Verify token permissions
+        id: verify
+        env:
+          CF_TOKEN: ${{ steps.creds.outputs.token }}
+          CF_ACCOUNT: ${{ steps.creds.outputs.account_id }}
+        run: |
+          RESP=$(curl -sf "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT/load_balancers/monitors" \
+            -H "Authorization: Bearer $CF_TOKEN" \
+            -H "Content-Type: application/json" 2>/dev/null)
+          if echo "$RESP" | grep -q '"success":true'; then
+            echo "Token has Load Balancing access"
+          else
+            CODE=$(echo "$RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('errors',[{}])[0].get('code','?'))" 2>/dev/null)
+            echo "ERROR: CF token lacks Load Balancing permissions (code: $CODE)"
+            echo "Create a token with Account:Load Balancing:Edit + Zone:Load Balancing:Edit"
+            echo "Add as org secret CF_LB_API_TOKEN and re-run this workflow"
+            echo "$RESP"
+            exit 1
+          fi
+
+      # ── Teardown mode ──────────────────────────────────────────────────────
+      - name: Teardown existing LBs, pools, monitor
+        if: inputs.teardown == true
+        env:
+          CF_TOKEN: ${{ steps.creds.outputs.token }}
+          CF_ACCOUNT: ${{ steps.creds.outputs.account_id }}
+          CF_ZONE: ${{ steps.creds.outputs.zone_id }}
+        run: |
+          echo "=== Teardown mode ==="
+          for NAME in api.neonbee.app cdn.neonbee.app dashboard.neonbee.app sso.neonbee.app; do
+            LB_ID=$(curl -sf "https://api.cloudflare.com/client/v4/zones/$CF_ZONE/load_balancers" \
+              -H "Authorization: Bearer $CF_TOKEN" | \
+              python3 -c "import sys,json; lbs=json.load(sys.stdin).get('result',[]); \
+                [print(lb['id']) for lb in lbs if lb.get('name')=='$NAME']" 2>/dev/null | head -1)
+            if [ -n "$LB_ID" ]; then
+              curl -sf -X DELETE "https://api.cloudflare.com/client/v4/zones/$CF_ZONE/load_balancers/$LB_ID" \
+                -H "Authorization: Bearer $CF_TOKEN" | python3 -c "import sys,json; d=json.load(sys.stdin); print('Deleted LB $NAME' if d.get('success') else 'Failed: '+str(d))"
+            else
+              echo "LB $NAME not found, skipping"
+            fi
+          done
+          for POOL_NAME in neonbee-prod-primary neonbee-ha-standby; do
+            POOL_ID=$(curl -sf "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT/load_balancers/pools" \
+              -H "Authorization: Bearer $CF_TOKEN" | \
+              python3 -c "import sys,json; pools=json.load(sys.stdin).get('result',[]); \
+                [print(p['id']) for p in pools if p.get('name')=='$POOL_NAME']" 2>/dev/null | head -1)
+            if [ -n "$POOL_ID" ]; then
+              curl -sf -X DELETE "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT/load_balancers/pools/$POOL_ID" \
+                -H "Authorization: Bearer $CF_TOKEN" | python3 -c "import sys,json; d=json.load(sys.stdin); print('Deleted pool $POOL_NAME' if d.get('success') else 'Failed: '+str(d))"
+            fi
+          done
+          MONITOR_ID=$(curl -sf "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT/load_balancers/monitors" \
+            -H "Authorization: Bearer $CF_TOKEN" | \
+            python3 -c "import sys,json; ms=json.load(sys.stdin).get('result',[]); \
+              [print(m['id']) for m in ms if m.get('description')=='neonbee-ha-health']" 2>/dev/null | head -1)
+          if [ -n "$MONITOR_ID" ]; then
+            curl -sf -X DELETE "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT/load_balancers/monitors/$MONITOR_ID" \
+              -H "Authorization: Bearer $CF_TOKEN" | python3 -c "import sys,json; d=json.load(sys.stdin); print('Deleted monitor' if d.get('success') else 'Failed: '+str(d))"
+          fi
+          echo "Teardown complete"
+
+      # ── Create / verify health monitor ────────────────────────────────────
+      - name: Create health monitor
+        if: inputs.teardown != true
+        id: monitor
+        env:
+          CF_TOKEN: ${{ steps.creds.outputs.token }}
+          CF_ACCOUNT: ${{ steps.creds.outputs.account_id }}
+        run: |
+          # Check if monitor already exists
+          EXISTING=$(curl -sf "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT/load_balancers/monitors" \
+            -H "Authorization: Bearer $CF_TOKEN" | \
+            python3 -c "import sys,json; ms=json.load(sys.stdin).get('result',[]); \
+              [print(m['id']) for m in ms if m.get('description')=='neonbee-ha-health']" 2>/dev/null | head -1)
+
+          if [ -n "$EXISTING" ]; then
+            echo "Monitor already exists: $EXISTING"
+            echo "monitor_id=$EXISTING" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          [ "${{ inputs.dry_run }}" = "true" ] && echo "[DRY RUN] Would create health monitor" && echo "monitor_id=dry-run-id" >> $GITHUB_OUTPUT && exit 0
+
+          RESP=$(curl -sf -X POST "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT/load_balancers/monitors" \
+            -H "Authorization: Bearer $CF_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "type": "http",
+              "description": "neonbee-ha-health",
+              "method": "GET",
+              "path": "/",
+              "expected_codes": "200",
+              "header": {"Host": ["api.neonbee.app"]},
+              "interval": 60,
+              "retries": 2,
+              "timeout": 5,
+              "follow_redirects": false
+            }')
+          echo "$RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print('Created monitor: '+d['result']['id'] if d.get('success') else 'FAILED: '+str(d['errors']))"
+          MONITOR_ID=$(echo "$RESP" | python3 -c "import sys,json; print(json.load(sys.stdin)['result']['id'])" 2>/dev/null)
+          [ -z "$MONITOR_ID" ] && echo "Failed to create monitor" && exit 1
+          echo "monitor_id=$MONITOR_ID" >> $GITHUB_OUTPUT
+
+      # ── Create / verify origin pools ──────────────────────────────────────
+      - name: Create origin pools
+        if: inputs.teardown != true
+        id: pools
+        env:
+          CF_TOKEN: ${{ steps.creds.outputs.token }}
+          CF_ACCOUNT: ${{ steps.creds.outputs.account_id }}
+          MONITOR_ID: ${{ steps.monitor.outputs.monitor_id }}
+        run: |
+          cf_get_or_create_pool() {
+            local NAME=$1 ORIGIN_NAME=$2 ORIGIN_IP=$3
+            EXISTING=$(curl -sf "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT/load_balancers/pools" \
+              -H "Authorization: Bearer $CF_TOKEN" | \
+              python3 -c "import sys,json; ps=json.load(sys.stdin).get('result',[]); \
+                [print(p['id']) for p in ps if p.get('name')=='$NAME']" 2>/dev/null | head -1)
+            if [ -n "$EXISTING" ]; then
+              echo "Pool $NAME already exists: $EXISTING"
+              echo "$EXISTING"
+              return
+            fi
+            [ "${{ inputs.dry_run }}" = "true" ] && echo "dry-run-pool-id" && return
+            RESP=$(curl -sf -X POST "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT/load_balancers/pools" \
+              -H "Authorization: Bearer $CF_TOKEN" \
+              -H "Content-Type: application/json" \
+              -d "{
+                \"name\": \"$NAME\",
+                \"origins\": [{\"name\": \"$ORIGIN_NAME\", \"address\": \"$ORIGIN_IP\", \"weight\": 1, \"enabled\": true}],
+                \"monitor\": \"$MONITOR_ID\",
+                \"enabled\": true,
+                \"notification_email\": \"\",
+                \"description\": \"$NAME\"
+              }")
+            echo "$RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print('Created pool $NAME: '+d['result']['id'] if d.get('success') else 'FAILED: '+str(d['errors']))" >&2
+            python3 -c "import sys,json; print(json.load(sys.stdin)['result']['id'])" <<< "$RESP" 2>/dev/null
+          }
+
+          PROD_POOL_ID=$(cf_get_or_create_pool "neonbee-prod-primary" "prod-vm" "${{ env.PROD_IP }}")
+          HA_POOL_ID=$(cf_get_or_create_pool "neonbee-ha-standby" "ha-vm" "${{ env.HA_IP }}")
+
+          echo "prod_pool_id=$PROD_POOL_ID" >> $GITHUB_OUTPUT
+          echo "ha_pool_id=$HA_POOL_ID" >> $GITHUB_OUTPUT
+          echo "Prod pool: $PROD_POOL_ID"
+          echo "HA pool:   $HA_POOL_ID"
+
+      # ── Create / verify load balancers ────────────────────────────────────
+      - name: Create load balancers
+        if: inputs.teardown != true
+        env:
+          CF_TOKEN: ${{ steps.creds.outputs.token }}
+          CF_ZONE: ${{ steps.creds.outputs.zone_id }}
+          PROD_POOL_ID: ${{ steps.pools.outputs.prod_pool_id }}
+          HA_POOL_ID: ${{ steps.pools.outputs.ha_pool_id }}
+        run: |
+          cf_get_or_create_lb() {
+            local LB_NAME=$1
+            EXISTING=$(curl -sf "https://api.cloudflare.com/client/v4/zones/$CF_ZONE/load_balancers" \
+              -H "Authorization: Bearer $CF_TOKEN" | \
+              python3 -c "import sys,json; lbs=json.load(sys.stdin).get('result',[]); \
+                [print(lb['id']) for lb in lbs if lb.get('name')=='$LB_NAME']" 2>/dev/null | head -1)
+            if [ -n "$EXISTING" ]; then
+              echo "LB $LB_NAME already exists: $EXISTING"
+              return
+            fi
+            [ "${{ inputs.dry_run }}" = "true" ] && echo "[DRY RUN] Would create LB: $LB_NAME" && return
+            RESP=$(curl -sf -X POST "https://api.cloudflare.com/client/v4/zones/$CF_ZONE/load_balancers" \
+              -H "Authorization: Bearer $CF_TOKEN" \
+              -H "Content-Type: application/json" \
+              -d "{
+                \"name\": \"$LB_NAME\",
+                \"default_pools\": [\"$PROD_POOL_ID\"],
+                \"fallback_pool\": \"$HA_POOL_ID\",
+                \"steering_policy\": \"off\",
+                \"proxied\": true,
+                \"enabled\": true,
+                \"ttl\": 30,
+                \"description\": \"Neonbee HA failover — prod primary, HA standby fallback\"
+              }")
+            echo "$RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print('Created LB $LB_NAME: '+d['result']['id'] if d.get('success') else 'FAILED: '+str(d['errors']))"
+          }
+
+          for ZONE_NAME in api.neonbee.app cdn.neonbee.app dashboard.neonbee.app sso.neonbee.app; do
+            cf_get_or_create_lb "$ZONE_NAME"
+          done
+
+      - name: Summary
+        if: always()
+        env:
+          PROD_POOL_ID: ${{ steps.pools.outputs.prod_pool_id }}
+          HA_POOL_ID: ${{ steps.pools.outputs.ha_pool_id }}
+          MONITOR_ID: ${{ steps.monitor.outputs.monitor_id }}
+        run: |
+          echo "=== Cloudflare Load Balancer Setup ==="
+          echo "Monitor ID:    $MONITOR_ID"
+          echo "Prod pool:     $PROD_POOL_ID  (68.183.86.248)"
+          echo "HA pool:       $HA_POOL_ID    (84.247.131.148)"
+          echo "Load Balancers: api / cdn / dashboard / sso .neonbee.app"
+          echo "Health check:  GET / every 60s, failover after 2 failures (~120s RTO)"
+          echo "Verify at: https://dash.cloudflare.com -> Traffic -> Load Balancing"
