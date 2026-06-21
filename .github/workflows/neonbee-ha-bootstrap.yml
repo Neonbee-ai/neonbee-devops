@@ -26,7 +26,17 @@ jobs:
 
       - uses: webfactory/ssh-agent@v0.9.0
         with:
-          ssh-private-key: ${{ secrets.CONTABO_SSH_KEY }}
+          ssh-private-key: |
+            ${{ secrets.DIGITALOCEAN_SSH_KEY }}
+            ${{ secrets.CONTABO_SSH_KEY }}
+
+      - name: Scan known hosts
+        env:
+          HA_IP: ${{ secrets.HA_VM_IP }}
+        run: |
+          ssh-keyscan -H 68.183.86.248 >> ~/.ssh/known_hosts 2>/dev/null
+          ssh-keyscan -H $HA_IP >> ~/.ssh/known_hosts 2>/dev/null
+          ssh root@68.183.86.248 "ssh-keyscan -H $HA_IP >> ~/.ssh/known_hosts 2>/dev/null || true"
 
       - name: Verify HA VM connectivity
         env:
