@@ -12,7 +12,7 @@
 #   3. Confirm nvm + Node 22 is installed on Dev VM
 # =============================================================================
 
-name: Bootstrap HA Standby VM
+name: "Bootstrap HA Standby VM"
 
 on:
   workflow_dispatch:
