@@ -37,11 +37,13 @@ jobs:
           HA_IP: ${{ secrets.HA_VM_IP }}
         run: |
           # Read all missing keys from prod VM
+          # DOCS key lives in core (core generates/holds it)
           DOCS_KEY=$(ssh root@${{ env.PROD_IP }} "grep '^DOCS_INTERNAL_SERVICE_KEY=' /github/neonbee/so360-core/.env 2>/dev/null | cut -d= -f2-")
-          INTERNAL_KEY=$(ssh root@${{ env.PROD_IP }} "grep '^INTERNAL_SERVICE_KEY=' /github/neonbee/so360-core/.env 2>/dev/null | cut -d= -f2-")
-          CHAT_KEY=$(ssh root@${{ env.PROD_IP }} "grep '^CHAT_INTERNAL_KEY=' /github/neonbee/so360-core/.env 2>/dev/null | cut -d= -f2-")
-          MOBILITY_KEY=$(ssh root@${{ env.PROD_IP }} "grep '^MOBILITY_INTERNAL_KEY=' /github/neonbee/so360-core/.env 2>/dev/null | cut -d= -f2-")
-          CHANNEL_KEY=$(ssh root@${{ env.PROD_IP }} "grep '^CHANNEL_ENCRYPTION_KEY=' /github/neonbee/so360-dailystore-admin-be/.env 2>/dev/null | cut -d= -f2-")
+          # Module-to-module auth keys live in module .env files — grep first match across all
+          INTERNAL_KEY=$(ssh root@${{ env.PROD_IP }} "grep -h '^INTERNAL_SERVICE_KEY=' /github/neonbee/*/.env 2>/dev/null | head -1 | cut -d= -f2-")
+          CHAT_KEY=$(ssh root@${{ env.PROD_IP }} "grep -h '^CHAT_INTERNAL_KEY=' /github/neonbee/*/.env 2>/dev/null | head -1 | cut -d= -f2-")
+          MOBILITY_KEY=$(ssh root@${{ env.PROD_IP }} "grep -h '^MOBILITY_INTERNAL_KEY=' /github/neonbee/*/.env 2>/dev/null | head -1 | cut -d= -f2-")
+          CHANNEL_KEY=$(ssh root@${{ env.PROD_IP }} "grep -h '^CHANNEL_ENCRYPTION_KEY=' /github/neonbee/*/.env 2>/dev/null | head -1 | cut -d= -f2-")
 
           echo "DOCS_KEY present:     $([ -n "$DOCS_KEY" ] && echo yes || echo MISSING)"
           echo "INTERNAL_KEY present: $([ -n "$INTERNAL_KEY" ] && echo yes || echo MISSING)"
@@ -50,7 +52,7 @@ jobs:
           echo "CHANNEL_KEY present:  $([ -n "$CHANNEL_KEY" ] && echo yes || echo MISSING)"
 
           [ -z "$DOCS_KEY" ] && echo "ERROR: DOCS_INTERNAL_SERVICE_KEY not found on prod" && exit 1
-          [ -z "$INTERNAL_KEY" ] && echo "ERROR: INTERNAL_SERVICE_KEY not found on prod" && exit 1
+          [ -z "$INTERNAL_KEY" ] && echo "WARNING: INTERNAL_SERVICE_KEY not found on prod — modules may fail permission checks"
 
           echo "::add-mask::$DOCS_KEY"
           echo "::add-mask::$INTERNAL_KEY"
