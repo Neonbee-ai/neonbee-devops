@@ -1,0 +1,71 @@
+# =============================================================================
+# Neonbee — HA Origin Toggle (workflow_dispatch)
+# =============================================================================
+# Enable or disable the prod-vm origin in the neonbee-ha-failover CF pool.
+# Use to: restore normal operation (enable prod) or force-failover (disable prod).
+# =============================================================================
+
+name: "HA — Toggle Prod-VM Origin"
+
+on:
+  workflow_dispatch:
+    inputs:
+      prod_enabled:
+        description: 'Enable prod-vm origin (true = normal, false = force failover to HA)'
+        type: boolean
+        default: true
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  PROD_IP: '68.183.86.248'
+  HA_IP: '84.247.131.148'
+  POOL_ID: '04a6202eccaff3bff1ce2e222fa247ef'
+
+jobs:
+  toggle:
+    runs-on: [self-hosted, contabo]
+    timeout-minutes: 5
+    steps:
+      - name: Resolve CF token
+        id: creds
+        run: |
+          TOKEN="${{ secrets.CF_LB_API_TOKEN }}"
+          [ -z "$TOKEN" ] && TOKEN="${{ secrets.CF_SAAS_API_TOKEN }}"
+          echo "::add-mask::$TOKEN"
+          echo "token=$TOKEN" >> $GITHUB_OUTPUT
+          echo "account_id=${{ secrets.CF_R2_ACCOUNT_ID }}" >> $GITHUB_OUTPUT
+
+      - name: Toggle prod-vm origin
+        env:
+          CF_TOKEN: ${{ steps.creds.outputs.token }}
+          CF_ACCOUNT: ${{ steps.creds.outputs.account_id }}
+          PROD_ENABLED: ${{ inputs.prod_enabled }}
+        run: |
+          echo "Setting prod-vm enabled=$PROD_ENABLED"
+
+          RESP=$(curl -sf -X PUT \
+            "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT/load_balancers/pools/${{ env.POOL_ID }}" \
+            -H "Authorization: Bearer $CF_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"name\": \"neonbee-ha-failover\",
+              \"origins\": [
+                {\"name\": \"prod-vm\",  \"address\": \"${{ env.PROD_IP }}\", \"weight\": 0.99, \"enabled\": $PROD_ENABLED},
+                {\"name\": \"ha-vm\",    \"address\": \"${{ env.HA_IP }}\",   \"weight\": 0.01, \"enabled\": true}
+              ],
+              \"enabled\": true,
+              \"description\": \"neonbee-ha-failover\"
+            }")
+
+          echo "$RESP" | python3 -c "
+          import sys, json
+          d = json.load(sys.stdin)
+          if d.get('success'):
+              origins = d['result']['origins']
+              for o in origins:
+                  print(f\"  {o['name']}: enabled={o['enabled']}, weight={o['weight']}\")
+              print('Pool updated successfully')
+          else:
+              print('FAILED:', d.get('errors'))
+              sys.exit(1)
+          "
