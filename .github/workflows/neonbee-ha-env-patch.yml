@@ -1,8 +1,8 @@
 # =============================================================================
 # Neonbee — HA Env Patch (workflow_dispatch)
 # =============================================================================
-# Appends missing repo-level secrets to HA VM .env files and restarts
-# affected PM2 processes. Run this after adding secrets to neonbee-devops repo.
+# Reads missing env vars from Prod VM and writes them to HA VM .env files,
+# then restarts affected PM2 processes.
 # =============================================================================
 
 name: "HA Standby — Patch Missing Env Vars"
@@ -12,6 +12,7 @@ on:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  PROD_IP: '68.183.86.248'
 
 jobs:
   patch:
@@ -28,56 +29,73 @@ jobs:
         env:
           HA_IP: ${{ secrets.HA_VM_IP }}
         run: |
+          ssh-keyscan -H ${{ env.PROD_IP }} >> ~/.ssh/known_hosts 2>/dev/null
           ssh-keyscan -H $HA_IP >> ~/.ssh/known_hosts 2>/dev/null
 
-      - name: Patch .env files + restart affected services
+      - name: Read missing secrets from Prod VM + patch HA VM
         env:
           HA_IP: ${{ secrets.HA_VM_IP }}
         run: |
-          ssh root@$HA_IP "bash -s" << 'EOF'
-            export NVM_DIR="$HOME/.nvm"
-            [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+          # Read the two missing keys from prod VM
+          DOCS_KEY=$(ssh root@${{ env.PROD_IP }} "grep '^DOCS_INTERNAL_SERVICE_KEY=' /github/neonbee/so360-core/.env 2>/dev/null | cut -d= -f2-")
+          CHANNEL_KEY=$(ssh root@${{ env.PROD_IP }} "grep '^CHANNEL_ENCRYPTION_KEY=' /github/neonbee/so360-dailystore-admin-be/.env 2>/dev/null | cut -d= -f2-")
+
+          echo "DOCS_KEY present: $([ -n "$DOCS_KEY" ] && echo yes || echo MISSING)"
+          echo "CHANNEL_KEY present: $([ -n "$CHANNEL_KEY" ] && echo yes || echo MISSING)"
+
+          [ -z "$DOCS_KEY" ] && echo "ERROR: DOCS_INTERNAL_SERVICE_KEY not found on prod" && exit 1
+          [ -z "$CHANNEL_KEY" ] && echo "ERROR: CHANNEL_ENCRYPTION_KEY not found on prod" && exit 1
+
+          echo "::add-mask::$DOCS_KEY"
+          echo "::add-mask::$CHANNEL_KEY"
+
+          # Patch HA VM — append missing keys + restart affected services
+          ssh root@$HA_IP "bash -s" << PATCH
+            export NVM_DIR="\$HOME/.nvm"
+            [ -s "\$NVM_DIR/nvm.sh" ] && \. "\$NVM_DIR/nvm.sh"
             nvm use 22
 
-            # Services that need DOCS_INTERNAL_SERVICE_KEY
-            DOCS_SERVICES=(
-              /github/neonbee/so360-core
-              /github/neonbee/so360-crm-be
-              /github/neonbee/so360-accounting-be
-              /github/neonbee/so360-projects-be
-              /github/neonbee/so360-documents-be
-            )
-            for DIR in "${DOCS_SERVICES[@]}"; do
-              [ -f "$DIR/.env" ] || continue
-              grep -q '^DOCS_INTERNAL_SERVICE_KEY=' "$DIR/.env" || \
-                echo "DOCS_INTERNAL_SERVICE_KEY=${{ secrets.DOCS_INTERNAL_SERVICE_KEY }}" >> "$DIR/.env"
-              echo "Patched DOCS_INTERNAL_SERVICE_KEY in $DIR"
+            DOCS_KEY="$DOCS_KEY"
+            CHANNEL_KEY="$CHANNEL_KEY"
+
+            # Services needing DOCS_INTERNAL_SERVICE_KEY
+            for DIR in /github/neonbee/so360-core \
+                       /github/neonbee/so360-crm-be \
+                       /github/neonbee/so360-accounting-be \
+                       /github/neonbee/so360-projects-be \
+                       /github/neonbee/so360-documents-be; do
+              [ -f "\$DIR/.env" ] || continue
+              grep -q '^DOCS_INTERNAL_SERVICE_KEY=' "\$DIR/.env" && \
+                sed -i "s|^DOCS_INTERNAL_SERVICE_KEY=.*|DOCS_INTERNAL_SERVICE_KEY=\$DOCS_KEY|" "\$DIR/.env" || \
+                echo "DOCS_INTERNAL_SERVICE_KEY=\$DOCS_KEY" >> "\$DIR/.env"
+              echo "Patched DOCS_INTERNAL_SERVICE_KEY in \$DIR"
             done
 
             # dailystore needs CHANNEL_ENCRYPTION_KEY
             DIR=/github/neonbee/so360-dailystore-admin-be
-            if [ -f "$DIR/.env" ]; then
-              grep -q '^CHANNEL_ENCRYPTION_KEY=' "$DIR/.env" || \
-                echo "CHANNEL_ENCRYPTION_KEY=${{ secrets.CHANNEL_ENCRYPTION_KEY }}" >> "$DIR/.env"
-              echo "Patched CHANNEL_ENCRYPTION_KEY in $DIR"
+            if [ -f "\$DIR/.env" ]; then
+              grep -q '^CHANNEL_ENCRYPTION_KEY=' "\$DIR/.env" && \
+                sed -i "s|^CHANNEL_ENCRYPTION_KEY=.*|CHANNEL_ENCRYPTION_KEY=\$CHANNEL_KEY|" "\$DIR/.env" || \
+                echo "CHANNEL_ENCRYPTION_KEY=\$CHANNEL_KEY" >> "\$DIR/.env"
+              echo "Patched CHANNEL_ENCRYPTION_KEY in \$DIR"
             fi
 
-            # Restart affected PM2 processes
+            # Restart affected services
             for NAME in core-ha crm-ha accounting-ha projects-ha documents-ha dailystore-ha; do
-              pm2 restart "$NAME" --update-env 2>/dev/null && echo "Restarted $NAME" || echo "SKIP $NAME (not found)"
+              pm2 restart "\$NAME" --update-env 2>/dev/null && echo "Restarted \$NAME" || echo "SKIP \$NAME"
             done
-
             pm2 save
             echo "Patch complete"
-          EOF
+          PATCH
 
-      - name: Verify services are listening
+      - name: Verify services are up
         env:
           HA_IP: ${{ secrets.HA_VM_IP }}
         run: |
-          sleep 15
+          sleep 20
           ssh root@$HA_IP "
+            echo '=== Port check ==='
             for PORT in 8000 8003 8008 8010 8029 8037; do
-              ss -tlnp | grep -q \":$PORT \" && echo \"OK :$PORT\" || echo \"FAIL :$PORT\"
+              ss -tlnp | grep -q \":\$PORT \" && echo \"OK :\$PORT\" || echo \"FAIL :\$PORT\"
             done
           "
