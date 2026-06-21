@@ -1,0 +1,83 @@
+# =============================================================================
+# Neonbee — HA Env Patch (workflow_dispatch)
+# =============================================================================
+# Appends missing repo-level secrets to HA VM .env files and restarts
+# affected PM2 processes. Run this after adding secrets to neonbee-devops repo.
+# =============================================================================
+
+name: "HA Standby — Patch Missing Env Vars"
+
+on:
+  workflow_dispatch:
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  patch:
+    runs-on: [self-hosted, contabo]
+    timeout-minutes: 10
+    steps:
+      - uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: |
+            ${{ secrets.DIGITALOCEAN_SSH_KEY }}
+            ${{ secrets.CONTABO_SSH_KEY }}
+
+      - name: Scan known hosts
+        env:
+          HA_IP: ${{ secrets.HA_VM_IP }}
+        run: |
+          ssh-keyscan -H $HA_IP >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Patch .env files + restart affected services
+        env:
+          HA_IP: ${{ secrets.HA_VM_IP }}
+        run: |
+          ssh root@$HA_IP "bash -s" << 'EOF'
+            export NVM_DIR="$HOME/.nvm"
+            [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+            nvm use 22
+
+            # Services that need DOCS_INTERNAL_SERVICE_KEY
+            DOCS_SERVICES=(
+              /github/neonbee/so360-core
+              /github/neonbee/so360-crm-be
+              /github/neonbee/so360-accounting-be
+              /github/neonbee/so360-projects-be
+              /github/neonbee/so360-documents-be
+            )
+            for DIR in "${DOCS_SERVICES[@]}"; do
+              [ -f "$DIR/.env" ] || continue
+              grep -q '^DOCS_INTERNAL_SERVICE_KEY=' "$DIR/.env" || \
+                echo "DOCS_INTERNAL_SERVICE_KEY=${{ secrets.DOCS_INTERNAL_SERVICE_KEY }}" >> "$DIR/.env"
+              echo "Patched DOCS_INTERNAL_SERVICE_KEY in $DIR"
+            done
+
+            # dailystore needs CHANNEL_ENCRYPTION_KEY
+            DIR=/github/neonbee/so360-dailystore-admin-be
+            if [ -f "$DIR/.env" ]; then
+              grep -q '^CHANNEL_ENCRYPTION_KEY=' "$DIR/.env" || \
+                echo "CHANNEL_ENCRYPTION_KEY=${{ secrets.CHANNEL_ENCRYPTION_KEY }}" >> "$DIR/.env"
+              echo "Patched CHANNEL_ENCRYPTION_KEY in $DIR"
+            fi
+
+            # Restart affected PM2 processes
+            for NAME in core-ha crm-ha accounting-ha projects-ha documents-ha dailystore-ha; do
+              pm2 restart "$NAME" --update-env 2>/dev/null && echo "Restarted $NAME" || echo "SKIP $NAME (not found)"
+            done
+
+            pm2 save
+            echo "Patch complete"
+          EOF
+
+      - name: Verify services are listening
+        env:
+          HA_IP: ${{ secrets.HA_VM_IP }}
+        run: |
+          sleep 15
+          ssh root@$HA_IP "
+            for PORT in 8000 8003 8008 8010 8029 8037; do
+              ss -tlnp | grep -q \":$PORT \" && echo \"OK :$PORT\" || echo \"FAIL :$PORT\"
+            done
+          "
