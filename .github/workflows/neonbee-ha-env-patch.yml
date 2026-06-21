@@ -36,58 +36,108 @@ jobs:
         env:
           HA_IP: ${{ secrets.HA_VM_IP }}
         run: |
-          # Read the two missing keys from prod VM
+          # Read all missing keys from prod VM
           DOCS_KEY=$(ssh root@${{ env.PROD_IP }} "grep '^DOCS_INTERNAL_SERVICE_KEY=' /github/neonbee/so360-core/.env 2>/dev/null | cut -d= -f2-")
+          INTERNAL_KEY=$(ssh root@${{ env.PROD_IP }} "grep '^INTERNAL_SERVICE_KEY=' /github/neonbee/so360-core/.env 2>/dev/null | cut -d= -f2-")
+          CHAT_KEY=$(ssh root@${{ env.PROD_IP }} "grep '^CHAT_INTERNAL_KEY=' /github/neonbee/so360-core/.env 2>/dev/null | cut -d= -f2-")
+          MOBILITY_KEY=$(ssh root@${{ env.PROD_IP }} "grep '^MOBILITY_INTERNAL_KEY=' /github/neonbee/so360-core/.env 2>/dev/null | cut -d= -f2-")
           CHANNEL_KEY=$(ssh root@${{ env.PROD_IP }} "grep '^CHANNEL_ENCRYPTION_KEY=' /github/neonbee/so360-dailystore-admin-be/.env 2>/dev/null | cut -d= -f2-")
 
-          echo "DOCS_KEY present: $([ -n "$DOCS_KEY" ] && echo yes || echo MISSING)"
-          echo "CHANNEL_KEY present: $([ -n "$CHANNEL_KEY" ] && echo yes || echo MISSING)"
+          echo "DOCS_KEY present:     $([ -n "$DOCS_KEY" ] && echo yes || echo MISSING)"
+          echo "INTERNAL_KEY present: $([ -n "$INTERNAL_KEY" ] && echo yes || echo MISSING)"
+          echo "CHAT_KEY present:     $([ -n "$CHAT_KEY" ] && echo yes || echo MISSING)"
+          echo "MOBILITY_KEY present: $([ -n "$MOBILITY_KEY" ] && echo yes || echo MISSING)"
+          echo "CHANNEL_KEY present:  $([ -n "$CHANNEL_KEY" ] && echo yes || echo MISSING)"
 
           [ -z "$DOCS_KEY" ] && echo "ERROR: DOCS_INTERNAL_SERVICE_KEY not found on prod" && exit 1
-          [ -z "$CHANNEL_KEY" ] && echo "WARNING: CHANNEL_ENCRYPTION_KEY not found on prod — skipping dailystore patch"
+          [ -z "$INTERNAL_KEY" ] && echo "ERROR: INTERNAL_SERVICE_KEY not found on prod" && exit 1
 
           echo "::add-mask::$DOCS_KEY"
+          echo "::add-mask::$INTERNAL_KEY"
+          echo "::add-mask::$CHAT_KEY"
+          echo "::add-mask::$MOBILITY_KEY"
           echo "::add-mask::$CHANNEL_KEY"
 
-          # Patch HA VM — append missing keys + restart affected services
+          # Patch HA VM — all 22 services
           ssh root@$HA_IP "bash -s" << PATCH
             export NVM_DIR="\$HOME/.nvm"
             [ -s "\$NVM_DIR/nvm.sh" ] && \. "\$NVM_DIR/nvm.sh"
             nvm use 22
 
             DOCS_KEY="$DOCS_KEY"
+            INTERNAL_KEY="$INTERNAL_KEY"
+            CHAT_KEY="$CHAT_KEY"
+            MOBILITY_KEY="$MOBILITY_KEY"
             CHANNEL_KEY="$CHANNEL_KEY"
 
-            # Services needing DOCS_INTERNAL_SERVICE_KEY
+            patch_key() {
+              local FILE="\$1" KEY="\$2" VAL="\$3"
+              [ -f "\$FILE" ] || return
+              [ -z "\$VAL" ] && return
+              grep -q "^\${KEY}=" "\$FILE" && \
+                sed -i "s|^\${KEY}=.*|\${KEY}=\${VAL}|" "\$FILE" || \
+                echo "\${KEY}=\${VAL}" >> "\$FILE"
+            }
+
+            ALL_DIRS=(
+              /github/neonbee/so360-core
+              /github/neonbee/so360-crm-be
+              /github/neonbee/so360-inventory-be
+              /github/neonbee/so360-accounting-be
+              /github/neonbee/so360-projects-be
+              /github/neonbee/so360-timesheet-be
+              /github/neonbee/so360-people-connect-be
+              /github/neonbee/so360-inbox-be
+              /github/neonbee/so360-neura-be
+              /github/neonbee/so360-flow-be
+              /github/neonbee/so360-insight-be
+              /github/neonbee/so360-subscription-be
+              /github/neonbee/so360-forms-be
+              /github/neonbee/so360-dailystore-admin-be
+              /github/neonbee/so360-fulfillment-be
+              /github/neonbee/so360-support-be
+              /github/neonbee/so360-manufacturing-be
+              /github/neonbee/so360-chat-be
+              /github/neonbee/so360-documents-be
+              /github/neonbee/so360-sign-be
+              /github/neonbee/so360-mobility-be
+              /github/neonbee/so360-folio-be
+            )
+
+            for DIR in "\${ALL_DIRS[@]}"; do
+              patch_key "\$DIR/.env" "INTERNAL_SERVICE_KEY" "\$INTERNAL_KEY"
+              patch_key "\$DIR/.env" "CHAT_INTERNAL_KEY"    "\$CHAT_KEY"
+              patch_key "\$DIR/.env" "MOBILITY_INTERNAL_KEY" "\$MOBILITY_KEY"
+              echo "Patched \$DIR"
+            done
+
+            # DOCS key only for services that use it
             for DIR in /github/neonbee/so360-core \
                        /github/neonbee/so360-crm-be \
                        /github/neonbee/so360-accounting-be \
                        /github/neonbee/so360-projects-be \
                        /github/neonbee/so360-documents-be; do
-              [ -f "\$DIR/.env" ] || continue
-              grep -q '^DOCS_INTERNAL_SERVICE_KEY=' "\$DIR/.env" && \
-                sed -i "s|^DOCS_INTERNAL_SERVICE_KEY=.*|DOCS_INTERNAL_SERVICE_KEY=\$DOCS_KEY|" "\$DIR/.env" || \
-                echo "DOCS_INTERNAL_SERVICE_KEY=\$DOCS_KEY" >> "\$DIR/.env"
-              echo "Patched DOCS_INTERNAL_SERVICE_KEY in \$DIR"
+              patch_key "\$DIR/.env" "DOCS_INTERNAL_SERVICE_KEY" "\$DOCS_KEY"
             done
 
-            # dailystore needs CHANNEL_ENCRYPTION_KEY (skip if not on prod)
-            if [ -n "$CHANNEL_KEY" ]; then
-              DIR=/github/neonbee/so360-dailystore-admin-be
-              if [ -f "\$DIR/.env" ]; then
-                grep -q '^CHANNEL_ENCRYPTION_KEY=' "\$DIR/.env" && \
-                  sed -i "s|^CHANNEL_ENCRYPTION_KEY=.*|CHANNEL_ENCRYPTION_KEY=\$CHANNEL_KEY|" "\$DIR/.env" || \
-                  echo "CHANNEL_ENCRYPTION_KEY=\$CHANNEL_KEY" >> "\$DIR/.env"
-                echo "Patched CHANNEL_ENCRYPTION_KEY in \$DIR"
-              fi
-            else
-              echo "SKIP dailystore CHANNEL_ENCRYPTION_KEY (not set on prod)"
-            fi
+            # CHANNEL key for dailystore
+            patch_key /github/neonbee/so360-dailystore-admin-be/.env "CHANNEL_ENCRYPTION_KEY" "\$CHANNEL_KEY"
 
-            # Restart affected services
-            for NAME in core-ha crm-ha accounting-ha projects-ha documents-ha dailystore-ha; do
-              pm2 restart "\$NAME" --update-env 2>/dev/null && echo "Restarted \$NAME" || echo "SKIP \$NAME"
+            # Restart all HA services with correct PORT
+            SERVICES=(
+              'core-ha:8000' 'crm-ha:8003' 'inventory-ha:8006' 'accounting-ha:8008'
+              'projects-ha:8010' 'timesheet-ha:8012' 'people-connect-ha:8015'
+              'inbox-ha:8017' 'neura-ha:8018' 'flow-ha:8021' 'insight-ha:8023'
+              'subscription-ha:8026' 'forms-ha:8027' 'dailystore-ha:8029'
+              'fulfillment-ha:8032' 'support-ha:8033' 'manufacturing-ha:8034'
+              'chat-ha:8036' 'documents-ha:8037' 'sign-ha:8038'
+              'mobility-ha:8040' 'folio-ha:8044'
+            )
+            for SVC in "\${SERVICES[@]}"; do
+              NAME=\${SVC%%:*}; PORT=\${SVC##*:}
+              PORT=\$PORT pm2 restart "\$NAME" --update-env 2>/dev/null && echo "Restarted \$NAME :\$PORT" || echo "SKIP \$NAME"
             done
+
             pm2 save
             echo "Patch complete"
           PATCH
