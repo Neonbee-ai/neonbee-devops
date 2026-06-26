@@ -437,8 +437,13 @@ jobs:
       # ═══════════════════════════════════════════════════════════════════════
       # DEPLOY: Backend (rsync dist/ → PM2)
       # ═══════════════════════════════════════════════════════════════════════
+      # Primary prod VM deploy. continue-on-error so a DOWN prod VM does not abort
+      # the job before the HA standby step runs — the "Verify" step below is the
+      # real pass/fail gate (green if prod OR HA standby received the build).
       - name: Deploy backend
+        id: deploy_primary
         if: inputs.deploy_type == 'backend'
+        continue-on-error: true
         env:
           SERVER_IP: ${{ steps.vm.outputs.ip }}
           SERVICE_DIR: ${{ inputs.service_dir }}
@@ -527,8 +532,13 @@ jobs:
           DEPLOY_SCRIPT
 
       # ── HA Standby: backend ────────────────────────────────────────────────
+      # Runs on success() || failure() so it ALSO fires when the primary prod VM
+      # is down (that is exactly when failover is needed). Without the status
+      # function the implicit success() would skip this step whenever the primary
+      # failed — defeating the purpose of a standby.
       - name: Deploy backend to HA standby
-        if: inputs.deploy_type == 'backend' && inputs.target_vm == 'prod'
+        id: deploy_ha
+        if: inputs.deploy_type == 'backend' && inputs.target_vm == 'prod' && (success() || failure())
         continue-on-error: true
         env:
           HA_IP: ${{ secrets.HA_VM_IP }}
@@ -536,7 +546,7 @@ jobs:
           SERVICE_NAME: ${{ inputs.service_name }}-ha
           PORT: ${{ inputs.port }}
         run: |
-          [ -z "$HA_IP" ] && echo "HA_VM_IP not configured, skipping HA deploy" && exit 0
+          [ -z "$HA_IP" ] && echo "HA_VM_IP not configured, skipping HA deploy" && exit 1
           ssh-keyscan -H $HA_IP >> ~/.ssh/known_hosts 2>/dev/null
 
           ssh root@$HA_IP "
@@ -614,6 +624,31 @@ jobs:
             done
             echo "HA standby: $SERVICE_NAME on port $PORT ready"
           DEPLOY_HA
+
+      # ── Failover gate: backend must have reached prod OR the HA standby ──────
+      # This is the real pass/fail for backend deploys (the primary step is
+      # continue-on-error). Semantics:
+      #   • prod target   → green if the primary OR the HA standby succeeded
+      #   • other targets (storefront / internal) → no HA, so primary must succeed
+      - name: Verify backend deploy reached a target
+        if: inputs.deploy_type == 'backend' && always()
+        env:
+          PRIMARY: ${{ steps.deploy_primary.outcome }}
+          HA: ${{ steps.deploy_ha.outcome }}
+          TARGET_VM: ${{ inputs.target_vm }}
+        run: |
+          echo "Primary VM deploy : $PRIMARY"
+          echo "HA standby deploy : $HA (target_vm=$TARGET_VM)"
+          if [ "$PRIMARY" = "success" ]; then
+            echo "✅ Deployed to primary VM."
+            exit 0
+          fi
+          if [ "$TARGET_VM" = "prod" ] && [ "$HA" = "success" ]; then
+            echo "⚠️  Primary prod VM unavailable — failed over to HA standby. Deploy is live on HA."
+            exit 0
+          fi
+          echo "❌ Deploy reached no healthy target (primary=$PRIMARY, ha=$HA)."
+          exit 1
 
       # ═══════════════════════════════════════════════════════════════════════
       # DEPLOY: Vite MFE (rsync dist/ → nginx → CF purge)
