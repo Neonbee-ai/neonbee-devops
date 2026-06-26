@@ -181,9 +181,14 @@ jobs:
           restore-keys: npm-${{ runner.os }}-
 
       - name: Install dependencies
+        # --include=dev is mandatory: some runners in the Docker fleet have
+        # NODE_ENV=production in their environment, which makes `npm ci` omit
+        # devDependencies (jest, @nestjs/cli, vite, …). That produced flaky
+        # "command not found" failures (e.g. `nest build` exit 127). The flag
+        # overrides NODE_ENV so devDeps are always installed.
         run: |
           rm -rf node_modules
-          npm ci --legacy-peer-deps
+          npm ci --legacy-peer-deps --include=dev
 
       - name: Inject ci-stubs for MFE repos
         run: |
@@ -287,11 +292,15 @@ jobs:
         run: echo "start=$(date +%s)" >> $GITHUB_OUTPUT
 
       # ── Build: Backend ─────────────────────────────────────────────────────
+      # rm -rf dist so a failed build can never leave a STALE artifact behind for
+      # the deploy/HA steps to ship. --include=dev installs @nestjs/cli even on
+      # runners that default NODE_ENV=production (fixes flaky `nest build` 127).
       - name: Build (backend)
+        id: build_backend
         if: inputs.deploy_type == 'backend'
         run: |
-          rm -rf node_modules
-          npm ci --legacy-peer-deps
+          rm -rf node_modules dist
+          npm ci --legacy-peer-deps --include=dev
           npm run build
 
       # ── Build: Next.js ─────────────────────────────────────────────────────
@@ -532,13 +541,14 @@ jobs:
           DEPLOY_SCRIPT
 
       # ── HA Standby: backend ────────────────────────────────────────────────
-      # Runs on success() || failure() so it ALSO fires when the primary prod VM
-      # is down (that is exactly when failover is needed). Without the status
-      # function the implicit success() would skip this step whenever the primary
-      # failed — defeating the purpose of a standby.
+      # Gated on the BUILD succeeding (not on the primary deploy's outcome). The
+      # primary "Deploy backend" is continue-on-error, so when the prod VM is down
+      # the job stays green and this step still runs → true failover. But if the
+      # build failed there is no valid artifact, so this is skipped (implicit
+      # success() is false) — never ship a stale dist to the standby.
       - name: Deploy backend to HA standby
         id: deploy_ha
-        if: inputs.deploy_type == 'backend' && inputs.target_vm == 'prod' && (success() || failure())
+        if: inputs.deploy_type == 'backend' && inputs.target_vm == 'prod' && steps.build_backend.outcome == 'success'
         continue-on-error: true
         env:
           HA_IP: ${{ secrets.HA_VM_IP }}
