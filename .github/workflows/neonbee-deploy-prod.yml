@@ -301,6 +301,17 @@ jobs:
         run: |
           rm -rf node_modules dist
           npm ci --legacy-peer-deps --include=dev
+          # Guard against a corrupted ~/.npm cache (restored by actions/cache):
+          # npm ci can finish with only `tar TAR_ENTRY_ERROR` *warnings* yet leave
+          # an incomplete node_modules (missing @nestjs/cli → `nest build` exit 127,
+          # flaky ~50% by runner). If the nest binary is absent, purge the npm
+          # cache and reinstall from clean so the build is deterministic.
+          if [ ! -x node_modules/.bin/nest ]; then
+            echo "::warning::nest CLI missing after npm ci — purging npm cache and reinstalling clean"
+            npm cache clean --force
+            rm -rf node_modules
+            npm ci --legacy-peer-deps --include=dev
+          fi
           npm run build
 
       # ── Build: Next.js ─────────────────────────────────────────────────────
