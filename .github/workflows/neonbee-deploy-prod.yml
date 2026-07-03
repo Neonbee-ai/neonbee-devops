@@ -419,10 +419,12 @@ jobs:
           fi
 
           if [ -d "_shell-fe" ]; then
-            # Ensure the scoped dir exists even when npm ci failed to create it
-            # (e.g. when the file: dep for @so360/cross-link couldn't resolve).
-            mkdir -p node_modules/@so360
             for pkg in shell-context design-system event-bus formatters theme; do
+              # Re-ensure @so360 dir before every copy — a previous package's
+              # inner `npm install` can hoist/reorganise deps and silently remove
+              # the parent scoped directory, causing the next cp to fail with
+              # "cannot create directory … No such file or directory".
+              mkdir -p node_modules/@so360
               rm -rf "node_modules/@so360/$pkg"
               cp -r "$GITHUB_WORKSPACE/_shell-fe/packages/$pkg" "node_modules/@so360/$pkg"
               (cd "node_modules/@so360/$pkg" && npm install --legacy-peer-deps 2>/dev/null || true)
