@@ -128,7 +128,9 @@ jobs:
         run: |
           EXTRA_ENV='${{ inputs.extra_env }}'
           [ -n "$EXTRA_ENV" ] && echo "$EXTRA_ENV" > .env.local
-          npm ci --legacy-peer-deps
+          # --include=dev: Docker-fleet runners may set NODE_ENV=production, which
+          # makes `npm ci` omit devDeps and breaks the next build (next: not found).
+          npm ci --legacy-peer-deps --include=dev
           npm run build
 
       - uses: webfactory/ssh-agent@v0.9.0

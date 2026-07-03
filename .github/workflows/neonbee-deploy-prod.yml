@@ -334,7 +334,9 @@ jobs:
         if: inputs.deploy_type == 'nextjs'
         run: |
           rm -rf node_modules
-          npm ci --legacy-peer-deps
+          # --include=dev: Docker-fleet runners may set NODE_ENV=production, which
+          # makes `npm ci` omit devDeps and breaks the next build (next: not found).
+          npm ci --legacy-peer-deps --include=dev
           if [ -d ".ci-stubs/@so360" ]; then
             mkdir -p node_modules/@so360
             rm -rf node_modules/@so360/* && cp -r .ci-stubs/@so360/* node_modules/@so360/ 2>/dev/null || true
@@ -363,7 +365,9 @@ jobs:
         if: inputs.deploy_type == 'vite-mfe' && inputs.is_shell
         run: |
           rm -rf node_modules
-          npm ci --legacy-peer-deps
+          # --include=dev: Docker-fleet runners may set NODE_ENV=production, which
+          # makes `npm ci` omit devDeps and breaks the vite build (vite: not found).
+          npm ci --legacy-peer-deps --include=dev
           cd packages/shell-context && npm run build && cd ../..
           cd packages/design-system && npm run build && cd ../..
           cd packages/event-bus && npm run build && cd ../..
@@ -405,7 +409,9 @@ jobs:
           fi
 
           rm -rf node_modules
-          npm ci --legacy-peer-deps
+          # --include=dev: Docker-fleet runners may set NODE_ENV=production, which
+          # makes `npm ci` omit devDeps and breaks the vite build (vite: not found).
+          npm ci --legacy-peer-deps --include=dev
 
           if [ -d ".ci-stubs/@so360" ] && [ ! -d "_shell-fe" ]; then
             mkdir -p node_modules/@so360

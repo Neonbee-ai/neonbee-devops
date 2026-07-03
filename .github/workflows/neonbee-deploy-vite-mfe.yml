@@ -160,7 +160,9 @@ jobs:
             "$STALE_PKG"/*) echo "Skipping stale-pkg removal: $STALE_PKG contains the live checkout" ;;
             *) rm -rf "$STALE_PKG" 2>/dev/null || true ;;
           esac
-          npm ci --legacy-peer-deps
+          # --include=dev: Docker-fleet runners may set NODE_ENV=production, which
+          # makes `npm ci` omit devDeps and breaks the vite build (vite: not found).
+          npm ci --legacy-peer-deps --include=dev
           mkdir -p node_modules/@so360
           rm -rf node_modules/@so360/* && cp -r .ci-stubs/@so360/* node_modules/@so360/ 2>/dev/null || true
           printf '%s\n' \
@@ -180,7 +182,9 @@ jobs:
             "$STALE_PKG"/*) echo "Skipping stale-pkg removal: $STALE_PKG contains the live checkout" ;;
             *) rm -rf "$STALE_PKG" 2>/dev/null || true ;;
           esac
-          npm ci --legacy-peer-deps
+          # --include=dev: Docker-fleet runners may set NODE_ENV=production, which
+          # makes `npm ci` omit devDeps and breaks the vite build (vite: not found).
+          npm ci --legacy-peer-deps --include=dev
           mkdir -p node_modules/@so360
           rm -rf node_modules/@so360/* && cp -r .ci-stubs/@so360/* node_modules/@so360/ 2>/dev/null || true
           printf '%s\n' \
