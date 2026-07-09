@@ -100,3 +100,50 @@ jobs:
               ss -tlnp | grep -q \":\$PORT \" && echo \"OK :\$PORT\" || echo \"FAIL :\$PORT\"
             done
           "
+
+  # ── Notify: Microsoft Teams webhook on completion ───────────────────────────
+  # Additive only. Runs after the job regardless of outcome. No-ops when
+  # NOTIFY_WEBHOOK_URL is unset; never fails the workflow.
+  notify:
+    name: Notify Teams
+    needs: [patch]
+    if: always()
+    runs-on: [self-hosted, contabo]
+    steps:
+      - name: Post result to Teams
+        env:
+          HOOK: ${{ secrets.NOTIFY_WEBHOOK_URL }}
+        run: |
+          if [ -z "$HOOK" ]; then echo "NOTIFY_WEBHOOK_URL not set — skipping notification"; exit 0; fi
+          if ${{ contains(needs.*.result, 'failure') }}; then
+            STATUS="FAILURE"; COLOR="D93F0B"
+          elif ${{ contains(needs.*.result, 'cancelled') }}; then
+            STATUS="CANCELLED"; COLOR="A0A0A0"
+          else
+            STATUS="SUCCESS"; COLOR="2EB886"
+          fi
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          curl -sf -H 'Content-Type: application/json' --data @- "$HOOK" <<JSON || echo "Teams notify failed (non-fatal)"
+          {
+            "@type": "MessageCard",
+            "@context": "http://schema.org/extensions",
+            "themeColor": "${COLOR}",
+            "summary": "${{ github.workflow }} ${STATUS}",
+            "sections": [{
+              "activityTitle": "${{ github.workflow }} — ${STATUS}",
+              "activitySubtitle": "${{ github.repository }} @ ${{ github.ref_name }}",
+              "facts": [
+                { "name": "Status", "value": "${STATUS}" },
+                { "name": "Workflow", "value": "${{ github.workflow }}" },
+                { "name": "Trigger", "value": "${{ github.event_name }}" },
+                { "name": "Actor", "value": "${{ github.actor }}" }
+              ],
+              "markdown": true
+            }],
+            "potentialAction": [{
+              "@type": "OpenUri",
+              "name": "View run",
+              "targets": [{ "os": "default", "uri": "${RUN_URL}" }]
+            }]
+          }
+          JSON
