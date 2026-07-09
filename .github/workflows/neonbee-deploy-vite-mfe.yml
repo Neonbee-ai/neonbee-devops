@@ -295,3 +295,52 @@ jobs:
         if: always()
         run: |
           echo "Service: ${{ inputs.service_name }} | Branch: ${{ github.ref_name }} | Status: ${{ job.status }}"
+
+  # ── Notify: Microsoft Teams webhook on completion ───────────────────────────
+  # Additive only — does NOT change the gate → build → deploy flow (Rule 0).
+  # Runs after all jobs regardless of outcome, so gate failures are reported too.
+  # No-ops silently when NOTIFY_WEBHOOK_URL is unset; never fails the pipeline.
+  notify:
+    name: Notify Teams
+    needs: [gate, build-deploy]
+    if: always()
+    runs-on: [self-hosted, contabo]
+    steps:
+      - name: Post pipeline result to Teams
+        env:
+          HOOK: ${{ secrets.NOTIFY_WEBHOOK_URL }}
+        run: |
+          if [ -z "$HOOK" ]; then echo "NOTIFY_WEBHOOK_URL not set — skipping notification"; exit 0; fi
+          if ${{ contains(needs.*.result, 'failure') }}; then
+            STATUS="FAILURE"; COLOR="D93F0B"
+          elif ${{ contains(needs.*.result, 'cancelled') }}; then
+            STATUS="CANCELLED"; COLOR="A0A0A0"
+          else
+            STATUS="SUCCESS"; COLOR="2EB886"
+          fi
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          SHA="${GITHUB_SHA:0:8}"
+          curl -sf -H 'Content-Type: application/json' --data @- "$HOOK" <<JSON || echo "Teams notify failed (non-fatal)"
+          {
+            "@type": "MessageCard",
+            "@context": "http://schema.org/extensions",
+            "themeColor": "${COLOR}",
+            "summary": "${{ inputs.service_name }} pipeline ${STATUS}",
+            "sections": [{
+              "activityTitle": "${{ inputs.service_name }} — pipeline ${STATUS}",
+              "activitySubtitle": "${{ github.repository }} @ ${{ github.ref_name }}",
+              "facts": [
+                { "name": "Status", "value": "${STATUS}" },
+                { "name": "Branch", "value": "${{ github.ref_name }}" },
+                { "name": "Commit", "value": "${SHA}" },
+                { "name": "Trigger", "value": "${{ github.event_name }}" }
+              ],
+              "markdown": true
+            }],
+            "potentialAction": [{
+              "@type": "OpenUri",
+              "name": "View run",
+              "targets": [{ "os": "default", "uri": "${RUN_URL}" }]
+            }]
+          }
+          JSON
