@@ -312,35 +312,34 @@ jobs:
         run: |
           if [ -z "$HOOK" ]; then echo "NOTIFY_WEBHOOK_URL not set — skipping notification"; exit 0; fi
           if ${{ contains(needs.*.result, 'failure') }}; then
-            STATUS="FAILURE"; COLOR="D93F0B"
+            STATUS="FAILURE"; COLOR="Attention"
           elif ${{ contains(needs.*.result, 'cancelled') }}; then
-            STATUS="CANCELLED"; COLOR="A0A0A0"
+            STATUS="CANCELLED"; COLOR="Warning"
           else
-            STATUS="SUCCESS"; COLOR="2EB886"
+            STATUS="SUCCESS"; COLOR="Good"
           fi
           RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           SHA="${GITHUB_SHA:0:8}"
           curl -sf -H 'Content-Type: application/json' --data @- "$HOOK" <<JSON || echo "Teams notify failed (non-fatal)"
           {
-            "@type": "MessageCard",
-            "@context": "http://schema.org/extensions",
-            "themeColor": "${COLOR}",
-            "summary": "${{ inputs.service_name }} pipeline ${STATUS}",
-            "sections": [{
-              "activityTitle": "${{ inputs.service_name }} — pipeline ${STATUS}",
-              "activitySubtitle": "${{ github.repository }} @ ${{ github.ref_name }}",
-              "facts": [
-                { "name": "Status", "value": "${STATUS}" },
-                { "name": "Branch", "value": "${{ github.ref_name }}" },
-                { "name": "Commit", "value": "${SHA}" },
-                { "name": "Trigger", "value": "${{ github.event_name }}" }
-              ],
-              "markdown": true
-            }],
-            "potentialAction": [{
-              "@type": "OpenUri",
-              "name": "View run",
-              "targets": [{ "os": "default", "uri": "${RUN_URL}" }]
+            "type": "message",
+            "attachments": [{
+              "contentType": "application/vnd.microsoft.card.adaptive",
+              "content": {
+                "type": "AdaptiveCard",
+                "version": "1.4",
+                "body": [
+                  { "type": "TextBlock", "size": "Large", "weight": "Bolder", "color": "${COLOR}", "text": "${{ inputs.service_name }} — pipeline ${STATUS}", "wrap": true },
+                  { "type": "TextBlock", "text": "${{ github.repository }} @ ${{ github.ref_name }}", "isSubtle": true, "spacing": "None", "wrap": true },
+                  { "type": "FactSet", "facts": [
+                    { "title": "Status", "value": "${STATUS}" },
+                    { "title": "Branch", "value": "${{ github.ref_name }}" },
+                    { "title": "Commit", "value": "${SHA}" },
+                    { "title": "Trigger", "value": "${{ github.event_name }}" }
+                  ] }
+                ],
+                "actions": [{ "type": "Action.OpenUrl", "title": "View run", "url": "${RUN_URL}" }]
+              }
             }]
           }
           JSON
