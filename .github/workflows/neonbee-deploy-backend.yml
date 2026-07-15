@@ -83,6 +83,7 @@ on:
       # Inter-service auth keys
       INTERNAL_SERVICE_KEY:         { required: false }
       EMAIL_INTERNAL_KEY:           { required: false }
+      NOTIFICATION_INTERNAL_KEY:    { required: false }
       STOREFRONT_INTERNAL_OPS_KEY:  { required: false }
       MOBILITY_INTERNAL_KEY:        { required: false }
       CHAT_INTERNAL_KEY:            { required: false }
@@ -305,6 +306,7 @@ jobs:
             [ -n "${{ secrets.CF_R2_PREFIX }}" ]                && echo "CF_R2_PREFIX=${{ secrets.CF_R2_PREFIX }}"                               >> .env.ci
             [ -n "${{ secrets.INTERNAL_SERVICE_KEY }}" ]        && echo "INTERNAL_SERVICE_KEY=${{ secrets.INTERNAL_SERVICE_KEY }}"               >> .env.ci
             [ -n "${{ secrets.EMAIL_INTERNAL_KEY }}" ]          && echo "EMAIL_INTERNAL_KEY=${{ secrets.EMAIL_INTERNAL_KEY }}"                   >> .env.ci
+            [ -n "${{ secrets.NOTIFICATION_INTERNAL_KEY }}" ]   && echo "NOTIFICATION_INTERNAL_KEY=${{ secrets.NOTIFICATION_INTERNAL_KEY }}"     >> .env.ci
             [ -n "${{ secrets.INBOX_SERVICE_KEY }}" ]           && echo "INBOX_SERVICE_KEY=${{ secrets.INBOX_SERVICE_KEY }}"                     >> .env.ci
             [ -n "${{ secrets.GEMINI_API_KEY }}" ]              && echo "GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}"                           >> .env.ci
             [ -n "${{ secrets.OPENAI_API_KEY }}" ]              && echo "OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}"                           >> .env.ci
@@ -426,6 +428,7 @@ jobs:
             [ -n "${{ secrets.CF_R2_PREFIX }}" ]                && echo "CF_R2_PREFIX=${{ secrets.CF_R2_PREFIX }}"                               >> .env.ci
             [ -n "${{ secrets.INTERNAL_SERVICE_KEY }}" ]        && echo "INTERNAL_SERVICE_KEY=${{ secrets.INTERNAL_SERVICE_KEY }}"               >> .env.ci
             [ -n "${{ secrets.EMAIL_INTERNAL_KEY }}" ]          && echo "EMAIL_INTERNAL_KEY=${{ secrets.EMAIL_INTERNAL_KEY }}"                   >> .env.ci
+            [ -n "${{ secrets.NOTIFICATION_INTERNAL_KEY }}" ]   && echo "NOTIFICATION_INTERNAL_KEY=${{ secrets.NOTIFICATION_INTERNAL_KEY }}"     >> .env.ci
             [ -n "${{ secrets.INBOX_SERVICE_KEY }}" ]           && echo "INBOX_SERVICE_KEY=${{ secrets.INBOX_SERVICE_KEY }}"                     >> .env.ci
             [ -n "${{ secrets.GEMINI_API_KEY }}" ]              && echo "GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}"                           >> .env.ci
             [ -n "${{ secrets.OPENAI_API_KEY }}" ]              && echo "OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}"                           >> .env.ci

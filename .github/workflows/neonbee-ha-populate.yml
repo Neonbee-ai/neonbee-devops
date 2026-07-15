@@ -175,6 +175,7 @@ jobs:
                 echo "BUNNY_PULL_ZONE_URL=${{ secrets.BUNNY_PULL_ZONE_URL }}"
                 echo "BUNNY_PREFIX=${{ secrets.BUNNY_PREFIX }}"
                 echo "EMAIL_INTERNAL_KEY=${{ secrets.EMAIL_INTERNAL_KEY }}"
+                echo "NOTIFICATION_INTERNAL_KEY=${{ secrets.NOTIFICATION_INTERNAL_KEY }}"
                 echo "STOREFRONT_INTERNAL_OPS_KEY=${{ secrets.STOREFRONT_INTERNAL_OPS_KEY }}"
                 echo "CF_SAAS_API_TOKEN=${{ secrets.CF_SAAS_API_TOKEN }}"
                 echo "CF_SAAS_ZONE_ID=${{ secrets.CF_SAAS_ZONE_ID }}"
