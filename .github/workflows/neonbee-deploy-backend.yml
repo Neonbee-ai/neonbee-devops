@@ -281,6 +281,7 @@ jobs:
             # ── Write CI-managed vars ────────────────────────────────────────
             {
               echo "NODE_ENV=development"
+              echo "SERVICE_PORT_BAND=6000"
               echo "PORT=$PORT"
               echo "SUPABASE_URL=${{ secrets.SUPABASE_URL }}"
               echo "SUPABASE_KEY=${{ secrets.SUPABASE_ANON_KEY }}"
@@ -403,6 +404,7 @@ jobs:
             # ── Write CI-managed vars ────────────────────────────────────────
             {
               echo "NODE_ENV=staging"
+              echo "SERVICE_PORT_BAND=7000"
               echo "PORT=$PORT"
               echo "SUPABASE_URL=${{ secrets.SUPABASE_URL_STAGING }}"
               echo "SUPABASE_KEY=${{ secrets.SUPABASE_ANON_KEY_STAGING }}"

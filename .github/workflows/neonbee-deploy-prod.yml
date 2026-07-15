@@ -516,6 +516,7 @@ jobs:
             npm install --omit=dev --legacy-peer-deps
             {
               echo "NODE_ENV=production"
+              echo "SERVICE_PORT_BAND=8000"
               echo "PORT=$PORT"
               echo "SUPABASE_URL=${{ secrets.SUPABASE_URL }}"
               echo "SUPABASE_KEY=${{ secrets.SUPABASE_ANON_KEY }}"
