@@ -306,6 +306,9 @@ jobs:
             [ -n "${{ secrets.INTERNAL_SERVICE_KEY }}" ]        && echo "INTERNAL_SERVICE_KEY=${{ secrets.INTERNAL_SERVICE_KEY }}"               >> .env.ci
             [ -n "${{ secrets.EMAIL_INTERNAL_KEY }}" ]          && echo "EMAIL_INTERNAL_KEY=${{ secrets.EMAIL_INTERNAL_KEY }}"                   >> .env.ci
             [ -n "${{ secrets.INBOX_SERVICE_KEY }}" ]           && echo "INBOX_SERVICE_KEY=${{ secrets.INBOX_SERVICE_KEY }}"                     >> .env.ci
+            [ -n "${{ secrets.GEMINI_API_KEY }}" ]              && echo "GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}"                           >> .env.ci
+            [ -n "${{ secrets.OPENAI_API_KEY }}" ]              && echo "OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}"                           >> .env.ci
+            [ -n "${{ secrets.ANTHROPIC_API_KEY }}" ]           && echo "ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}"                     >> .env.ci
             [ -n "${{ secrets.STOREFRONT_INTERNAL_OPS_KEY }}" ] && echo "STOREFRONT_INTERNAL_OPS_KEY=${{ secrets.STOREFRONT_INTERNAL_OPS_KEY }}" >> .env.ci
             [ -n "${{ secrets.MOBILITY_INTERNAL_KEY }}" ]       && echo "MOBILITY_INTERNAL_KEY=${{ secrets.MOBILITY_INTERNAL_KEY }}"             >> .env.ci
             [ -n "${{ secrets.CHAT_INTERNAL_KEY }}" ]           && echo "CHAT_INTERNAL_KEY=${{ secrets.CHAT_INTERNAL_KEY }}"                     >> .env.ci
@@ -424,6 +427,9 @@ jobs:
             [ -n "${{ secrets.INTERNAL_SERVICE_KEY }}" ]        && echo "INTERNAL_SERVICE_KEY=${{ secrets.INTERNAL_SERVICE_KEY }}"               >> .env.ci
             [ -n "${{ secrets.EMAIL_INTERNAL_KEY }}" ]          && echo "EMAIL_INTERNAL_KEY=${{ secrets.EMAIL_INTERNAL_KEY }}"                   >> .env.ci
             [ -n "${{ secrets.INBOX_SERVICE_KEY }}" ]           && echo "INBOX_SERVICE_KEY=${{ secrets.INBOX_SERVICE_KEY }}"                     >> .env.ci
+            [ -n "${{ secrets.GEMINI_API_KEY }}" ]              && echo "GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}"                           >> .env.ci
+            [ -n "${{ secrets.OPENAI_API_KEY }}" ]              && echo "OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}"                           >> .env.ci
+            [ -n "${{ secrets.ANTHROPIC_API_KEY }}" ]           && echo "ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}"                     >> .env.ci
             [ -n "${{ secrets.STOREFRONT_INTERNAL_OPS_KEY }}" ] && echo "STOREFRONT_INTERNAL_OPS_KEY=${{ secrets.STOREFRONT_INTERNAL_OPS_KEY }}" >> .env.ci
             [ -n "${{ secrets.MOBILITY_INTERNAL_KEY }}" ]       && echo "MOBILITY_INTERNAL_KEY=${{ secrets.MOBILITY_INTERNAL_KEY }}"             >> .env.ci
             [ -n "${{ secrets.VAPID_PUBLIC_KEY }}" ]            && echo "VAPID_PUBLIC_KEY=${{ secrets.VAPID_PUBLIC_KEY }}"                       >> .env.ci
