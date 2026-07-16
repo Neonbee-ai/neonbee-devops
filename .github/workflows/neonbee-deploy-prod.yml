@@ -507,6 +507,19 @@ jobs:
             #!/bin/bash
             set -e
             PM2_NAME="$1"
+            # Identity guard: this script is generated for ONE service. Refuse to
+            # run under any other name — a stale or foreign script (shared runner
+            # /tmp collisions) once deployed core's script as neura-prod with
+            # core's PORT, silently taking the service down (2026-07-16); the
+            # same class of bug previously ran inventory code as crm-prod.
+            EXPECTED_SERVICE="${{ inputs.service_name }}"
+            case "$PM2_NAME" in
+              "$EXPECTED_SERVICE"|"$EXPECTED_SERVICE-ha") : ;;
+              *)
+                echo "FATAL: deploy-script identity mismatch — built for '$EXPECTED_SERVICE', invoked as '$PM2_NAME'. Refusing to run."
+                exit 90
+                ;;
+            esac
             SERVICE_DIR="${{ inputs.service_dir }}"
             PORT="${{ inputs.port }}"
             export NVM_DIR="$HOME/.nvm"
@@ -574,15 +587,23 @@ jobs:
             echo "Deployed $PM2_NAME on port $PORT"
         run: |
           set +e
-          mkdir -p /tmp/neonbee-deploy
+          # Per-job workspace — NEVER a fixed shared path. All runner slots on a
+          # host share /tmp, so a fixed /tmp/neonbee-deploy/deploy.sh let one
+          # service's script (and logs) be picked up by another service's deploy
+          # (2026-07-16: core's script, PORT=8000, executed as neura-prod → 502).
+          DEPLOY_TMP="${RUNNER_TEMP:-/tmp}/neonbee-deploy-${GITHUB_RUN_ID}-${SERVICE_NAME}"
+          mkdir -p "$DEPLOY_TMP" || { echo "FATAL: cannot create $DEPLOY_TMP"; exit 1; }
 
-          # Write the remote deploy script to disk (no heredoc — see comment above)
-          printf '%s\n' "$_REMOTE_DEPLOY" > /tmp/neonbee-deploy/deploy.sh
-          chmod +x /tmp/neonbee-deploy/deploy.sh
+          # Write the remote deploy script to disk (no heredoc — see comment above).
+          # set +e is active: check the write explicitly, never ship a stale file.
+          printf '%s\n' "$_REMOTE_DEPLOY" > "$DEPLOY_TMP/deploy.sh" || { echo "FATAL: cannot write deploy script"; exit 1; }
+          chmod +x "$DEPLOY_TMP/deploy.sh"
+          grep -q "EXPECTED_SERVICE=\"$SERVICE_NAME\"" "$DEPLOY_TMP/deploy.sh" || { echo "FATAL: deploy script on disk is not for $SERVICE_NAME"; exit 1; }
 
           # ── shared deploy function ─────────────────────────────────────────
           deploy_vm() {
             local IP="$1" PM2_NAME="$2"
+            local REMOTE_SCRIPT="/tmp/neonbee-deploy-${PM2_NAME}-${GITHUB_RUN_ID}.sh"
             ssh-keyscan -H "$IP" >> ~/.ssh/known_hosts 2>/dev/null
 
             ssh root@"$IP" "
@@ -593,17 +614,17 @@ jobs:
             ssh root@"$IP" "mkdir -p '$SERVICE_DIR'" || return 1
             rsync -avz --delete dist/ "root@$IP:$SERVICE_DIR/dist/" || return 1
             rsync -avz package.json package-lock.json "root@$IP:$SERVICE_DIR/" || return 1
-            rsync /tmp/neonbee-deploy/deploy.sh "root@$IP:/tmp/neonbee-deploy-${PM2_NAME}.sh" || return 1
-            ssh root@"$IP" "bash /tmp/neonbee-deploy-${PM2_NAME}.sh '$PM2_NAME'" || return 1
+            rsync "$DEPLOY_TMP/deploy.sh" "root@$IP:$REMOTE_SCRIPT" || return 1
+            ssh root@"$IP" "bash '$REMOTE_SCRIPT' '$PM2_NAME'; RC=\$?; rm -f '$REMOTE_SCRIPT'; exit \$RC" || return 1
           }
 
           # ── fan out: both VMs start simultaneously ─────────────────────────
-          deploy_vm "$SERVER_IP" "$SERVICE_NAME" > /tmp/neonbee-deploy/primary.log 2>&1 &
+          deploy_vm "$SERVER_IP" "$SERVICE_NAME" > "$DEPLOY_TMP/primary.log" 2>&1 &
           PRIMARY_PID=$!
 
           HA_PID=""
           if [ -n "$HA_IP" ] && [ "$TARGET_VM" = "prod" ]; then
-            deploy_vm "$HA_IP" "${SERVICE_NAME}-ha" > /tmp/neonbee-deploy/ha.log 2>&1 &
+            deploy_vm "$HA_IP" "${SERVICE_NAME}-ha" > "$DEPLOY_TMP/ha.log" 2>&1 &
             HA_PID=$!
           fi
 
@@ -613,10 +634,10 @@ jobs:
           [ -n "$HA_PID" ] && { wait $HA_PID; H=$?; }
 
           echo "=== Primary VM log ==="
-          cat /tmp/neonbee-deploy/primary.log
+          cat "$DEPLOY_TMP/primary.log"
           if [ -n "$HA_PID" ]; then
             echo "=== HA VM log ==="
-            cat /tmp/neonbee-deploy/ha.log
+            cat "$DEPLOY_TMP/ha.log"
           fi
 
           [ $P -eq 0 ] && echo "Primary VM: success" || echo "Primary VM: failed (exit $P)"
