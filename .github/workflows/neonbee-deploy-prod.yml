@@ -108,6 +108,7 @@ on:
       SUPABASE_ANON_KEY:             { required: false }
       SUPABASE_SERVICE_KEY:          { required: false }
       JWT_SECRET:                    { required: false }
+      STOREFRONT_JWT_SECRET:         { required: false }
       CORS_ORIGINS_PROD:             { required: false }
       ENCRYPTION_KEY:                { required: false }
       CF_R2_ACCOUNT_ID:              { required: false }
@@ -564,6 +565,7 @@ jobs:
             [ -n "${{ secrets.CHAT_INTERNAL_KEY }}" ]         && echo "CHAT_INTERNAL_KEY=${{ secrets.CHAT_INTERNAL_KEY }}"             >> .env.ci
             [ -n "${{ secrets.INBOX_SERVICE_KEY }}" ]         && echo "INBOX_SERVICE_KEY=${{ secrets.INBOX_SERVICE_KEY }}"             >> .env.ci
             [ -n "${{ secrets.NOTIFICATION_INTERNAL_KEY }}" ] && echo "NOTIFICATION_INTERNAL_KEY=${{ secrets.NOTIFICATION_INTERNAL_KEY }}" >> .env.ci
+            [ -n "${{ secrets.STOREFRONT_JWT_SECRET }}" ]     && echo "STOREFRONT_JWT_SECRET=${{ secrets.STOREFRONT_JWT_SECRET }}"   >> .env.ci
             [ -n "${{ secrets.GEMINI_API_KEY }}" ]            && echo "GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}"                 >> .env.ci
             [ -n "${{ secrets.OPENAI_API_KEY }}" ]            && echo "OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}"                 >> .env.ci
             [ -n "${{ secrets.ANTHROPIC_API_KEY }}" ]         && echo "ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}"           >> .env.ci

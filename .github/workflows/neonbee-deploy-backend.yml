@@ -59,11 +59,13 @@ on:
       SUPABASE_ANON_KEY:            { required: false }
       SUPABASE_SERVICE_KEY:         { required: false }
       JWT_SECRET:                   { required: false }
+      STOREFRONT_JWT_SECRET:        { required: false }
       CORS_ORIGINS_DEV:             { required: false }
       SUPABASE_URL_STAGING:         { required: false }
       SUPABASE_ANON_KEY_STAGING:    { required: false }
       SUPABASE_SERVICE_KEY_STAGING: { required: false }
       JWT_SECRET_STAGING:           { required: false }
+      STOREFRONT_JWT_SECRET_STAGING: { required: false }
       CORS_ORIGINS_STAGING:         { required: false }
       ENCRYPTION_KEY:               { required: false }
       PAT_TOKEN:                    { required: false }
@@ -294,6 +296,7 @@ jobs:
             } > .env.ci
 
             # ── Append optional secrets (only when the GitHub secret is set) ─
+            [ -n "${{ secrets.STOREFRONT_JWT_SECRET }}" ]       && echo "STOREFRONT_JWT_SECRET=${{ secrets.STOREFRONT_JWT_SECRET }}"             >> .env.ci
             [ -n "${{ secrets.BUNNY_STORAGE_HOSTNAME }}" ]      && echo "BUNNY_STORAGE_HOSTNAME=${{ secrets.BUNNY_STORAGE_HOSTNAME }}"           >> .env.ci
             [ -n "${{ secrets.BUNNY_STORAGE_ZONE }}" ]          && echo "BUNNY_STORAGE_ZONE=${{ secrets.BUNNY_STORAGE_ZONE }}"                   >> .env.ci
             [ -n "${{ secrets.BUNNY_ACCESS_KEY }}" ]            && echo "BUNNY_ACCESS_KEY=${{ secrets.BUNNY_ACCESS_KEY }}"                       >> .env.ci
@@ -417,6 +420,7 @@ jobs:
             } > .env.ci
 
             # ── Append optional secrets (only when the GitHub secret is set) ─
+            [ -n "${{ secrets.STOREFRONT_JWT_SECRET_STAGING }}" ] && echo "STOREFRONT_JWT_SECRET=${{ secrets.STOREFRONT_JWT_SECRET_STAGING }}"   >> .env.ci
             [ -n "${{ secrets.BUNNY_STORAGE_HOSTNAME }}" ]      && echo "BUNNY_STORAGE_HOSTNAME=${{ secrets.BUNNY_STORAGE_HOSTNAME }}"           >> .env.ci
             [ -n "${{ secrets.BUNNY_STORAGE_ZONE }}" ]          && echo "BUNNY_STORAGE_ZONE=${{ secrets.BUNNY_STORAGE_ZONE }}"                   >> .env.ci
             [ -n "${{ secrets.BUNNY_ACCESS_KEY }}" ]            && echo "BUNNY_ACCESS_KEY=${{ secrets.BUNNY_ACCESS_KEY }}"                       >> .env.ci
