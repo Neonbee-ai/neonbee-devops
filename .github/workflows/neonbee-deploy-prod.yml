@@ -167,15 +167,15 @@ jobs:
             rm -f "$WS_PARENT"
           fi
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.3.1
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4.4.0
         with:
           node-version: ${{ inputs.node_version }}
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@v4.3.0
         if: runner.os == 'Linux'
         with:
           path: ~/.npm
@@ -276,9 +276,9 @@ jobs:
           fi
 
       # ── Common setup ───────────────────────────────────────────────────────
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.3.1
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4.4.0
         continue-on-error: true
         with:
           node-version: ${{ inputs.node_version }}
@@ -297,7 +297,7 @@ jobs:
           fi
           node --version
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@v4.3.0
         if: runner.os == 'Linux'
         with:
           path: ~/.npm
@@ -484,7 +484,7 @@ jobs:
             *)          echo "ip=${{ secrets.PROD_SERVER_IP }}" >> $GITHUB_OUTPUT ;;
           esac
 
-      - uses: webfactory/ssh-agent@v0.9.0
+      - uses: webfactory/ssh-agent@v0.9.1
         with:
           ssh-private-key: |
             ${{ secrets.DIGITALOCEAN_SSH_KEY }}

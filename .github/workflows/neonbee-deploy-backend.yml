@@ -102,13 +102,13 @@ jobs:
   gate:
     runs-on: [self-hosted, contabo]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.3.1
         with:
           fetch-depth: 0
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4.4.0
         with:
           node-version: ${{ inputs.node_version }}
-      - uses: actions/cache@v4
+      - uses: actions/cache@v4.3.0
         if: runner.os == 'Linux'
         with:
           path: ~/.npm
@@ -151,11 +151,11 @@ jobs:
     runs-on: [self-hosted, contabo]
     needs: [gate]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v4.3.1
+      - uses: actions/setup-node@v4.4.0
         with:
           node-version: ${{ inputs.node_version }}
-      - uses: actions/cache@v4
+      - uses: actions/cache@v4.3.0
         if: runner.os == 'Linux'
         with:
           path: ~/.npm
@@ -175,11 +175,11 @@ jobs:
     runs-on: [self-hosted, contabo]
     needs: [gate]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v4.3.1
+      - uses: actions/setup-node@v4.4.0
         with:
           node-version: ${{ inputs.node_version }}
-      - uses: actions/cache@v4
+      - uses: actions/cache@v4.3.0
         if: runner.os == 'Linux'
         with:
           path: ~/.npm
@@ -213,13 +213,13 @@ jobs:
       group: neonbee-deploy-${{ inputs.service_name }}-${{ github.ref_name }}
       cancel-in-progress: false
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.3.1
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4.4.0
         with:
           node-version: ${{ inputs.node_version }}
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@v4.3.0
         if: runner.os == 'Linux'
         with:
           path: ~/.npm
