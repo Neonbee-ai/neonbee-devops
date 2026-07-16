@@ -112,8 +112,8 @@ jobs:
         if: runner.os == 'Linux'
         with:
           path: ~/.npm
-          key: npm-${{ runner.os }}-${{ hashFiles('**/package-lock.json') }}
-          restore-keys: npm-${{ runner.os }}-
+          key: npm-v2-${{ runner.os }}-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: npm-v2-${{ runner.os }}-
       - name: Install dependencies
         run: |
           rm -rf node_modules
@@ -159,8 +159,8 @@ jobs:
         if: runner.os == 'Linux'
         with:
           path: ~/.npm
-          key: npm-${{ runner.os }}-${{ hashFiles('**/package-lock.json') }}
-          restore-keys: npm-${{ runner.os }}-
+          key: npm-v2-${{ runner.os }}-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: npm-v2-${{ runner.os }}-
       - name: Install dependencies
         run: |
           rm -rf node_modules
@@ -183,8 +183,8 @@ jobs:
         if: runner.os == 'Linux'
         with:
           path: ~/.npm
-          key: npm-${{ runner.os }}-${{ hashFiles('**/package-lock.json') }}
-          restore-keys: npm-${{ runner.os }}-
+          key: npm-v2-${{ runner.os }}-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: npm-v2-${{ runner.os }}-
       - name: Install dependencies
         run: |
           rm -rf node_modules
@@ -223,8 +223,8 @@ jobs:
         if: runner.os == 'Linux'
         with:
           path: ~/.npm
-          key: npm-${{ runner.os }}-${{ hashFiles('**/package-lock.json') }}
-          restore-keys: npm-${{ runner.os }}-
+          key: npm-v2-${{ runner.os }}-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: npm-v2-${{ runner.os }}-
 
       - name: Record build start
         id: timing

@@ -70,8 +70,8 @@ jobs:
         if: runner.os == 'Linux'
         with:
           path: ~/.npm
-          key: npm-${{ runner.os }}-${{ hashFiles('**/package-lock.json') }}
-          restore-keys: npm-${{ runner.os }}-
+          key: npm-v2-${{ runner.os }}-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: npm-v2-${{ runner.os }}-
       - name: Install dependencies
         run: npm ci --legacy-peer-deps
       - name: Run unit tests
@@ -117,8 +117,8 @@ jobs:
         if: runner.os == 'Linux'
         with:
           path: ~/.npm
-          key: npm-${{ runner.os }}-${{ hashFiles('**/package-lock.json') }}
-          restore-keys: npm-${{ runner.os }}-
+          key: npm-v2-${{ runner.os }}-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: npm-v2-${{ runner.os }}-
 
       - name: Record build start
         id: timing
@@ -131,6 +131,15 @@ jobs:
           # --include=dev: Docker-fleet runners may set NODE_ENV=production, which
           # makes `npm ci` omit devDeps and breaks the next build (next: not found).
           npm ci --legacy-peer-deps --include=dev
+          # Guard against a corrupted ~/.npm cache (restored by actions/cache):
+          # npm ci can finish with only tar warnings yet leave node_modules/next
+          # incomplete (MODULE_NOT_FOUND for next/dist/… deep files during build).
+          if ! node -e "require.resolve('next/dist/compiled/jest-worker/processChild.js'); require.resolve('next/dist/build/webpack-config')" 2>/dev/null; then
+            echo "::warning::next package incomplete after npm ci — purging npm cache and reinstalling clean"
+            npm cache clean --force
+            rm -rf node_modules
+            npm ci --legacy-peer-deps --include=dev
+          fi
           npm run build
 
       - uses: webfactory/ssh-agent@v0.9.0
