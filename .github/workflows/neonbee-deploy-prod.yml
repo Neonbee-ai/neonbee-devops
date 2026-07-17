@@ -602,6 +602,8 @@ jobs:
             [ -n "${{ secrets.GEMINI_API_KEY }}" ]            && echo "GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}"                 >> .env.ci
             [ -n "${{ secrets.OPENAI_API_KEY }}" ]            && echo "OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}"                 >> .env.ci
             [ -n "${{ secrets.ANTHROPIC_API_KEY }}" ]         && echo "ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}"           >> .env.ci
+            [ -n "${{ secrets.CONNECT_ENCRYPTION_KEY }}" ]    && echo "CONNECT_ENCRYPTION_KEY=${{ secrets.CONNECT_ENCRYPTION_KEY }}" >> .env.ci
+            [ -n "${{ secrets.CONNECT_INTERNAL_KEY }}" ]      && echo "CONNECT_INTERNAL_KEY=${{ secrets.CONNECT_INTERNAL_KEY }}"     >> .env.ci
             EXTRA_ENV='${{ inputs.extra_env }}'
             [ -n "$EXTRA_ENV" ] && printf '%s\n' "$EXTRA_ENV" >> .env.ci
             sed -i '/=$/d' .env.ci
