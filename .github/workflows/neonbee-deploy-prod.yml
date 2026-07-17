@@ -152,12 +152,6 @@ jobs:
 
   gate:
     runs-on: [self-hosted, contabo]
-    env:
-      # Isolate npm's cache per job — runner slots on a Contabo host share
-      # /opt/actions-runner/shared/npm-cache (host .npmrc), so concurrent slots
-      # raced on _cacache renames → intermittent EEXIST/ENOENT "npm ci" failures
-      # with no code fault. RUNNER_TEMP is unique per slot/job.
-      NPM_CONFIG_CACHE: ${{ runner.temp }}/npm-cache
     timeout-minutes: 20
     steps:
       # ── Remove stale workspace symlink from cross-repo builds ───────────────
@@ -180,6 +174,13 @@ jobs:
       - uses: actions/setup-node@v4.4.0
         with:
           node-version: ${{ inputs.node_version }}
+
+      - name: Isolate npm cache per job
+        # runner.temp is step-only (not valid in job-level env), so set the
+        # per-slot cache dir here — before npm ci — to keep the isolation that
+        # stops shared _cacache races on Contabo hosts.
+        shell: bash
+        run: echo "NPM_CONFIG_CACHE=$RUNNER_TEMP/npm-cache" >> "$GITHUB_ENV"
 
       - uses: actions/cache@v4.3.0
         if: runner.os == 'Linux'
@@ -261,12 +262,6 @@ jobs:
   build-deploy:
     needs: [gate]
     runs-on: [self-hosted, contabo]
-    env:
-      # Isolate npm's cache per job — runner slots on a Contabo host share
-      # /opt/actions-runner/shared/npm-cache (host .npmrc), so concurrent slots
-      # raced on _cacache renames → intermittent EEXIST/ENOENT "npm ci" failures
-      # with no code fault. RUNNER_TEMP is unique per slot/job.
-      NPM_CONFIG_CACHE: ${{ runner.temp }}/npm-cache
     timeout-minutes: 20
     concurrency:
       group: neonbee-prod-${{ inputs.service_name }}
@@ -308,6 +303,13 @@ jobs:
             echo "$NVM_DIR/versions/node/$(nvm version)/bin" >> $GITHUB_PATH
           fi
           node --version
+
+      - name: Isolate npm cache per job
+        # runner.temp is step-only (not valid in job-level env), so set the
+        # per-slot cache dir here — before npm ci — to keep the isolation that
+        # stops shared _cacache races on Contabo hosts.
+        shell: bash
+        run: echo "NPM_CONFIG_CACHE=$RUNNER_TEMP/npm-cache" >> "$GITHUB_ENV"
 
       - uses: actions/cache@v4.3.0
         if: runner.os == 'Linux'

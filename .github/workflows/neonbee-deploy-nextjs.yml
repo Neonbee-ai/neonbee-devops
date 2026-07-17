@@ -59,12 +59,6 @@ jobs:
   # ── Gate: single merged job ────────────────────────────────────────────────
   gate:
     runs-on: [self-hosted, contabo]
-    env:
-      # Isolate npm's cache per job. Every runner slot on a Contabo host used to
-      # share /opt/actions-runner/shared/npm-cache (host .npmrc), so concurrent
-      # slots raced on _cacache renames → intermittent EEXIST/ENOENT "npm ci"
-      # failures with no code fault. RUNNER_TEMP is unique per slot/job.
-      NPM_CONFIG_CACHE: ${{ runner.temp }}/npm-cache
     steps:
       - uses: actions/checkout@v4.3.1
         with:
@@ -72,6 +66,13 @@ jobs:
       - uses: actions/setup-node@v4.4.0
         with:
           node-version: ${{ inputs.node_version }}
+      - name: Isolate npm cache per job
+        # runner.temp is step-only (not valid in job-level env), so set the
+        # per-slot cache dir here — before npm ci — to keep the isolation that
+        # stops shared _cacache races on Contabo hosts.
+        shell: bash
+        run: echo "NPM_CONFIG_CACHE=$RUNNER_TEMP/npm-cache" >> "$GITHUB_ENV"
+
       - uses: actions/cache@v4.3.0
         if: runner.os == 'Linux'
         with:
@@ -109,9 +110,6 @@ jobs:
   build-deploy:
     needs: [gate]
     runs-on: [self-hosted, contabo]
-    env:
-      # Per-job npm cache (see gate job) — avoids the shared-cache rename races.
-      NPM_CONFIG_CACHE: ${{ runner.temp }}/npm-cache
     concurrency:
       group: neonbee-deploy-${{ inputs.service_name }}-${{ github.ref_name }}
       cancel-in-progress: false
@@ -121,6 +119,13 @@ jobs:
       - uses: actions/setup-node@v4.4.0
         with:
           node-version: ${{ inputs.node_version }}
+
+      - name: Isolate npm cache per job
+        # runner.temp is step-only (not valid in job-level env), so set the
+        # per-slot cache dir here — before npm ci — to keep the isolation that
+        # stops shared _cacache races on Contabo hosts.
+        shell: bash
+        run: echo "NPM_CONFIG_CACHE=$RUNNER_TEMP/npm-cache" >> "$GITHUB_ENV"
 
       - uses: actions/cache@v4.3.0
         if: runner.os == 'Linux'

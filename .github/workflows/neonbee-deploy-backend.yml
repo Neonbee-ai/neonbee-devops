@@ -101,12 +101,6 @@ jobs:
   # ── Gate: single merged job ────────────────────────────────────────────────
   gate:
     runs-on: [self-hosted, contabo]
-    env:
-      # Isolate npm's cache per job — runner slots on a Contabo host share
-      # /opt/actions-runner/shared/npm-cache (host .npmrc), so concurrent slots
-      # raced on _cacache renames → intermittent EEXIST/ENOENT "npm ci" failures
-      # with no code fault. RUNNER_TEMP is unique per slot/job.
-      NPM_CONFIG_CACHE: ${{ runner.temp }}/npm-cache
     steps:
       - uses: actions/checkout@v4.3.1
         with:
@@ -114,6 +108,13 @@ jobs:
       - uses: actions/setup-node@v4.4.0
         with:
           node-version: ${{ inputs.node_version }}
+      - name: Isolate npm cache per job
+        # runner.temp is step-only (not valid in job-level env), so set the
+        # per-slot cache dir here — before npm ci — to keep the isolation that
+        # stops shared _cacache races on Contabo hosts.
+        shell: bash
+        run: echo "NPM_CONFIG_CACHE=$RUNNER_TEMP/npm-cache" >> "$GITHUB_ENV"
+
       - uses: actions/cache@v4.3.0
         if: runner.os == 'Linux'
         with:
@@ -155,18 +156,19 @@ jobs:
   contract-tests:
     name: API Contract Tests
     runs-on: [self-hosted, contabo]
-    env:
-      # Isolate npm's cache per job — runner slots on a Contabo host share
-      # /opt/actions-runner/shared/npm-cache (host .npmrc), so concurrent slots
-      # raced on _cacache renames → intermittent EEXIST/ENOENT "npm ci" failures
-      # with no code fault. RUNNER_TEMP is unique per slot/job.
-      NPM_CONFIG_CACHE: ${{ runner.temp }}/npm-cache
     needs: [gate]
     steps:
       - uses: actions/checkout@v4.3.1
       - uses: actions/setup-node@v4.4.0
         with:
           node-version: ${{ inputs.node_version }}
+      - name: Isolate npm cache per job
+        # runner.temp is step-only (not valid in job-level env), so set the
+        # per-slot cache dir here — before npm ci — to keep the isolation that
+        # stops shared _cacache races on Contabo hosts.
+        shell: bash
+        run: echo "NPM_CONFIG_CACHE=$RUNNER_TEMP/npm-cache" >> "$GITHUB_ENV"
+
       - uses: actions/cache@v4.3.0
         if: runner.os == 'Linux'
         with:
@@ -185,18 +187,19 @@ jobs:
   integration-tests:
     name: Integration Tests
     runs-on: [self-hosted, contabo]
-    env:
-      # Isolate npm's cache per job — runner slots on a Contabo host share
-      # /opt/actions-runner/shared/npm-cache (host .npmrc), so concurrent slots
-      # raced on _cacache renames → intermittent EEXIST/ENOENT "npm ci" failures
-      # with no code fault. RUNNER_TEMP is unique per slot/job.
-      NPM_CONFIG_CACHE: ${{ runner.temp }}/npm-cache
     needs: [gate]
     steps:
       - uses: actions/checkout@v4.3.1
       - uses: actions/setup-node@v4.4.0
         with:
           node-version: ${{ inputs.node_version }}
+      - name: Isolate npm cache per job
+        # runner.temp is step-only (not valid in job-level env), so set the
+        # per-slot cache dir here — before npm ci — to keep the isolation that
+        # stops shared _cacache races on Contabo hosts.
+        shell: bash
+        run: echo "NPM_CONFIG_CACHE=$RUNNER_TEMP/npm-cache" >> "$GITHUB_ENV"
+
       - uses: actions/cache@v4.3.0
         if: runner.os == 'Linux'
         with:
@@ -226,12 +229,6 @@ jobs:
   build-deploy:
     needs: [gate, contract-tests, integration-tests]
     runs-on: [self-hosted, contabo]
-    env:
-      # Isolate npm's cache per job — runner slots on a Contabo host share
-      # /opt/actions-runner/shared/npm-cache (host .npmrc), so concurrent slots
-      # raced on _cacache renames → intermittent EEXIST/ENOENT "npm ci" failures
-      # with no code fault. RUNNER_TEMP is unique per slot/job.
-      NPM_CONFIG_CACHE: ${{ runner.temp }}/npm-cache
     timeout-minutes: 20
     concurrency:
       group: neonbee-deploy-${{ inputs.service_name }}-${{ github.ref_name }}
@@ -242,6 +239,13 @@ jobs:
       - uses: actions/setup-node@v4.4.0
         with:
           node-version: ${{ inputs.node_version }}
+
+      - name: Isolate npm cache per job
+        # runner.temp is step-only (not valid in job-level env), so set the
+        # per-slot cache dir here — before npm ci — to keep the isolation that
+        # stops shared _cacache races on Contabo hosts.
+        shell: bash
+        run: echo "NPM_CONFIG_CACHE=$RUNNER_TEMP/npm-cache" >> "$GITHUB_ENV"
 
       - uses: actions/cache@v4.3.0
         if: runner.os == 'Linux'
