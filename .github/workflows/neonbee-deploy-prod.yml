@@ -339,17 +339,24 @@ jobs:
           # --include=dev: Docker-fleet runners may set NODE_ENV=production, which
           # makes `npm ci` omit devDeps and breaks the next build (next: not found).
           npm ci --legacy-peer-deps --include=dev
-          # Guard against a corrupted ~/.npm cache (restored by actions/cache):
-          # npm ci can finish with only `tar TAR_ENTRY_ERROR` *warnings* yet leave
-          # an incomplete node_modules/next (MODULE_NOT_FOUND for next/dist/… deep
-          # files during build — observed missing jest-worker/processChild.js,
-          # polyfills, app-page/module.compiled across runner slots restoring the
-          # same poisoned cache). Same self-heal as the backend nest guard.
-          if ! node -e "require.resolve('next/dist/compiled/jest-worker/processChild.js'); require.resolve('next/dist/build/webpack-config')" 2>/dev/null; then
+          # Guard against an incomplete node_modules/next: npm ci can finish
+          # cleanly yet leave deep next/dist files missing (observed on the
+          # Docker fleet: jest-worker/processChild.js, polyfills/
+          # polyfill-nomodule, app-page/module.compiled — each crashes the
+          # build with MODULE_NOT_FOUND, some only at trace collection after
+          # minutes of building). Verify all known sentinels pre-build; on
+          # failure purge the npm cache and reinstall once, then hard-fail
+          # with a clear message rather than burning a doomed build.
+          NEXT_SENTINELS="require.resolve('next/dist/compiled/jest-worker/processChild.js'); require.resolve('next/dist/build/webpack-config'); require.resolve('next/dist/server/route-modules/app-page/module.compiled'); require.resolve('next/dist/build/polyfills/polyfill-nomodule')"
+          if ! node -e "$NEXT_SENTINELS" 2>/dev/null; then
             echo "::warning::next package incomplete after npm ci — purging npm cache and reinstalling clean"
             npm cache clean --force
             rm -rf node_modules
             npm ci --legacy-peer-deps --include=dev
+            if ! node -e "$NEXT_SENTINELS"; then
+              echo "::error::next package STILL incomplete after clean reinstall — runner disk/filesystem is corrupting installs on this slot. Rerun to land on another slot."
+              exit 1
+            fi
           fi
           if [ -d ".ci-stubs/@so360" ]; then
             mkdir -p node_modules/@so360
