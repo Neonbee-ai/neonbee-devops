@@ -152,6 +152,12 @@ jobs:
 
   gate:
     runs-on: [self-hosted, contabo]
+    env:
+      # Isolate npm's cache per job — runner slots on a Contabo host share
+      # /opt/actions-runner/shared/npm-cache (host .npmrc), so concurrent slots
+      # raced on _cacache renames → intermittent EEXIST/ENOENT "npm ci" failures
+      # with no code fault. RUNNER_TEMP is unique per slot/job.
+      NPM_CONFIG_CACHE: ${{ runner.temp }}/npm-cache
     timeout-minutes: 20
     steps:
       # ── Remove stale workspace symlink from cross-repo builds ───────────────
@@ -178,7 +184,7 @@ jobs:
       - uses: actions/cache@v4.3.0
         if: runner.os == 'Linux'
         with:
-          path: ~/.npm
+          path: ${{ runner.temp }}/npm-cache
           key: npm-v2-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
           restore-keys: npm-v2-${{ runner.os }}-
 
@@ -255,6 +261,12 @@ jobs:
   build-deploy:
     needs: [gate]
     runs-on: [self-hosted, contabo]
+    env:
+      # Isolate npm's cache per job — runner slots on a Contabo host share
+      # /opt/actions-runner/shared/npm-cache (host .npmrc), so concurrent slots
+      # raced on _cacache renames → intermittent EEXIST/ENOENT "npm ci" failures
+      # with no code fault. RUNNER_TEMP is unique per slot/job.
+      NPM_CONFIG_CACHE: ${{ runner.temp }}/npm-cache
     timeout-minutes: 20
     concurrency:
       group: neonbee-prod-${{ inputs.service_name }}
@@ -300,7 +312,7 @@ jobs:
       - uses: actions/cache@v4.3.0
         if: runner.os == 'Linux'
         with:
-          path: ~/.npm
+          path: ${{ runner.temp }}/npm-cache
           key: npm-v2-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
           restore-keys: npm-v2-${{ runner.os }}-
 
