@@ -133,6 +133,14 @@ on:
       VAPID_PUBLIC_KEY:              { required: false }
       VAPID_PRIVATE_KEY:             { required: false }
       VITE_VAPID_PUBLIC_KEY:         { required: false }
+      FIREBASE_SERVICE_ACCOUNT:      { required: false }
+      VITE_FIREBASE_API_KEY:         { required: false }
+      VITE_FIREBASE_AUTH_DOMAIN:     { required: false }
+      VITE_FIREBASE_PROJECT_ID:      { required: false }
+      VITE_FIREBASE_STORAGE_BUCKET:  { required: false }
+      VITE_FIREBASE_MESSAGING_SENDER_ID: { required: false }
+      VITE_FIREBASE_APP_ID:          { required: false }
+      VITE_FIREBASE_VAPID_KEY:       { required: false }
       MOBILITY_INTERNAL_KEY:         { required: false }
       PAT_TOKEN:                     { required: false }
       INTERNAL_SERVICE_KEY:          { required: false }
@@ -415,6 +423,13 @@ jobs:
             echo "VITE_SUPABASE_URL=${{ secrets.SUPABASE_URL }}"
             echo "VITE_SUPABASE_ANON_KEY=${{ secrets.SUPABASE_ANON_KEY }}"
             echo "VITE_VAPID_PUBLIC_KEY=${{ secrets.VITE_VAPID_PUBLIC_KEY }}"
+            echo "VITE_FIREBASE_API_KEY=${{ secrets.VITE_FIREBASE_API_KEY }}"
+            echo "VITE_FIREBASE_AUTH_DOMAIN=${{ secrets.VITE_FIREBASE_AUTH_DOMAIN }}"
+            echo "VITE_FIREBASE_PROJECT_ID=${{ secrets.VITE_FIREBASE_PROJECT_ID }}"
+            echo "VITE_FIREBASE_STORAGE_BUCKET=${{ secrets.VITE_FIREBASE_STORAGE_BUCKET }}"
+            echo "VITE_FIREBASE_MESSAGING_SENDER_ID=${{ secrets.VITE_FIREBASE_MESSAGING_SENDER_ID }}"
+            echo "VITE_FIREBASE_APP_ID=${{ secrets.VITE_FIREBASE_APP_ID }}"
+            echo "VITE_FIREBASE_VAPID_KEY=${{ secrets.VITE_FIREBASE_VAPID_KEY }}"
           } >> .env
           sed '/=$/d' .env > .env.tmp && mv .env.tmp .env
           npm run build
@@ -484,6 +499,13 @@ jobs:
             echo "VITE_SUPABASE_URL=${{ secrets.SUPABASE_URL }}"
             echo "VITE_SUPABASE_ANON_KEY=${{ secrets.SUPABASE_ANON_KEY }}"
             echo "VITE_VAPID_PUBLIC_KEY=${{ secrets.VITE_VAPID_PUBLIC_KEY }}"
+            echo "VITE_FIREBASE_API_KEY=${{ secrets.VITE_FIREBASE_API_KEY }}"
+            echo "VITE_FIREBASE_AUTH_DOMAIN=${{ secrets.VITE_FIREBASE_AUTH_DOMAIN }}"
+            echo "VITE_FIREBASE_PROJECT_ID=${{ secrets.VITE_FIREBASE_PROJECT_ID }}"
+            echo "VITE_FIREBASE_STORAGE_BUCKET=${{ secrets.VITE_FIREBASE_STORAGE_BUCKET }}"
+            echo "VITE_FIREBASE_MESSAGING_SENDER_ID=${{ secrets.VITE_FIREBASE_MESSAGING_SENDER_ID }}"
+            echo "VITE_FIREBASE_APP_ID=${{ secrets.VITE_FIREBASE_APP_ID }}"
+            echo "VITE_FIREBASE_VAPID_KEY=${{ secrets.VITE_FIREBASE_VAPID_KEY }}"
           } >> .env
           sed '/=$/d' .env > .env.tmp && mv .env.tmp .env
           npm run build
@@ -590,6 +612,14 @@ jobs:
               echo "CF_SAAS_ZONE_ID=${{ secrets.CF_SAAS_ZONE_ID }}"
               echo "CF_SAAS_FALLBACK_HOSTNAME=${{ secrets.CF_SAAS_FALLBACK_HOSTNAME }}"
             } > .env.ci
+            # Firebase service account (multi-line JSON) → base64 for safe .env transport; Core decodes FIREBASE_SERVICE_ACCOUNT_B64.
+            cat > /tmp/nb_fb_sa.json <<'NB_FB_EOF'
+            ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+            NB_FB_EOF
+            if grep -q service_account /tmp/nb_fb_sa.json 2>/dev/null; then
+              echo "FIREBASE_SERVICE_ACCOUNT_B64=$(base64 -w0 /tmp/nb_fb_sa.json)" >> .env.ci
+            fi
+            rm -f /tmp/nb_fb_sa.json
             [ -n "${{ secrets.VAPID_PUBLIC_KEY }}" ]          && echo "VAPID_PUBLIC_KEY=${{ secrets.VAPID_PUBLIC_KEY }}"               >> .env.ci
             [ -n "${{ secrets.VAPID_PRIVATE_KEY }}" ]         && echo "VAPID_PRIVATE_KEY=${{ secrets.VAPID_PRIVATE_KEY }}"             >> .env.ci
             [ -n "${{ secrets.MOBILITY_INTERNAL_KEY }}" ]     && echo "MOBILITY_INTERNAL_KEY=${{ secrets.MOBILITY_INTERNAL_KEY }}"     >> .env.ci
