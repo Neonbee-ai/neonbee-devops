@@ -125,6 +125,7 @@ on:
       EMAIL_INTERNAL_KEY:            { required: false }
       NOTIFICATION_INTERNAL_KEY:     { required: false }
       DOCS_INTERNAL_SERVICE_KEY:     { required: false }
+      NEURA_INTERNAL_KEY:            { required: false }
       CHAT_INTERNAL_KEY:             { required: false }
       STOREFRONT_INTERNAL_OPS_KEY:   { required: false }
       CF_SAAS_API_TOKEN:             { required: false }
@@ -625,6 +626,7 @@ jobs:
             [ -n "${{ secrets.MOBILITY_INTERNAL_KEY }}" ]     && echo "MOBILITY_INTERNAL_KEY=${{ secrets.MOBILITY_INTERNAL_KEY }}"     >> .env.ci
             [ -n "${{ secrets.INTERNAL_SERVICE_KEY }}" ]      && echo "INTERNAL_SERVICE_KEY=${{ secrets.INTERNAL_SERVICE_KEY }}"       >> .env.ci
             [ -n "${{ secrets.DOCS_INTERNAL_SERVICE_KEY }}" ] && echo "DOCS_INTERNAL_SERVICE_KEY=${{ secrets.DOCS_INTERNAL_SERVICE_KEY }}" >> .env.ci
+            [ -n "${{ secrets.NEURA_INTERNAL_KEY }}" ]        && echo "NEURA_INTERNAL_KEY=${{ secrets.NEURA_INTERNAL_KEY }}"           >> .env.ci
             [ -n "${{ secrets.CHAT_INTERNAL_KEY }}" ]         && echo "CHAT_INTERNAL_KEY=${{ secrets.CHAT_INTERNAL_KEY }}"             >> .env.ci
             [ -n "${{ secrets.INBOX_SERVICE_KEY }}" ]         && echo "INBOX_SERVICE_KEY=${{ secrets.INBOX_SERVICE_KEY }}"             >> .env.ci
             [ -n "${{ secrets.NOTIFICATION_INTERNAL_KEY }}" ] && echo "NOTIFICATION_INTERNAL_KEY=${{ secrets.NOTIFICATION_INTERNAL_KEY }}" >> .env.ci
