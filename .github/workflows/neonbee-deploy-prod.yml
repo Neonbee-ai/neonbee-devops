@@ -640,7 +640,7 @@ jobs:
             [ -n "${{ secrets.CONNECT_INTERNAL_KEY }}" ]      && echo "CONNECT_INTERNAL_KEY=${{ secrets.CONNECT_INTERNAL_KEY }}"     >> .env.ci
             EXTRA_ENV='${{ inputs.extra_env }}'
             [ -n "$EXTRA_ENV" ] && printf '%s\n' "$EXTRA_ENV" >> .env.ci
-            sed -i '/=$/d' .env.ci
+            sed -i -E '/^[A-Za-z_][A-Za-z0-9_]*=$/d' .env.ci
             if [ -f .env ]; then
               CI_KEYS=$(sed 's/=.*//' .env.ci | tr '\n' '|' | sed 's/|$//')
               [ -n "$CI_KEYS" ] && grep -vE "^(${CI_KEYS})=" .env >> .env.ci 2>/dev/null || true
