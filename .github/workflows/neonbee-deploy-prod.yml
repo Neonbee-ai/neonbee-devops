@@ -128,6 +128,7 @@ on:
       DOCS_INTERNAL_SERVICE_KEY:     { required: false }
       NEURA_INTERNAL_KEY:            { required: false }
       CHAT_INTERNAL_KEY:             { required: false }
+      CRM_SYNC_INTERNAL_KEY:         { required: false }
       STOREFRONT_INTERNAL_OPS_KEY:   { required: false }
       CF_SAAS_API_TOKEN:             { required: false }
       CF_SAAS_ZONE_ID:               { required: false }
@@ -638,6 +639,7 @@ jobs:
             [ -n "${{ secrets.ANTHROPIC_API_KEY }}" ]         && echo "ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}"           >> .env.ci
             [ -n "${{ secrets.CONNECT_ENCRYPTION_KEY }}" ]    && echo "CONNECT_ENCRYPTION_KEY=${{ secrets.CONNECT_ENCRYPTION_KEY }}" >> .env.ci
             [ -n "${{ secrets.CONNECT_INTERNAL_KEY }}" ]      && echo "CONNECT_INTERNAL_KEY=${{ secrets.CONNECT_INTERNAL_KEY }}"     >> .env.ci
+            [ -n "${{ secrets.CRM_SYNC_INTERNAL_KEY }}" ]     && echo "CRM_SYNC_INTERNAL_KEY=${{ secrets.CRM_SYNC_INTERNAL_KEY }}"   >> .env.ci
             EXTRA_ENV='${{ inputs.extra_env }}'
             [ -n "$EXTRA_ENV" ] && printf '%s\n' "$EXTRA_ENV" >> .env.ci
             sed -i -E '/^[A-Za-z_][A-Za-z0-9_]*=$/d' .env.ci
