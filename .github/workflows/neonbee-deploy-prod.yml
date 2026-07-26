@@ -222,7 +222,8 @@ jobs:
         env:
           CI: 'true'
         run: |
-          (npm audit --audit-level=critical --omit=dev) &
+          AUDIT_LOG=$(mktemp)
+          (npm audit --audit-level=critical --omit=dev > "$AUDIT_LOG" 2>&1) &
           AUDIT_PID=$!
 
           (npx --yes license-checker --failOn "GPL-2.0;GPL-3.0;AGPL-3.0;LGPL-2.0;LGPL-2.1;LGPL-3.0" --excludePrivatePackages) &
@@ -256,6 +257,11 @@ jobs:
           TEST_EXIT=$RC
 
           wait $AUDIT_PID; AUDIT_EXIT=$?
+          cat "$AUDIT_LOG"
+          if [ $AUDIT_EXIT -ne 0 ] && grep -q "audit endpoint returned an error" "$AUDIT_LOG"; then
+            echo "::warning::npm audit endpoint unavailable (registry-side) — skipping, not treated as failure"
+            AUDIT_EXIT=0
+          fi
           wait $LICENSE_PID; LICENSE_EXIT=$?
           wait $GITLEAKS_PID; GITLEAKS_EXIT=$?
 

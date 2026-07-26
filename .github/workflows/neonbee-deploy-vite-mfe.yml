@@ -99,7 +99,14 @@ jobs:
       - name: Lint
         run: npm run lint --if-present
       - name: Security audit
-        run: npm audit --audit-level=critical --omit=dev
+        run: |
+          AUDIT_OUT=$(npm audit --audit-level=critical --omit=dev 2>&1); AUDIT_EXIT=$?
+          echo "$AUDIT_OUT"
+          if [ $AUDIT_EXIT -ne 0 ] && echo "$AUDIT_OUT" | grep -q "audit endpoint returned an error"; then
+            echo "::warning::npm audit endpoint unavailable (registry-side) — skipping, not treated as failure"
+            exit 0
+          fi
+          exit $AUDIT_EXIT
       - name: Check dependency licenses
         run: >-
           npx license-checker
