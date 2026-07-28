@@ -319,7 +319,6 @@ jobs:
           # than relying on it reaching the job log directly from a
           # backgrounded subshell — cat it here, in the foreground, so it's
           # guaranteed visible regardless of any background-output quirk.
-          echo "DEBUG: AUDIT_LOG size=$(wc -c < "$AUDIT_LOG" 2>&1) AUDIT_CHECK_OUT size=$(wc -c < "$AUDIT_CHECK_OUT" 2>&1) node=$(command -v node) exists=$(ls -la "$AUDIT_CHECK_OUT" 2>&1)"
           cat "$AUDIT_CHECK_OUT" 2>/dev/null || true
           LICENSE_EXIT=0; wait $LICENSE_PID || LICENSE_EXIT=$?
           GITLEAKS_EXIT=0; wait $GITLEAKS_PID || GITLEAKS_EXIT=$?
