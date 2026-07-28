@@ -221,9 +221,55 @@ jobs:
       - name: Run tests and security checks
         env:
           CI: 'true'
+          # GHSA-qwww-vcr4-c8h2 (React Router "RSC mode" CSRF bypass): reviewed
+          # 2026-07-28, doesn't apply to any Neonbee app — none use React
+          # Router's RSC/data-router-in-server-mode; only the client-side
+          # browser router. npm has no first-class per-advisory ignore, so
+          # audit-check.js below filters this one ID out of the pass/fail
+          # decision while still failing normally on anything else at/above
+          # AUDIT_LEVEL. Comma-separate further IDs here if ever needed.
+          AUDIT_LEVEL: 'critical'
+          AUDIT_IGNORE_IDS: 'GHSA-qwww-vcr4-c8h2'
         run: |
+          cat > "$RUNNER_TEMP/audit-check.js" <<'AUDIT_CHECK_JS'
+          const fs = require('fs');
+          const LEVEL_RANK = { info: 0, low: 1, moderate: 2, high: 3, critical: 4 };
+          const level = process.env.AUDIT_LEVEL || 'critical';
+          const threshold = LEVEL_RANK[level];
+          const ignoreIds = new Set((process.env.AUDIT_IGNORE_IDS || '').split(',').map((s) => s.trim()).filter(Boolean));
+          const reportPath = process.argv[2];
+          let report;
+          try {
+            report = JSON.parse(fs.readFileSync(reportPath, 'utf8'));
+          } catch (err) {
+            console.error(`audit-check: could not parse npm audit JSON: ${err.message}`);
+            console.error('::warning::npm audit endpoint unavailable or returned malformed output — skipping, not treated as failure');
+            process.exit(0);
+          }
+          const vulnerabilities = Object.values(report.vulnerabilities || {});
+          const ignored = [];
+          const failing = [];
+          const belowThreshold = [];
+          for (const vuln of vulnerabilities) {
+            const advisoryIds = (vuln.via || []).filter((v) => typeof v === 'object' && v.url).map((v) => v.url.split('/').pop());
+            const matchedIgnoreId = advisoryIds.find((id) => ignoreIds.has(id));
+            if (matchedIgnoreId) { ignored.push(`${vuln.name} (${vuln.severity}) — ${matchedIgnoreId}`); continue; }
+            const rank = LEVEL_RANK[vuln.severity] ?? 0;
+            if (rank >= threshold) failing.push(`${vuln.name} (${vuln.severity})`);
+            else belowThreshold.push(`${vuln.name} (${vuln.severity})`);
+          }
+          if (ignored.length) console.log(`audit-check: explicitly ignored (reviewed, not applicable): ${ignored.join(', ')}`);
+          if (belowThreshold.length) console.log(`audit-check: below "${level}" threshold, not blocking: ${belowThreshold.join(', ')}`);
+          if (failing.length) {
+            console.error(`audit-check: FAILING — at/above "${level}" and not on the ignore list: ${failing.join(', ')}`);
+            process.exit(1);
+          }
+          console.log(`audit-check: no unignored vulnerabilities at/above "${level}" — passing.`);
+          process.exit(0);
+          AUDIT_CHECK_JS
+
           AUDIT_LOG=$(mktemp)
-          (npm audit --audit-level=critical --omit=dev > "$AUDIT_LOG" 2>&1) &
+          (npm audit --omit=dev --json > "$AUDIT_LOG" 2>/tmp/audit.stderr; node "$RUNNER_TEMP/audit-check.js" "$AUDIT_LOG") &
           AUDIT_PID=$!
 
           (npx --yes license-checker --failOn "GPL-2.0;GPL-3.0;AGPL-3.0;LGPL-2.0;LGPL-2.1;LGPL-3.0" --excludePrivatePackages) &
@@ -257,11 +303,6 @@ jobs:
           TEST_EXIT=$RC
 
           wait $AUDIT_PID; AUDIT_EXIT=$?
-          cat "$AUDIT_LOG"
-          if [ $AUDIT_EXIT -ne 0 ] && grep -q "audit endpoint returned an error" "$AUDIT_LOG"; then
-            echo "::warning::npm audit endpoint unavailable (registry-side) — skipping, not treated as failure"
-            AUDIT_EXIT=0
-          fi
           wait $LICENSE_PID; LICENSE_EXIT=$?
           wait $GITLEAKS_PID; GITLEAKS_EXIT=$?
 
