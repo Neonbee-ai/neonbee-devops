@@ -302,9 +302,15 @@ jobs:
           fi
           TEST_EXIT=$RC
 
-          wait $AUDIT_PID; AUDIT_EXIT=$?
-          wait $LICENSE_PID; LICENSE_EXIT=$?
-          wait $GITLEAKS_PID; GITLEAKS_EXIT=$?
+          # `wait $PID; VAR=$?` as a bare `;`-sequence is NOT exempt from
+          # `set -e` (only `&&`/`||` list members before the final one are) —
+          # a non-zero exit from any one of these silently killed the whole
+          # step, before its own exit code could even be captured or
+          # reported, whenever gitleaks/license-checker/audit found
+          # something. The `VAR=0; wait $PID || VAR=$?` form is set-e-safe.
+          AUDIT_EXIT=0; wait $AUDIT_PID || AUDIT_EXIT=$?
+          LICENSE_EXIT=0; wait $LICENSE_PID || LICENSE_EXIT=$?
+          GITLEAKS_EXIT=0; wait $GITLEAKS_PID || GITLEAKS_EXIT=$?
 
           [ $AUDIT_EXIT -ne 0 ] && echo "::error::Security audit failed"
           [ $LICENSE_EXIT -ne 0 ] && echo "::error::License check failed"
