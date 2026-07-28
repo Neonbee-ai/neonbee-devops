@@ -239,12 +239,16 @@ jobs:
           const ignoreIds = new Set((process.env.AUDIT_IGNORE_IDS || '').split(',').map((s) => s.trim()).filter(Boolean));
           const reportPath = process.argv[2];
           let report;
+          // process.exitCode (not process.exit()) so buffered stdout/stderr
+          // always flushes before the process actually exits — process.exit()
+          // can truncate not-yet-flushed writes when stdout is piped.
           try {
             report = JSON.parse(fs.readFileSync(reportPath, 'utf8'));
           } catch (err) {
             console.error(`audit-check: could not parse npm audit JSON: ${err.message}`);
             console.error('::warning::npm audit endpoint unavailable or returned malformed output — skipping, not treated as failure');
-            process.exit(0);
+            process.exitCode = 0;
+            return;
           }
           const vulnerabilities = Object.values(report.vulnerabilities || {});
           const ignored = [];
@@ -262,10 +266,11 @@ jobs:
           if (belowThreshold.length) console.log(`audit-check: below "${level}" threshold, not blocking: ${belowThreshold.join(', ')}`);
           if (failing.length) {
             console.error(`audit-check: FAILING — at/above "${level}" and not on the ignore list: ${failing.join(', ')}`);
-            process.exit(1);
+            process.exitCode = 1;
+          } else {
+            console.log(`audit-check: no unignored vulnerabilities at/above "${level}" — passing.`);
+            process.exitCode = 0;
           }
-          console.log(`audit-check: no unignored vulnerabilities at/above "${level}" — passing.`);
-          process.exit(0);
           AUDIT_CHECK_JS
 
           AUDIT_LOG=$(mktemp)
