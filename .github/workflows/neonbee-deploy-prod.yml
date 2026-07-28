@@ -274,7 +274,8 @@ jobs:
           AUDIT_CHECK_JS
 
           AUDIT_LOG=$(mktemp)
-          (npm audit --omit=dev --json > "$AUDIT_LOG" 2>/tmp/audit.stderr; node "$RUNNER_TEMP/audit-check.js" "$AUDIT_LOG") &
+          AUDIT_CHECK_OUT=$(mktemp)
+          (npm audit --omit=dev --json > "$AUDIT_LOG" 2>/tmp/audit.stderr; node "$RUNNER_TEMP/audit-check.js" "$AUDIT_LOG" > "$AUDIT_CHECK_OUT" 2>&1) &
           AUDIT_PID=$!
 
           (npx --yes license-checker --failOn "GPL-2.0;GPL-3.0;AGPL-3.0;LGPL-2.0;LGPL-2.1;LGPL-3.0" --excludePrivatePackages) &
@@ -314,6 +315,11 @@ jobs:
           # reported, whenever gitleaks/license-checker/audit found
           # something. The `VAR=0; wait $PID || VAR=$?` form is set-e-safe.
           AUDIT_EXIT=0; wait $AUDIT_PID || AUDIT_EXIT=$?
+          # audit-check.js's own stdout/stderr is captured to a file rather
+          # than relying on it reaching the job log directly from a
+          # backgrounded subshell — cat it here, in the foreground, so it's
+          # guaranteed visible regardless of any background-output quirk.
+          cat "$AUDIT_CHECK_OUT" 2>/dev/null || true
           LICENSE_EXIT=0; wait $LICENSE_PID || LICENSE_EXIT=$?
           GITLEAKS_EXIT=0; wait $GITLEAKS_PID || GITLEAKS_EXIT=$?
 
