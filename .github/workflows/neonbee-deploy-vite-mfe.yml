@@ -100,7 +100,13 @@ jobs:
         run: npm run lint --if-present
       - name: Security audit
         run: |
+          echo "::group::DEBUG audit-level diagnosis (temporary)"
+          node --version; npm --version
+          npm config list
+          npm config get audit-level
+          echo "::endgroup::"
           AUDIT_OUT=$(npm audit --audit-level=critical --omit=dev 2>&1); AUDIT_EXIT=$?
+          echo "DEBUG: AUDIT_EXIT=$AUDIT_EXIT"
           echo "$AUDIT_OUT"
           if [ $AUDIT_EXIT -ne 0 ] && echo "$AUDIT_OUT" | grep -q "audit endpoint returned an error"; then
             echo "::warning::npm audit endpoint unavailable (registry-side) — skipping, not treated as failure"
