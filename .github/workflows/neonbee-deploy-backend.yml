@@ -93,6 +93,9 @@ on:
       CRM_SYNC_INTERNAL_KEY:        { required: false }
       VAPID_PUBLIC_KEY:             { required: false }
       VAPID_PRIVATE_KEY:            { required: false }
+      # Google OAuth (Neonbee Connect — Gmail/Calendar/Sheets/Drive)
+      GOOGLE_CLIENT_ID:             { required: false }
+      GOOGLE_CLIENT_SECRET:         { required: false }
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -358,6 +361,8 @@ jobs:
             [ -n "${{ secrets.CRM_SYNC_INTERNAL_KEY }}" ]       && echo "CRM_SYNC_INTERNAL_KEY=${{ secrets.CRM_SYNC_INTERNAL_KEY }}"             >> .env.ci
             [ -n "${{ secrets.VAPID_PUBLIC_KEY }}" ]            && echo "VAPID_PUBLIC_KEY=${{ secrets.VAPID_PUBLIC_KEY }}"                       >> .env.ci
             [ -n "${{ secrets.VAPID_PRIVATE_KEY }}" ]           && echo "VAPID_PRIVATE_KEY=${{ secrets.VAPID_PRIVATE_KEY }}"                     >> .env.ci
+            [ -n "${{ secrets.GOOGLE_CLIENT_ID }}" ]            && echo "GOOGLE_CLIENT_ID=${{ secrets.GOOGLE_CLIENT_ID }}"                       >> .env.ci
+            [ -n "${{ secrets.GOOGLE_CLIENT_SECRET }}" ]        && echo "GOOGLE_CLIENT_SECRET=${{ secrets.GOOGLE_CLIENT_SECRET }}"               >> .env.ci
 
             # ── Caller-supplied extra env vars for dev ────────────────────────
             EXTRA_ENV_DEV='${{ inputs.extra_env_dev }}'
@@ -481,6 +486,8 @@ jobs:
             [ -n "${{ secrets.VAPID_PUBLIC_KEY }}" ]            && echo "VAPID_PUBLIC_KEY=${{ secrets.VAPID_PUBLIC_KEY }}"                       >> .env.ci
             [ -n "${{ secrets.VAPID_PRIVATE_KEY }}" ]           && echo "VAPID_PRIVATE_KEY=${{ secrets.VAPID_PRIVATE_KEY }}"                     >> .env.ci
             [ -n "${{ secrets.CRM_SYNC_INTERNAL_KEY }}" ]       && echo "CRM_SYNC_INTERNAL_KEY=${{ secrets.CRM_SYNC_INTERNAL_KEY }}"             >> .env.ci
+            [ -n "${{ secrets.GOOGLE_CLIENT_ID }}" ]            && echo "GOOGLE_CLIENT_ID=${{ secrets.GOOGLE_CLIENT_ID }}"                       >> .env.ci
+            [ -n "${{ secrets.GOOGLE_CLIENT_SECRET }}" ]        && echo "GOOGLE_CLIENT_SECRET=${{ secrets.GOOGLE_CLIENT_SECRET }}"               >> .env.ci
 
             # ── Caller-supplied extra env vars for staging ────────────────────
             EXTRA_ENV_STAGING='${{ inputs.extra_env_staging }}'

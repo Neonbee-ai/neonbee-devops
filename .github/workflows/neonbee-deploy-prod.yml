@@ -149,6 +149,9 @@ on:
       INTERNAL_SERVICE_KEY:          { required: false }
       CONTABO_SSH_KEY:               { required: false }
       HA_VM_IP:                      { required: false }
+      # Google OAuth (Neonbee Connect — Gmail/Calendar/Sheets/Drive)
+      GOOGLE_CLIENT_ID:              { required: false }
+      GOOGLE_CLIENT_SECRET:          { required: false }
 
 # Run all node20-compiled actions under the Node.js 24 engine.
 # ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION was removed as of runner ≥ 2.335.0
@@ -712,6 +715,8 @@ jobs:
             [ -n "${{ secrets.CONNECT_ENCRYPTION_KEY }}" ]    && echo "CONNECT_ENCRYPTION_KEY=${{ secrets.CONNECT_ENCRYPTION_KEY }}" >> .env.ci
             [ -n "${{ secrets.CONNECT_INTERNAL_KEY }}" ]      && echo "CONNECT_INTERNAL_KEY=${{ secrets.CONNECT_INTERNAL_KEY }}"     >> .env.ci
             [ -n "${{ secrets.CRM_SYNC_INTERNAL_KEY }}" ]     && echo "CRM_SYNC_INTERNAL_KEY=${{ secrets.CRM_SYNC_INTERNAL_KEY }}"   >> .env.ci
+            [ -n "${{ secrets.GOOGLE_CLIENT_ID }}" ]          && echo "GOOGLE_CLIENT_ID=${{ secrets.GOOGLE_CLIENT_ID }}"             >> .env.ci
+            [ -n "${{ secrets.GOOGLE_CLIENT_SECRET }}" ]      && echo "GOOGLE_CLIENT_SECRET=${{ secrets.GOOGLE_CLIENT_SECRET }}"     >> .env.ci
             EXTRA_ENV='${{ inputs.extra_env }}'
             [ -n "$EXTRA_ENV" ] && printf '%s\n' "$EXTRA_ENV" >> .env.ci
             sed -i -E '/^[A-Za-z_][A-Za-z0-9_]*=$/d' .env.ci
