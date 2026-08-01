@@ -715,6 +715,10 @@ jobs:
             [ -n "${{ secrets.CONNECT_ENCRYPTION_KEY }}" ]    && echo "CONNECT_ENCRYPTION_KEY=${{ secrets.CONNECT_ENCRYPTION_KEY }}" >> .env.ci
             [ -n "${{ secrets.CONNECT_INTERNAL_KEY }}" ]      && echo "CONNECT_INTERNAL_KEY=${{ secrets.CONNECT_INTERNAL_KEY }}"     >> .env.ci
             [ -n "${{ secrets.CRM_SYNC_INTERNAL_KEY }}" ]     && echo "CRM_SYNC_INTERNAL_KEY=${{ secrets.CRM_SYNC_INTERNAL_KEY }}"   >> .env.ci
+            [ -n "${{ secrets.SUPPORT_INTERNAL_KEY }}" ]      && echo "SUPPORT_INTERNAL_KEY=${{ secrets.SUPPORT_INTERNAL_KEY }}"     >> .env.ci
+            [ -n "${{ secrets.ACCOUNTING_INTERNAL_KEY }}" ]   && echo "ACCOUNTING_INTERNAL_KEY=${{ secrets.ACCOUNTING_INTERNAL_KEY }}" >> .env.ci
+            [ -n "${{ secrets.INVENTORY_INTERNAL_KEY }}" ]    && echo "INVENTORY_INTERNAL_KEY=${{ secrets.INVENTORY_INTERNAL_KEY }}"   >> .env.ci
+            [ -n "${{ secrets.FULFILLMENT_INTERNAL_KEY }}" ]  && echo "FULFILLMENT_INTERNAL_KEY=${{ secrets.FULFILLMENT_INTERNAL_KEY }}" >> .env.ci
             [ -n "${{ secrets.GOOGLE_CLIENT_ID }}" ]          && echo "GOOGLE_CLIENT_ID=${{ secrets.GOOGLE_CLIENT_ID }}"             >> .env.ci
             [ -n "${{ secrets.GOOGLE_CLIENT_SECRET }}" ]      && echo "GOOGLE_CLIENT_SECRET=${{ secrets.GOOGLE_CLIENT_SECRET }}"     >> .env.ci
             EXTRA_ENV='${{ inputs.extra_env }}'
