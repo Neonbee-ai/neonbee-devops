@@ -323,6 +323,7 @@ jobs:
             # ── Write CI-managed vars ────────────────────────────────────────
             {
               echo "NODE_ENV=development"
+              echo "RELEASE_SHA=${{ github.sha }}"
               echo "SERVICE_PORT_BAND=6000"
               echo "PORT=$PORT"
               echo "SUPABASE_URL=${{ secrets.SUPABASE_URL }}"
@@ -451,6 +452,7 @@ jobs:
             # ── Write CI-managed vars ────────────────────────────────────────
             {
               echo "NODE_ENV=staging"
+              echo "RELEASE_SHA=${{ github.sha }}"
               echo "SERVICE_PORT_BAND=7000"
               echo "PORT=$PORT"
               echo "SUPABASE_URL=${{ secrets.SUPABASE_URL_STAGING }}"
