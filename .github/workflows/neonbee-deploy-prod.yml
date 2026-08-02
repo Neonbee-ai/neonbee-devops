@@ -212,6 +212,24 @@ jobs:
         run: |
           rm -rf node_modules
           npm ci --legacy-peer-deps --include=dev
+          # Same corrupted-~/.npm-cache exposure the build job already guards
+          # against: npm ci can exit 0 with only `tar TAR_ENTRY_ERROR` warnings
+          # and still leave an incomplete node_modules. The build job checks for
+          # the nest binary; the gate never checked for the TEST runner, so a
+          # missing jest surfaced as `npm test` exit 127 — reported as "Unit
+          # tests failed" with no output, on three different slots in one
+          # afternoon (2026-08-02). Verify and reinstall clean when absent.
+          TEST_BIN=$(node -e "const s=require('./package.json').scripts?.test||''; console.log(/vitest/.test(s)?'vitest':/jest/.test(s)?'jest':'')" 2>/dev/null || echo "")
+          if [ -n "$TEST_BIN" ] && [ ! -x "node_modules/.bin/$TEST_BIN" ]; then
+            echo "::warning::$TEST_BIN missing after npm ci — purging npm cache and reinstalling clean"
+            npm cache clean --force
+            rm -rf node_modules
+            npm ci --legacy-peer-deps --include=dev
+          fi
+          if [ -n "$TEST_BIN" ] && [ ! -x "node_modules/.bin/$TEST_BIN" ]; then
+            echo "::error::$TEST_BIN still missing after a clean reinstall — this runner slot cannot run the gate"
+            exit 1
+          fi
 
       - name: Inject ci-stubs for MFE repos
         run: |
@@ -311,11 +329,17 @@ jobs:
           else
             EXTRA_FLAGS="--passWithNoTests --forceExit --ci"
           fi
+          # stderr is captured, not discarded. jest writes its reporter there,
+          # so dumping it always is noise — but `2>/dev/null` also swallowed
+          # `sh: jest: not found`, which is why an incomplete node_modules
+          # looked like a silent test failure. Keep it quiet on success, print
+          # it on failure.
+          TEST_ERR=$(mktemp)
           if command -v timeout &>/dev/null; then
-            timeout 120 npm test -- $EXTRA_FLAGS 2>/dev/null || RC=$?
+            timeout 120 npm test -- $EXTRA_FLAGS 2>"$TEST_ERR" || RC=$?
             [ $RC -eq 124 ] && echo "::warning::Tests hung — forcing exit as success" && RC=0
           else
-            npm test -- $EXTRA_FLAGS 2>/dev/null || RC=$?
+            npm test -- $EXTRA_FLAGS 2>"$TEST_ERR" || RC=$?
           fi
           TEST_EXIT=$RC
 
@@ -337,7 +361,16 @@ jobs:
           [ $AUDIT_EXIT -ne 0 ] && echo "::error::Security audit failed"
           [ $LICENSE_EXIT -ne 0 ] && echo "::error::License check failed"
           [ $GITLEAKS_EXIT -ne 0 ] && echo "::error::Secrets scan failed"
-          [ $TEST_EXIT -ne 0 ] && echo "::error::Unit tests failed"
+          # 127 is "command not found", not a failing assertion — calling that
+          # "Unit tests failed" sent people looking for a broken test that did
+          # not exist. Name the real cause and show the captured stderr.
+          if [ $TEST_EXIT -eq 127 ]; then
+            echo "::error::Test runner not found (exit 127) — node_modules is incomplete on this runner, NOT a test failure"
+            tail -50 "$TEST_ERR" || true
+          elif [ $TEST_EXIT -ne 0 ]; then
+            echo "::error::Unit tests failed"
+            tail -50 "$TEST_ERR" || true
+          fi
 
           exit $(( TEST_EXIT | AUDIT_EXIT | LICENSE_EXIT | GITLEAKS_EXIT ))
 
