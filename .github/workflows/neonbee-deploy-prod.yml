@@ -221,14 +221,23 @@ jobs:
           # tests failed" with no output, on three different slots in one
           # afternoon (2026-08-02). Verify and reinstall clean when absent.
           TEST_BIN=$(node -e "const s=require('./package.json').scripts?.test||''; console.log(/vitest/.test(s)?'vitest':/jest/.test(s)?'jest':'')" 2>/dev/null || echo "")
-          if [ -n "$TEST_BIN" ] && [ ! -x "node_modules/.bin/$TEST_BIN" ]; then
-            echo "::warning::$TEST_BIN missing after npm ci — purging npm cache and reinstalling clean"
+          # Checking the binary EXISTS is not enough: on 2026-08-02 runner-03
+          # produced a node_modules where node_modules/.bin/jest was present but
+          # its own dependency was not — `Error: Cannot find module 'jest-util'`,
+          # which exits 1, so it read as a genuine test failure. Run the thing.
+          runner_ok() {
+            [ -z "$TEST_BIN" ] && return 0
+            [ -x "node_modules/.bin/$TEST_BIN" ] || return 1
+            "node_modules/.bin/$TEST_BIN" --version >/dev/null 2>&1
+          }
+          if ! runner_ok; then
+            echo "::warning::$TEST_BIN cannot run after npm ci — purging npm cache and reinstalling clean"
             npm cache clean --force
             rm -rf node_modules
             npm ci --legacy-peer-deps --include=dev
           fi
-          if [ -n "$TEST_BIN" ] && [ ! -x "node_modules/.bin/$TEST_BIN" ]; then
-            echo "::error::$TEST_BIN still missing after a clean reinstall — this runner slot cannot run the gate"
+          if ! runner_ok; then
+            echo "::error::$TEST_BIN still cannot run after a clean reinstall — this runner slot cannot run the gate"
             exit 1
           fi
 

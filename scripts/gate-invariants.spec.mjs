@@ -39,6 +39,17 @@ test("the gate verifies the test runner exists after npm ci", () => {
   assert.match(gate, /npm cache clean --force/, "gate must purge the npm cache and reinstall when the runner is missing");
 });
 
+test("the gate RUNS the test runner, not merely stats it", () => {
+  // runner-03 once produced a node_modules where .bin/jest existed but its own
+  // dependency did not ("Cannot find module 'jest-util'"), which exits 1 and
+  // therefore reads as a real test failure. Only executing it catches that.
+  assert.match(
+    gateSection(),
+    /--version >\/dev\/null/,
+    "gate must execute the runner (--version) to prove it can actually start",
+  );
+});
+
 test("the gate detects the runner from the package's own test script", () => {
   assert.match(gateSection(), /vitest.*jest|jest.*vitest/s, "TEST_BIN detection must handle both jest and vitest repos");
 });
@@ -46,7 +57,7 @@ test("the gate detects the runner from the package's own test script", () => {
 test("a still-missing runner fails loudly instead of masquerading as a test failure", () => {
   assert.match(
     gateSection(),
-    /still missing after a clean reinstall/,
+    /still cannot run after a clean reinstall/,
     "gate must fail with a runner-slot diagnosis, not a silent pass or a fake test failure",
   );
 });
