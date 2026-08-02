@@ -91,6 +91,7 @@ on:
       CHAT_INTERNAL_KEY:            { required: false }
       DOCS_INTERNAL_SERVICE_KEY:    { required: false }
       CRM_SYNC_INTERNAL_KEY:        { required: false }
+      PLATFORM_OPS_INTERNAL_KEY:    { required: false }
       VAPID_PUBLIC_KEY:             { required: false }
       VAPID_PRIVATE_KEY:            { required: false }
       # Google OAuth (Neonbee Connect — Gmail/Calendar/Sheets/Drive)
@@ -359,6 +360,7 @@ jobs:
             [ -n "${{ secrets.CHAT_INTERNAL_KEY }}" ]           && echo "CHAT_INTERNAL_KEY=${{ secrets.CHAT_INTERNAL_KEY }}"                     >> .env.ci
             [ -n "${{ secrets.DOCS_INTERNAL_SERVICE_KEY }}" ]   && echo "DOCS_INTERNAL_SERVICE_KEY=${{ secrets.DOCS_INTERNAL_SERVICE_KEY }}"     >> .env.ci
             [ -n "${{ secrets.CRM_SYNC_INTERNAL_KEY }}" ]       && echo "CRM_SYNC_INTERNAL_KEY=${{ secrets.CRM_SYNC_INTERNAL_KEY }}"             >> .env.ci
+            [ -n "${{ secrets.PLATFORM_OPS_INTERNAL_KEY }}" ] && echo "PLATFORM_OPS_INTERNAL_KEY=${{ secrets.PLATFORM_OPS_INTERNAL_KEY }}" >> .env.ci
             [ -n "${{ secrets.VAPID_PUBLIC_KEY }}" ]            && echo "VAPID_PUBLIC_KEY=${{ secrets.VAPID_PUBLIC_KEY }}"                       >> .env.ci
             [ -n "${{ secrets.VAPID_PRIVATE_KEY }}" ]           && echo "VAPID_PRIVATE_KEY=${{ secrets.VAPID_PRIVATE_KEY }}"                     >> .env.ci
             [ -n "${{ secrets.GOOGLE_CLIENT_ID }}" ]            && echo "GOOGLE_CLIENT_ID=${{ secrets.GOOGLE_CLIENT_ID }}"                       >> .env.ci
@@ -486,6 +488,7 @@ jobs:
             [ -n "${{ secrets.VAPID_PUBLIC_KEY }}" ]            && echo "VAPID_PUBLIC_KEY=${{ secrets.VAPID_PUBLIC_KEY }}"                       >> .env.ci
             [ -n "${{ secrets.VAPID_PRIVATE_KEY }}" ]           && echo "VAPID_PRIVATE_KEY=${{ secrets.VAPID_PRIVATE_KEY }}"                     >> .env.ci
             [ -n "${{ secrets.CRM_SYNC_INTERNAL_KEY }}" ]       && echo "CRM_SYNC_INTERNAL_KEY=${{ secrets.CRM_SYNC_INTERNAL_KEY }}"             >> .env.ci
+            [ -n "${{ secrets.PLATFORM_OPS_INTERNAL_KEY }}" ] && echo "PLATFORM_OPS_INTERNAL_KEY=${{ secrets.PLATFORM_OPS_INTERNAL_KEY }}" >> .env.ci
             [ -n "${{ secrets.GOOGLE_CLIENT_ID }}" ]            && echo "GOOGLE_CLIENT_ID=${{ secrets.GOOGLE_CLIENT_ID }}"                       >> .env.ci
             [ -n "${{ secrets.GOOGLE_CLIENT_SECRET }}" ]        && echo "GOOGLE_CLIENT_SECRET=${{ secrets.GOOGLE_CLIENT_SECRET }}"               >> .env.ci
 

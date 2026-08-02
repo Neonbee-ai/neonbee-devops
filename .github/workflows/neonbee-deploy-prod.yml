@@ -129,6 +129,7 @@ on:
       NEURA_INTERNAL_KEY:            { required: false }
       CHAT_INTERNAL_KEY:             { required: false }
       CRM_SYNC_INTERNAL_KEY:         { required: false }
+      PLATFORM_OPS_INTERNAL_KEY:     { required: false }
       STOREFRONT_INTERNAL_OPS_KEY:   { required: false }
       CF_SAAS_API_TOKEN:             { required: false }
       CF_SAAS_ZONE_ID:               { required: false }
@@ -752,6 +753,7 @@ jobs:
             [ -n "${{ secrets.ACCOUNTING_INTERNAL_KEY }}" ]   && echo "ACCOUNTING_INTERNAL_KEY=${{ secrets.ACCOUNTING_INTERNAL_KEY }}" >> .env.ci
             [ -n "${{ secrets.INVENTORY_INTERNAL_KEY }}" ]    && echo "INVENTORY_INTERNAL_KEY=${{ secrets.INVENTORY_INTERNAL_KEY }}"   >> .env.ci
             [ -n "${{ secrets.FULFILLMENT_INTERNAL_KEY }}" ]  && echo "FULFILLMENT_INTERNAL_KEY=${{ secrets.FULFILLMENT_INTERNAL_KEY }}" >> .env.ci
+            [ -n "${{ secrets.PLATFORM_OPS_INTERNAL_KEY }}" ]  && echo "PLATFORM_OPS_INTERNAL_KEY=${{ secrets.PLATFORM_OPS_INTERNAL_KEY }}" >> .env.ci
             [ -n "${{ secrets.GOOGLE_CLIENT_ID }}" ]          && echo "GOOGLE_CLIENT_ID=${{ secrets.GOOGLE_CLIENT_ID }}"             >> .env.ci
             [ -n "${{ secrets.GOOGLE_CLIENT_SECRET }}" ]      && echo "GOOGLE_CLIENT_SECRET=${{ secrets.GOOGLE_CLIENT_SECRET }}"     >> .env.ci
             EXTRA_ENV='${{ inputs.extra_env }}'
