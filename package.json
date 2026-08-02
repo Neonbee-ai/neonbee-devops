@@ -1,0 +1,9 @@
+{
+  "name": "neonbee-devops",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Shared reusable GitHub Actions workflows for the Neonbee platform. No runtime code — the tests here pin invariants of the workflows themselves, which gate production deploys for every consumer repo.",
+  "scripts": {
+    "test": "node --test scripts/*.spec.mjs"
+  }
+}
