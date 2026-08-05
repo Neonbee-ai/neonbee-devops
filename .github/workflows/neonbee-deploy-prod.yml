@@ -130,6 +130,7 @@ on:
       CHAT_INTERNAL_KEY:             { required: false }
       CRM_SYNC_INTERNAL_KEY:         { required: false }
       PROJECTS_INTERNAL_KEY:         { required: false }
+      FORMS_INTERNAL_KEY:            { required: false }
       PLATFORM_OPS_INTERNAL_KEY:     { required: false }
       STOREFRONT_INTERNAL_OPS_KEY:   { required: false }
       CF_SAAS_API_TOKEN:             { required: false }
@@ -752,6 +753,7 @@ jobs:
             [ -n "${{ secrets.NEURA_INTERNAL_KEY }}" ]        && echo "NEURA_INTERNAL_KEY=${{ secrets.NEURA_INTERNAL_KEY }}"           >> .env.ci
             [ -n "${{ secrets.CHAT_INTERNAL_KEY }}" ]         && echo "CHAT_INTERNAL_KEY=${{ secrets.CHAT_INTERNAL_KEY }}"             >> .env.ci
             [ -n "${{ secrets.PROJECTS_INTERNAL_KEY }}" ]     && echo "PROJECTS_INTERNAL_KEY=${{ secrets.PROJECTS_INTERNAL_KEY }}"     >> .env.ci
+            [ -n "${{ secrets.FORMS_INTERNAL_KEY }}" ]        && echo "FORMS_INTERNAL_KEY=${{ secrets.FORMS_INTERNAL_KEY }}"           >> .env.ci
             [ -n "${{ secrets.INBOX_SERVICE_KEY }}" ]         && echo "INBOX_SERVICE_KEY=${{ secrets.INBOX_SERVICE_KEY }}"             >> .env.ci
             [ -n "${{ secrets.NOTIFICATION_INTERNAL_KEY }}" ] && echo "NOTIFICATION_INTERNAL_KEY=${{ secrets.NOTIFICATION_INTERNAL_KEY }}" >> .env.ci
             [ -n "${{ secrets.STOREFRONT_JWT_SECRET }}" ]     && echo "STOREFRONT_JWT_SECRET=${{ secrets.STOREFRONT_JWT_SECRET }}"   >> .env.ci
