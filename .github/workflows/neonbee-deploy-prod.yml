@@ -156,6 +156,10 @@ on:
       # Google OAuth (Neonbee Connect — Gmail/Calendar/Sheets/Drive)
       GOOGLE_CLIENT_ID:              { required: false }
       GOOGLE_CLIENT_SECRET:          { required: false }
+      # Slack OAuth (Neonbee Connect — Crew Slack channel + Slack piece)
+      SLACK_CLIENT_ID:               { required: false }
+      SLACK_CLIENT_SECRET:           { required: false }
+      SLACK_SIGNING_SECRET:          { required: false }
 
 # Run all node20-compiled actions under the Node.js 24 engine.
 # ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION was removed as of runner ≥ 2.335.0
@@ -772,6 +776,9 @@ jobs:
             [ -n "${{ secrets.PLATFORM_OPS_INTERNAL_KEY }}" ]  && echo "PLATFORM_OPS_INTERNAL_KEY=${{ secrets.PLATFORM_OPS_INTERNAL_KEY }}" >> .env.ci
             [ -n "${{ secrets.GOOGLE_CLIENT_ID }}" ]          && echo "GOOGLE_CLIENT_ID=${{ secrets.GOOGLE_CLIENT_ID }}"             >> .env.ci
             [ -n "${{ secrets.GOOGLE_CLIENT_SECRET }}" ]      && echo "GOOGLE_CLIENT_SECRET=${{ secrets.GOOGLE_CLIENT_SECRET }}"     >> .env.ci
+            [ -n "${{ secrets.SLACK_CLIENT_ID }}" ] && echo "SLACK_CLIENT_ID=${{ secrets.SLACK_CLIENT_ID }}" >> .env.ci
+            [ -n "${{ secrets.SLACK_CLIENT_SECRET }}" ] && echo "SLACK_CLIENT_SECRET=${{ secrets.SLACK_CLIENT_SECRET }}" >> .env.ci
+            [ -n "${{ secrets.SLACK_SIGNING_SECRET }}" ] && echo "SLACK_SIGNING_SECRET=${{ secrets.SLACK_SIGNING_SECRET }}" >> .env.ci
             EXTRA_ENV='${{ inputs.extra_env }}'
             [ -n "$EXTRA_ENV" ] && printf '%s\n' "$EXTRA_ENV" >> .env.ci
             sed -i -E '/^[A-Za-z_][A-Za-z0-9_]*=$/d' .env.ci
