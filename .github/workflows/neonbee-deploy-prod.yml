@@ -839,7 +839,7 @@ jobs:
           PRIMARY_PID=$!
 
           HA_PID=""
-          if [ -n "$HA_IP" ] && [ "$TARGET_VM" = "prod" ]; then
+          if [ -n "$HA_IP" ] && { [ "$TARGET_VM" = "prod" ] || [ "$TARGET_VM" = "storefront" ]; }; then
             deploy_vm "$HA_IP" "${SERVICE_NAME}-ha" > "$DEPLOY_TMP/ha.log" 2>&1 &
             HA_PID=$!
           fi
@@ -1002,7 +1002,7 @@ jobs:
       # ── HA Standby: nextjs (standard) ─────────────────────────────────────
       - name: Deploy nextjs to HA standby
         id: deploy_nextjs_ha
-        if: always() && inputs.deploy_type == 'nextjs' && !inputs.standalone && inputs.target_vm == 'prod'
+        if: always() && inputs.deploy_type == 'nextjs' && !inputs.standalone && (inputs.target_vm == 'prod' || inputs.target_vm == 'storefront')
         continue-on-error: true
         env:
           HA_IP: ${{ secrets.HA_VM_IP }}
@@ -1051,7 +1051,7 @@ jobs:
           echo "Primary VM deploy : $PRIMARY"
           echo "HA standby deploy : $HA (target_vm=$TARGET_VM)"
           if [ "$PRIMARY" = "success" ]; then echo "✅ Deployed to primary VM."; exit 0; fi
-          if [ "$TARGET_VM" = "prod" ] && [ "$HA" = "success" ]; then
+          if { [ "$TARGET_VM" = "prod" ] || [ "$TARGET_VM" = "storefront" ]; } && [ "$HA" = "success" ]; then
             echo "⚠️  Primary unavailable — HA standby is live"; exit 0
           fi
           echo "❌ Deploy reached no healthy target (primary=$PRIMARY, ha=$HA)."
