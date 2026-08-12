@@ -189,6 +189,11 @@ jobs:
             echo "Removing stale symlink at $WS_PARENT"
             rm -f "$WS_PARENT"
           fi
+          # Removing the symlink leaves nothing behind, and the runner cannot
+          # start ANY process (checkout included) without its workspace on
+          # disk. Recreate it so the run recovers instead of dying with
+          # "No such file or directory".
+          mkdir -p "$GITHUB_WORKSPACE"
 
       - uses: actions/checkout@v4.3.1
         with:
@@ -418,6 +423,11 @@ jobs:
             echo "Removing stale symlink at $WS_PARENT"
             rm -f "$WS_PARENT"
           fi
+          # Removing the symlink leaves nothing behind, and the runner cannot
+          # start ANY process (checkout included) without its workspace on
+          # disk. Recreate it so the run recovers instead of dying with
+          # "No such file or directory".
+          mkdir -p "$GITHUB_WORKSPACE"
 
       # ── Common setup ───────────────────────────────────────────────────────
       - uses: actions/checkout@v4.3.1
@@ -639,11 +649,24 @@ jobs:
           sed '/=$/d' .env > .env.tmp && mv .env.tmp .env
           npm run build
 
-          # Remove the symlink after build so subsequent shell-fe runs on this
-          # runner can create their workspace directory at the same path.
-          if [ -d "_shell-fe" ]; then
-            RUNNER_PARENT="$(dirname "$(dirname "$GITHUB_WORKSPACE")")"
-            rm -f "$RUNNER_PARENT/so360-shell-fe" 2>/dev/null || true
+      # ── Drop the cross-repo shell-fe symlink ────────────────────────────────
+      # This cleanup used to live at the end of the build script above, so a
+      # failed or cancelled `npm run build` exited first (set -e) and left the
+      # symlink dangling at _work/so360-shell-fe — which is exactly where the
+      # runner keeps so360-shell-fe's OWN workspace. The next shell-fe run on
+      # that slot then found a symlink instead of its checkout directory and
+      # every step died with "No such file or directory".
+      # As its own always() step it runs whatever the build did.
+      - name: Remove cross-repo shell-fe symlink
+        if: always() && inputs.deploy_type == 'vite-mfe' && !inputs.is_shell
+        shell: bash
+        run: |
+          RUNNER_PARENT="$(dirname "$(dirname "$GITHUB_WORKSPACE")")"
+          LINK="$RUNNER_PARENT/so360-shell-fe"
+          # Only ever remove a symlink — never a real checkout.
+          if [ -L "$LINK" ]; then
+            echo "Removing cross-repo shell-fe symlink at $LINK"
+            rm -f "$LINK"
           fi
 
       # ── SSH + VM resolution (shared) ────────────────────────────────────────
