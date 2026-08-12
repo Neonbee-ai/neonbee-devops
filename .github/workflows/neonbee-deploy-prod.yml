@@ -708,8 +708,10 @@ jobs:
             SERVICE_DIR="${{ inputs.service_dir }}"
             PORT="${{ inputs.port }}"
             export NVM_DIR="$HOME/.nvm"
-            [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
-            nvm use 22
+            if [ -s "$NVM_DIR/nvm.sh" ]; then
+              \. "$NVM_DIR/nvm.sh"
+              nvm use 22
+            fi
             cd "$SERVICE_DIR"
             npm install --omit=dev --legacy-peer-deps
             {
@@ -1078,8 +1080,10 @@ jobs:
             set -e
             cd "$SERVICE_DIR"
             export NVM_DIR="$HOME/.nvm"
-            [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
-            nvm use 22
+            if [ -s "$NVM_DIR/nvm.sh" ]; then
+              \. "$NVM_DIR/nvm.sh"
+              nvm use 22
+            fi
             pm2 delete "$SERVICE_NAME" 2>/dev/null || true
             PORT=$PORT HOSTNAME=0.0.0.0 pm2 start server.js --name "$SERVICE_NAME" --instances ${{ inputs.pm2_instances }} --max-memory-restart 500M
             pm2 save
@@ -1114,8 +1118,10 @@ jobs:
             set -e
             cd "$SERVICE_DIR"
             export NVM_DIR="$HOME/.nvm"
-            [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
-            nvm use 22
+            if [ -s "$NVM_DIR/nvm.sh" ]; then
+              \. "$NVM_DIR/nvm.sh"
+              nvm use 22
+            fi
             pm2 delete "$SERVICE_NAME" 2>/dev/null || true
             PORT=$PORT HOSTNAME=0.0.0.0 pm2 start server.js --name "$SERVICE_NAME" --instances ${{ inputs.pm2_instances }} --max-memory-restart 500M
             pm2 save
