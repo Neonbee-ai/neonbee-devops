@@ -134,6 +134,7 @@ on:
       FORMS_INTERNAL_KEY:            { required: false }
       MANUFACTURING_INTERNAL_KEY:    { required: false }
       PLATFORM_OPS_INTERNAL_KEY:     { required: false }
+      SUBSCRIPTION_INTERNAL_KEY:     { required: false }
       STOREFRONT_INTERNAL_OPS_KEY:   { required: false }
       CF_SAAS_API_TOKEN:             { required: false }
       CF_SAAS_ZONE_ID:               { required: false }
@@ -781,6 +782,7 @@ jobs:
             [ -n "${{ secrets.MOBILITY_INTERNAL_KEY }}" ]     && echo "MOBILITY_INTERNAL_KEY=${{ secrets.MOBILITY_INTERNAL_KEY }}"     >> .env.ci
             [ -n "${{ secrets.INTERNAL_SERVICE_KEY }}" ]      && echo "INTERNAL_SERVICE_KEY=${{ secrets.INTERNAL_SERVICE_KEY }}"       >> .env.ci
             [ -n "${{ secrets.DOCS_INTERNAL_SERVICE_KEY }}" ] && echo "DOCS_INTERNAL_SERVICE_KEY=${{ secrets.DOCS_INTERNAL_SERVICE_KEY }}" >> .env.ci
+            [ -n "${{ secrets.SUBSCRIPTION_INTERNAL_KEY }}" ] && echo "SUBSCRIPTION_INTERNAL_KEY=${{ secrets.SUBSCRIPTION_INTERNAL_KEY }}" >> .env.ci
             [ -n "${{ secrets.NEURA_INTERNAL_KEY }}" ]        && echo "NEURA_INTERNAL_KEY=${{ secrets.NEURA_INTERNAL_KEY }}"           >> .env.ci
             # Second accepted key: lets a new caller be onboarded (or a key
             # rotated) without every existing caller redeploying in lockstep.
