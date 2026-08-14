@@ -153,6 +153,11 @@ on:
       MOBILITY_INTERNAL_KEY:         { required: false }
       PAT_TOKEN:                     { required: false }
       INTERNAL_SERVICE_KEY:          { required: false }
+      # People Connect is the single source of truth for people data; its
+      # internal surface is key-guarded. CORE_INTERNAL_KEY is the caller-side
+      # alias for the value Core validates as INTERNAL_SERVICE_KEY.
+      PEOPLE_INTERNAL_KEY:           { required: false }
+      CORE_INTERNAL_KEY:             { required: false }
       CONTABO_SSH_KEY:               { required: false }
       HA_VM_IP:                      { required: false }
       # Google OAuth (Neonbee Connect — Gmail/Calendar/Sheets/Drive)
@@ -803,6 +808,8 @@ jobs:
             [ -n "${{ secrets.SUPPORT_INTERNAL_KEY }}" ]      && echo "SUPPORT_INTERNAL_KEY=${{ secrets.SUPPORT_INTERNAL_KEY }}"     >> .env.ci
             [ -n "${{ secrets.ACCOUNTING_INTERNAL_KEY }}" ]   && echo "ACCOUNTING_INTERNAL_KEY=${{ secrets.ACCOUNTING_INTERNAL_KEY }}" >> .env.ci
             [ -n "${{ secrets.INVENTORY_INTERNAL_KEY }}" ]    && echo "INVENTORY_INTERNAL_KEY=${{ secrets.INVENTORY_INTERNAL_KEY }}"   >> .env.ci
+            [ -n "${{ secrets.PEOPLE_INTERNAL_KEY }}" ]       && echo "PEOPLE_INTERNAL_KEY=${{ secrets.PEOPLE_INTERNAL_KEY }}"         >> .env.ci
+            [ -n "${{ secrets.CORE_INTERNAL_KEY }}" ]         && echo "CORE_INTERNAL_KEY=${{ secrets.CORE_INTERNAL_KEY }}"             >> .env.ci
             [ -n "${{ secrets.FULFILLMENT_INTERNAL_KEY }}" ]  && echo "FULFILLMENT_INTERNAL_KEY=${{ secrets.FULFILLMENT_INTERNAL_KEY }}" >> .env.ci
             [ -n "${{ secrets.PLATFORM_OPS_INTERNAL_KEY }}" ]  && echo "PLATFORM_OPS_INTERNAL_KEY=${{ secrets.PLATFORM_OPS_INTERNAL_KEY }}" >> .env.ci
             [ -n "${{ secrets.GOOGLE_CLIENT_ID }}" ]          && echo "GOOGLE_CLIENT_ID=${{ secrets.GOOGLE_CLIENT_ID }}"             >> .env.ci
