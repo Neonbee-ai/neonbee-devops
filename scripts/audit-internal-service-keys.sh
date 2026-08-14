@@ -111,7 +111,7 @@ for entry in "${!NEEDS[@]}"; do
 done
 
 # --- 3. Report ---------------------------------------------------------------
-declare -a DRIFT
+declare -a DRIFT=()
 for entry in "${!NEEDS[@]}"; do
   repo="${entry%%|*}"
   [[ "${REPO_EXISTS[$repo]:-0}" -eq 1 ]] || continue

@@ -136,3 +136,19 @@ test("Given values are read / Then they come from production, never a local .env
     "a local .env holds DEV values; setting one as a production secret is indistinguishable from a bogus key",
   );
 });
+
+test("Given zero drift / Then the success path does not crash on an empty array", () => {
+  // `set -u` plus an array declared-but-never-assigned makes "${DRIFT[@]}" an
+  // unbound-variable error, so the script failed exactly when everything was
+  // FINE — the one outcome nobody would think to test.
+  assert.match(
+    script,
+    /declare -a DRIFT=\(\)/,
+    "DRIFT must be initialised empty, not merely declared",
+  );
+  assert.doesNotMatch(
+    script,
+    /\$\{#DRIFT\[@\]:-/,
+    "${#arr[@]:-0} is not valid substitution syntax",
+  );
+});
