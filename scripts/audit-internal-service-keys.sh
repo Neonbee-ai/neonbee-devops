@@ -141,12 +141,25 @@ fi
 echo "Propagating from $PROD_VM ..."
 [[ -f "$SSH_KEY" ]] || { echo "SSH key not found at $SSH_KEY (override with SSH_KEY=…)"; exit 2; }
 
-read_canonical() {  # $1 = KEY -> prints value, or empty
+# Returns the MAJORITY value for a key across production, and warns loudly when
+# services disagree. Taking the first match would be a coin flip: NEURA_INTERNAL_KEY,
+# for instance, has seven services on one value and one straggler on a shorter
+# legacy key. Propagating the straggler's value would authenticate a new caller
+# against nothing.
+read_canonical() {  # $1 = KEY -> prints majority value, or empty
   local key="$1"
   # -n is load-bearing: without it ssh reads the caller's STDIN and swallows
   # the rest of the piped drift list, so only the first repo was ever fixed.
   timeout 40 ssh -n -i "$SSH_KEY" -o StrictHostKeyChecking=no -o BatchMode=yes "$PROD_VM" \
-    "grep -rhs '^$key=' $PROD_APP_ROOT/*/.env 2>/dev/null | head -1 | cut -d= -f2- | tr -d '\n'" 2>/dev/null
+    "grep -rhs '^$key=' $PROD_APP_ROOT/*/.env 2>/dev/null | sed 's/^[^=]*=//' | sort | uniq -c | sort -rn | head -1 | sed -E 's/^ *[0-9]+ //'" 2>/dev/null
+}
+
+# How many DISTINCT values exist for a key in production. >1 means the fleet is
+# not in agreement and a human should look before anything is propagated.
+count_variants() {  # $1 = KEY -> prints an integer
+  local key="$1"
+  timeout 40 ssh -n -i "$SSH_KEY" -o StrictHostKeyChecking=no -o BatchMode=yes "$PROD_VM" \
+    "grep -rhs '^$key=' $PROD_APP_ROOT/*/.env 2>/dev/null | sed 's/^[^=]*=//' | sort -u | wc -l" 2>/dev/null | tr -d ' '
 }
 
 declare -A CANON
@@ -155,9 +168,18 @@ TMP_DRIFT="$(mktemp)"; printf '%s\n' "${DRIFT[@]}" | sort > "$TMP_DRIFT"
 while IFS='|' read -r repo key; do
   val="${CANON[$key]:-}"
   if [[ -z "$val" ]]; then
+    variants="$(count_variants "$key")"
+    if [[ "${variants:-0}" -gt 1 ]]; then
+      echo "   ⚠️  $key — production holds $variants DIFFERENT values. Refusing to guess."
+      echo "       Reconcile the fleet first, then re-run. (Propagating the wrong one"
+      echo "       authenticates the new caller against nothing.)"
+      CANON[$key]="__AMBIGUOUS__"
+      continue
+    fi
     val="$(read_canonical "$key")"
     CANON[$key]="$val"
   fi
+  [[ "$val" == "__AMBIGUOUS__" ]] && continue
   if [[ -z "$val" ]]; then
     echo "   ⚠️  $key — no value found in production; cannot propagate. Set it manually."
     continue
