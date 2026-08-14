@@ -94,3 +94,40 @@ test("the gate still runs on the self-hosted fleet, never a GitHub-hosted runner
     "CI/CD architecture is fixed: all jobs run on the self-hosted Contabo runner",
   );
 });
+
+/**
+ * A secret that is declared but never WRITTEN is silently absent in production.
+ *
+ * `secrets: inherit` only makes a secret available to this reusable workflow.
+ * If no step references it, it never reaches .env.ci, the deploy is green, and
+ * the service starts as though the secret were unset. PEOPLE_INTERNAL_KEY and
+ * CORE_INTERNAL_KEY were both set on their repos and deployed green, and both
+ * arrived empty on the VM for exactly this reason — with nothing in the run to
+ * indicate it.
+ *
+ * The write list is therefore the real allowlist. This pins that every declared
+ * *_INTERNAL_KEY is actually written.
+ */
+test("every declared internal key is also WRITTEN to .env.ci", () => {
+  const declared = [...PROD.matchAll(/^\s{6}([A-Z0-9_]*INTERNAL(?:_SERVICE)?_KEY[A-Z0-9_]*):\s*\{/gm)]
+    .map((m) => m[1]);
+  assert.ok(declared.length > 0, "expected internal keys in the secrets block");
+
+  const unwritten = declared.filter(
+    (k) => !PROD.includes(`echo "${k}=`),
+  );
+  assert.deepEqual(
+    unwritten,
+    [],
+    `declared but never written to .env.ci — these would be silently absent in production: ${unwritten.join(", ")}`,
+  );
+});
+
+test("the two keys that were silently dropped are written", () => {
+  for (const k of ["PEOPLE_INTERNAL_KEY", "CORE_INTERNAL_KEY"]) {
+    assert.ok(
+      PROD.includes(`echo "${k}=`),
+      `${k} must be written to .env.ci, not merely declared`,
+    );
+  }
+});
