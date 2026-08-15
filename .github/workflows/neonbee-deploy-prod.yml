@@ -933,14 +933,20 @@ jobs:
             ssh -o StrictHostKeyChecking=no root@"$IP" "curl -sf http://127.0.0.1:$PORT$P" > /tmp/swagger.json 2>/dev/null && break
           done
           [ -s /tmp/swagger.json ] && head -c 1 /tmp/swagger.json | grep -q '{' || { echo "no swagger JSON served — skipping"; exit 0; }
+          # Pure curl — fleet slots may lack gh (the copy-secret/golden-gate trap).
           NAME="${{ inputs.service_name }}"
           DEST="swagger-snapshots/${NAME}.json"
-          SHA=$(gh api "repos/Neonbee-ai/so360-neura-be/contents/${DEST}?ref=catalog-snapshots" --jq .sha 2>/dev/null || true)
-          gh api -X PUT "repos/Neonbee-ai/so360-neura-be/contents/${DEST}" \
-            -f branch=catalog-snapshots \
-            -f message="chore(catalog): ${NAME} swagger snapshot from prod deploy" \
-            -f content="$(base64 < /tmp/swagger.json | tr -d '\n')" \
-            ${SHA:+-f sha=$SHA} \
+          API="https://api.github.com/repos/Neonbee-ai/so360-neura-be/contents/${DEST}"
+          AUTH="Authorization: Bearer $GH_TOKEN"
+          SHA=$(curl -sf -H "$AUTH" "${API}?ref=catalog-snapshots" | sed -n 's/.*"sha": *"\([^"]*\)".*/\1/p' | head -1 || true)
+          B64=$(base64 < /tmp/swagger.json | tr -d '\n')
+          {
+            printf '{"branch":"catalog-snapshots","message":"chore(catalog): %s swagger snapshot from prod deploy","content":"%s"' "$NAME" "$B64"
+            [ -n "$SHA" ] && printf ',"sha":"%s"' "$SHA"
+            printf '}'
+          } > /tmp/snapshot-payload.json
+          curl -sf -X PUT -H "$AUTH" -H "Content-Type: application/json" \
+            --data @/tmp/snapshot-payload.json "$API" >/dev/null \
             && echo "snapshot published: ${DEST}" || echo "snapshot publish failed (soft)"
 
       # ═══════════════════════════════════════════════════════════════════════
