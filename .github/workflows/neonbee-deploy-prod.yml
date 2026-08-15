@@ -39,6 +39,11 @@ on:
         required: false
         type: string
         default: '/api'
+      publish_swagger:
+        description: "Set 'true' to publish this backend's live swagger JSON to so360-neura-be (catalog auto-regen); opt-in per caller, never fails the deploy"
+        required: false
+        type: string
+        default: ''
       pm2_instances:
         required: false
         type: number
@@ -908,6 +913,35 @@ jobs:
           if [ $H -eq 99 ]; then exit $P; fi  # non-prod: primary must succeed
           echo "Both primary and HA deploys failed"
           exit 1
+
+      # ── Catalog auto-regen (opt-in): publish the LIVE service's swagger ────
+      # Runs after a successful backend deploy; every failure mode is soft — a
+      # snapshot problem must never fail a deploy. Snapshots land on the
+      # catalog-snapshots branch of so360-neura-be via the contents API
+      # (repository_dispatch payloads cap at 64KB; swaggers are bigger), where
+      # neura's own CI regenerates the catalog and opens a PR on drift.
+      - name: Publish swagger snapshot to Neura catalog repo
+        if: ${{ inputs.deploy_type == 'backend' && inputs.publish_swagger == 'true' }}
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+        run: |
+          IP="${{ steps.vm.outputs.ip }}"
+          PORT="${{ inputs.port }}"
+          [ -n "$IP" ] && [ "$PORT" != "0" ] || { echo "no ip/port — skipping"; exit 0; }
+          for P in "/api-json" "/api-docs-json" "/docs-json"; do
+            ssh -o StrictHostKeyChecking=no root@"$IP" "curl -sf http://127.0.0.1:$PORT$P" > /tmp/swagger.json 2>/dev/null && break
+          done
+          [ -s /tmp/swagger.json ] && head -c 1 /tmp/swagger.json | grep -q '{' || { echo "no swagger JSON served — skipping"; exit 0; }
+          NAME="${{ inputs.service_name }}"
+          DEST="swagger-snapshots/${NAME}.json"
+          SHA=$(gh api "repos/Neonbee-ai/so360-neura-be/contents/${DEST}?ref=catalog-snapshots" --jq .sha 2>/dev/null || true)
+          gh api -X PUT "repos/Neonbee-ai/so360-neura-be/contents/${DEST}" \
+            -f branch=catalog-snapshots \
+            -f message="chore(catalog): ${NAME} swagger snapshot from prod deploy" \
+            -f content="$(base64 < /tmp/swagger.json | tr -d '\n')" \
+            ${SHA:+-f sha=$SHA} \
+            && echo "snapshot published: ${DEST}" || echo "snapshot publish failed (soft)"
 
       # ═══════════════════════════════════════════════════════════════════════
       # DEPLOY: Vite MFE (rsync dist/ → nginx → CF purge)
