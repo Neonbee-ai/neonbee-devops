@@ -205,6 +205,30 @@ jobs:
       - name: Run contract tests
         env:
           NODE_ENV: test
+          # Some repos' contract specs boot the real AppModule (accounting's
+          # asserts header validation against the running app), and several
+          # backends throw in onModuleInit when an internal key is absent —
+          # the same failure the integration tier hit on so360-core. Pass the
+          # boot-time set here too.
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+          ENCRYPTION_KEY: ${{ secrets.ENCRYPTION_KEY }}
+          DOCS_INTERNAL_SERVICE_KEY: ${{ secrets.DOCS_INTERNAL_SERVICE_KEY }}
+          INTERNAL_SERVICE_KEY: ${{ secrets.INTERNAL_SERVICE_KEY }}
+          EMAIL_INTERNAL_KEY: ${{ secrets.EMAIL_INTERNAL_KEY }}
+          NOTIFICATION_INTERNAL_KEY: ${{ secrets.NOTIFICATION_INTERNAL_KEY }}
+          CHAT_INTERNAL_KEY: ${{ secrets.CHAT_INTERNAL_KEY }}
+          CRM_SYNC_INTERNAL_KEY: ${{ secrets.CRM_SYNC_INTERNAL_KEY }}
+          PLATFORM_OPS_INTERNAL_KEY: ${{ secrets.PLATFORM_OPS_INTERNAL_KEY }}
+          PROJECTS_INTERNAL_KEY: ${{ secrets.PROJECTS_INTERNAL_KEY }}
+          MANUFACTURING_INTERNAL_KEY: ${{ secrets.MANUFACTURING_INTERNAL_KEY }}
+          ACCOUNTING_INTERNAL_KEY: ${{ secrets.ACCOUNTING_INTERNAL_KEY }}
+          SUBSCRIPTION_INTERNAL_KEY: ${{ secrets.SUBSCRIPTION_INTERNAL_KEY }}
+          STOREFRONT_INTERNAL_OPS_KEY: ${{ secrets.STOREFRONT_INTERNAL_OPS_KEY }}
+          MOBILITY_INTERNAL_KEY: ${{ secrets.MOBILITY_INTERNAL_KEY }}
         run: |
           if ! node -e "process.exit(require('./package.json').scripts?.['test:contract'] ? 0 : 1)" 2>/dev/null; then
             echo "::warning::No test:contract script — the API contract tier is NOT enforced for ${{ inputs.service_name }}. Backfill required."
