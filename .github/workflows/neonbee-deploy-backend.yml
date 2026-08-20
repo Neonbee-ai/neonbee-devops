@@ -303,6 +303,26 @@ jobs:
           TEST_TENANT_ID: '3cf1c619-c8f6-49ac-9207-447418d5beee'
           TEST_ORG_ID: '8317fe18-6ac4-4ac4-b71d-dc13122a905d'
           TEST_USER_ID: '4a1832f4-f7bb-44bf-ad01-9431d8b14efc'
+          # Boot-time required secrets. Several backends throw in
+          # onModuleInit when an internal service key is absent — so360-core's
+          # MediaService is one — so an integration run without them fails at
+          # bootstrap rather than on any assertion. These are already declared
+          # by this workflow; they just were not reaching the job.
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+          ENCRYPTION_KEY: ${{ secrets.ENCRYPTION_KEY }}
+          DOCS_INTERNAL_SERVICE_KEY: ${{ secrets.DOCS_INTERNAL_SERVICE_KEY }}
+          INTERNAL_SERVICE_KEY: ${{ secrets.INTERNAL_SERVICE_KEY }}
+          EMAIL_INTERNAL_KEY: ${{ secrets.EMAIL_INTERNAL_KEY }}
+          NOTIFICATION_INTERNAL_KEY: ${{ secrets.NOTIFICATION_INTERNAL_KEY }}
+          CHAT_INTERNAL_KEY: ${{ secrets.CHAT_INTERNAL_KEY }}
+          CRM_SYNC_INTERNAL_KEY: ${{ secrets.CRM_SYNC_INTERNAL_KEY }}
+          PLATFORM_OPS_INTERNAL_KEY: ${{ secrets.PLATFORM_OPS_INTERNAL_KEY }}
+          PROJECTS_INTERNAL_KEY: ${{ secrets.PROJECTS_INTERNAL_KEY }}
+          MANUFACTURING_INTERNAL_KEY: ${{ secrets.MANUFACTURING_INTERNAL_KEY }}
+          ACCOUNTING_INTERNAL_KEY: ${{ secrets.ACCOUNTING_INTERNAL_KEY }}
+          SUBSCRIPTION_INTERNAL_KEY: ${{ secrets.SUBSCRIPTION_INTERNAL_KEY }}
+          STOREFRONT_INTERNAL_OPS_KEY: ${{ secrets.STOREFRONT_INTERNAL_OPS_KEY }}
+          MOBILITY_INTERNAL_KEY: ${{ secrets.MOBILITY_INTERNAL_KEY }}
 
   # ── Build + Deploy (ALL gates must pass) ───────────────────────────────────
   build-deploy:
