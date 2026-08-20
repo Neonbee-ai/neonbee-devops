@@ -1,0 +1,220 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# PR Gate (reusable) — verification only. Never builds, never deploys.
+#
+# Why this is a separate workflow rather than a `pull_request` trigger bolted
+# onto the deploy callers:
+#
+# The estate's gates all fired on `push`, so every tier — unit, contract,
+# integration, audit, secrets — ran only AFTER a merge had already happened.
+# The gate could block a deployment but never a bad merge, which left `main`
+# able to sit red with the deploy path as the only backstop.
+#
+# Adding `pull_request` to the deploy callers would have fixed the timing but
+# put deploy jobs one `if:` away from running against an untrusted PR ref. A
+# single mistake in that condition deploys a fork's code to production. Here
+# there is no build-deploy job to guard: a PR physically cannot deploy, because
+# the capability is absent rather than disabled.
+#
+# Duplication with the deploy gates is deliberate and is held in parity by
+# tests/test_gate_trust_contract.py, which asserts the same invariants against
+# every gate workflow including this one.
+# ─────────────────────────────────────────────────────────────────────────────
+name: PR Gate (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      service_name:
+        description: 'e.g. crm-be, core, folio-be — used in warning annotations'
+        required: true
+        type: string
+      deploy_type:
+        description: 'backend | vite-mfe | nextjs — backend also runs contract + integration'
+        required: false
+        type: string
+        default: 'backend'
+      node_version:
+        required: false
+        type: string
+        default: '22'
+    secrets:
+      SUPABASE_URL:         { required: false }
+      SUPABASE_ANON_KEY:    { required: false }
+      SUPABASE_SERVICE_KEY: { required: false }
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+
+  gate:
+    name: Gate
+    runs-on: [self-hosted, contabo]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4.3.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4.4.0
+        with:
+          node-version: ${{ inputs.node_version }}
+      - name: Isolate npm cache per job
+        shell: bash
+        run: echo "NPM_CONFIG_CACHE=$RUNNER_TEMP/npm-cache" >> "$GITHUB_ENV"
+
+      - name: Install dependencies
+        run: |
+          # Warm slots keep node_modules between runs — purge before installing.
+          rm -rf node_modules
+          npm ci --legacy-peer-deps
+          # `npm ci` can exit 0 on a corrupted npm cache and still leave the
+          # test runner unusable: a missing binary exits 127, a half-installed
+          # one exits 1, and both read as "tests failed". Execute it to be sure.
+          TEST_BIN=$(node -e "const s=require('./package.json').scripts?.test||''; console.log(/vitest/.test(s)?'vitest':/jest/.test(s)?'jest':'')" 2>/dev/null || echo "")
+          runner_ok() {
+            [ -z "$TEST_BIN" ] && return 0
+            [ -x "node_modules/.bin/$TEST_BIN" ] || return 1
+            "node_modules/.bin/$TEST_BIN" --version >/dev/null 2>&1
+          }
+          if ! runner_ok; then
+            echo "::warning::$TEST_BIN cannot run after npm ci — purging npm cache and reinstalling clean"
+            npm cache clean --force
+            rm -rf node_modules
+            npm ci --legacy-peer-deps
+          fi
+          if ! runner_ok; then
+            echo "::error::$TEST_BIN still cannot run after a clean reinstall — this runner slot cannot run the gate"
+            exit 1
+          fi
+
+      - name: Inject ci-stubs for MFE repos
+        run: |
+          if [ -d ".ci-stubs/@so360" ]; then
+            mkdir -p node_modules/@so360
+            rm -rf node_modules/@so360/* && cp -r .ci-stubs/@so360/* node_modules/@so360/
+            echo "Injected @so360 ci-stubs for test phase"
+          fi
+
+      - name: Run unit tests
+        env:
+          CI: 'true'
+        run: |
+          # A spec floor, asserted before the run: `--passWithNoTests` otherwise
+          # lets an empty or mis-globbed suite exit 0 and read as a pass.
+          SPEC_COUNT=$( { git ls-files '*.spec.ts' '*.spec.tsx' '*.spec.js' '*.test.ts' '*.test.tsx' '*.test.js' 2>/dev/null || true; } | wc -l | tr -d ' ')
+          echo "Tracked spec files: $SPEC_COUNT"
+          if [ "$SPEC_COUNT" -eq 0 ]; then
+            echo "::error::No tracked spec files found — the unit tier is not enforced for this repo."
+            exit 1
+          fi
+          npm test -- --passWithNoTests --forceExit --ci
+
+      - name: Lint
+        run: npm run lint --if-present
+
+      - name: Security audit
+        run: |
+          AUDIT_OUT=$(npm audit --audit-level=critical --omit=dev 2>&1); AUDIT_EXIT=$?
+          echo "$AUDIT_OUT"
+          if [ $AUDIT_EXIT -ne 0 ] && echo "$AUDIT_OUT" | grep -q "audit endpoint returned an error"; then
+            echo "::warning::npm audit endpoint unavailable (registry-side) — skipping, not treated as failure"
+            exit 0
+          fi
+          exit $AUDIT_EXIT
+
+      - name: Check dependency licenses
+        run: >-
+          npx license-checker
+          --failOn "GPL-2.0;GPL-3.0;AGPL-3.0;LGPL-2.0;LGPL-2.1;LGPL-3.0"
+          --excludePrivatePackages
+
+      - name: Scan for secrets
+        run: |
+          rm -rf dist/ coverage/ dist-ssr/
+          GITLEAKS_VERSION="8.30.1"
+          if command -v gitleaks &>/dev/null; then
+            gitleaks detect --source . --verbose
+          else
+            _GL_OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+            _GL_ARCH=$(uname -m)
+            case "$_GL_ARCH" in x86_64) _GL_ARCH="x64" ;; arm64|aarch64) _GL_ARCH="arm64" ;; esac
+            curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_${_GL_OS}_${_GL_ARCH}.tar.gz" | tar -xz -C /tmp/
+            /tmp/gitleaks detect --source . --verbose
+          fi
+
+  contract-tests:
+    name: API Contract Tests
+    if: inputs.deploy_type == 'backend'
+    needs: [gate]
+    runs-on: [self-hosted, contabo]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4.3.1
+      - uses: actions/setup-node@v4.4.0
+        with:
+          node-version: ${{ inputs.node_version }}
+      - name: Isolate npm cache per job
+        shell: bash
+        run: echo "NPM_CONFIG_CACHE=$RUNNER_TEMP/npm-cache" >> "$GITHUB_ENV"
+      - name: Install dependencies
+        run: |
+          rm -rf node_modules
+          npm ci --legacy-peer-deps --include=dev
+      - name: Run contract tests
+        env:
+          NODE_ENV: test
+        run: |
+          if ! node -e "process.exit(require('./package.json').scripts?.['test:contract'] ? 0 : 1)" 2>/dev/null; then
+            echo "::warning::No test:contract script — the API contract tier is NOT enforced for ${{ inputs.service_name }}. Backfill required."
+            exit 0
+          fi
+          COUNT=$( { git ls-files '*.contract.spec.ts' 2>/dev/null || true; } | wc -l | tr -d ' ')
+          if [ "$COUNT" -eq 0 ]; then
+            echo "::warning::test:contract is defined but 0 *.contract.spec.ts files exist — tier NOT enforced for ${{ inputs.service_name }}."
+            exit 0
+          fi
+          echo "Running $COUNT contract spec file(s)"
+          npm run test:contract
+
+  integration-tests:
+    name: Integration Tests
+    if: inputs.deploy_type == 'backend'
+    needs: [gate]
+    runs-on: [self-hosted, contabo]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4.3.1
+      - uses: actions/setup-node@v4.4.0
+        with:
+          node-version: ${{ inputs.node_version }}
+      - name: Isolate npm cache per job
+        shell: bash
+        run: echo "NPM_CONFIG_CACHE=$RUNNER_TEMP/npm-cache" >> "$GITHUB_ENV"
+      - name: Install dependencies
+        run: |
+          rm -rf node_modules
+          npm ci --legacy-peer-deps --include=dev
+      - name: Run integration tests
+        env:
+          NODE_ENV: test
+          NODE_OPTIONS: --experimental-vm-modules
+          SO360_AUTH_BYPASS: 'true'
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          TEST_TENANT_ID: '3cf1c619-c8f6-49ac-9207-447418d5beee'
+          TEST_ORG_ID: '8317fe18-6ac4-4ac4-b71d-dc13122a905d'
+          TEST_USER_ID: '4a1832f4-f7bb-44bf-ad01-9431d8b14efc'
+        run: |
+          if ! node -e "process.exit(require('./package.json').scripts?.['test:integration'] ? 0 : 1)" 2>/dev/null; then
+            echo "::warning::No test:integration script — the integration tier is NOT enforced for ${{ inputs.service_name }}. Backfill required."
+            exit 0
+          fi
+          COUNT=$( { git ls-files '*.integration.spec.ts' 2>/dev/null || true; } | wc -l | tr -d ' ')
+          if [ "$COUNT" -eq 0 ]; then
+            echo "::warning::test:integration is defined but 0 *.integration.spec.ts files exist — tier NOT enforced for ${{ inputs.service_name }}."
+            exit 0
+          fi
+          echo "Running $COUNT integration spec file(s)"
+          npm run test:integration

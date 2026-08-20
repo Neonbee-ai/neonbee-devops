@@ -37,15 +37,17 @@ WORKFLOW_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".github", "workflows"
 )
 
-# The reusable workflows that run a test gate before building.
+# The reusable workflows that run a test gate.
 GATE_WORKFLOWS = [
     "neonbee-deploy-backend.yml",
     "neonbee-deploy-vite-mfe.yml",
     "neonbee-deploy-nextjs.yml",
     "neonbee-deploy-prod.yml",
+    "neonbee-pr-gate.yml",
 ]
 
 PROD = "neonbee-deploy-prod.yml"
+PR_GATE = "neonbee-pr-gate.yml"
 
 
 def read_workflow(name):
@@ -266,6 +268,62 @@ class GivenARepoWithNoTestsForATier(unittest.TestCase):
                 "Introducing a gate must not brick those deploys — warn by "
                 "service name so the gap is visible rather than silent.",
             )
+
+
+class GivenAPullRequestGate(unittest.TestCase):
+    """A PR runs against an untrusted ref — it must not be able to deploy."""
+
+    # Any step that moves artefacts onto a VM or restarts a service there.
+    DEPLOY_CAPABILITY = re.compile(
+        r"\brsync\b|\bscp\b|\bssh-agent\b|\bpm2\b|ssh\s+-o|DIGITALOCEAN_SSH_KEY|CONTABO_SSH_KEY",
+        re.IGNORECASE,
+    )
+
+    def test_when_a_pull_request_is_gated_then_no_deploy_job_exists(self):
+        body = read_workflow(PR_GATE)
+        for job in ("build-deploy:", "build:", "deploy:"):
+            self.assertNotIn(
+                f"\n  {job}",
+                body,
+                f"{PR_GATE}: defines a `{job}` job. The PR gate must verify "
+                "only. Guarding a deploy job with an `if:` leaves production "
+                "one bad condition away from a fork's code — the capability "
+                "must be absent, not disabled.",
+            )
+
+    def test_when_a_pull_request_is_gated_then_it_cannot_reach_a_vm(self):
+        body = strip_comments(read_workflow(PR_GATE))
+        match = self.DEPLOY_CAPABILITY.search(body)
+        self.assertIsNone(
+            match,
+            f"{PR_GATE}: contains {match.group(0) if match else ''!r}, which can "
+            "move code onto or restart a service on a VM. A PR gate runs "
+            "untrusted code and must have no such capability at all.",
+        )
+
+    def test_when_a_pull_request_is_gated_then_it_still_runs_every_tier(self):
+        body = read_workflow(PR_GATE)
+        for job in ("contract-tests:", "integration-tests:"):
+            self.assertIn(
+                job,
+                body,
+                f"{PR_GATE}: missing `{job}`. Moving verification earlier is "
+                "the entire point — a PR gate weaker than the deploy gate just "
+                "relocates the problem.",
+            )
+
+    def test_when_a_pull_request_is_gated_then_secrets_are_not_required(self):
+        # A required secret that a fork PR cannot supply fails the gate for
+        # reasons unrelated to the change under review.
+        body = read_workflow(PR_GATE)
+        secrets_block = body.split("secrets:")[1].split("env:")[0]
+        self.assertNotIn(
+            "required: true",
+            secrets_block,
+            f"{PR_GATE}: declares a required secret. Fork PRs receive no "
+            "secrets, so the gate would fail on provenance rather than on the "
+            "code — mark them optional and let the tier warn instead.",
+        )
 
 
 if __name__ == "__main__":
