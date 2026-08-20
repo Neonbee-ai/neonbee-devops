@@ -326,5 +326,53 @@ class GivenAPullRequestGate(unittest.TestCase):
         )
 
 
+class GivenASecretsScanThatWasKilled(unittest.TestCase):
+    """An unrun scan is not a clean scan."""
+
+    def test_when_gitleaks_is_oom_killed_then_it_is_retried(self):
+        for name in GATE_WORKFLOWS:
+            body = read_workflow(name)
+            if "gitleaks" not in body:
+                continue
+            self.assertIn("run_gitleaks", body, f"{name}: no retry wrapper defined.")
+            # Presence of the wrapper is not enough — EVERY call site must go
+            # through it. An earlier version of this spec passed while one call
+            # site had been reverted to a direct invocation, because the
+            # function definition still matched.
+            outside = strip_comments(body)
+            if "run_gitleaks()" in outside:
+                head, rest = outside.split("run_gitleaks()", 1)
+                fn_body, tail = rest.split("\n          }", 1)
+                outside = head + tail
+            direct = re.findall(r"^\s*[^#\n]*\bgitleaks detect\b.*$", outside, re.M)
+            self.assertEqual(
+                direct, [],
+                f"{name}: gitleaks is invoked directly at {direct!r}, bypassing "
+                "the retry wrapper. It loads the full history into memory and "
+                "gets OOM-killed (exit 137) when several repos gate at once on "
+                "a 3-slot Mac Mini — three did on 2026-08-20.",
+            )
+
+    def test_when_gitleaks_is_killed_every_time_then_the_gate_fails(self):
+        for name in GATE_WORKFLOWS:
+            body = read_workflow(name)
+            if "run_gitleaks" not in body:
+                continue
+            fn = body.split("run_gitleaks()")[1].split("}")[0]
+            self.assertNotIn(
+                "return 0\n            done",
+                fn,
+                f"{name}: exhausting the retries must not return success.",
+            )
+            self.assertIn(
+                "the secrets scan did NOT run",
+                body,
+                f"{name}: when every attempt is killed the gate must fail "
+                "loudly. A scan that never ran has found nothing — treating "
+                "that as a pass is exactly the class of defect this file "
+                "exists to prevent.",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()
