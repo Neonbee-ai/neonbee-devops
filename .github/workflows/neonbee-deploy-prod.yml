@@ -365,17 +365,72 @@ jobs:
           else
             EXTRA_FLAGS="--passWithNoTests --forceExit --ci"
           fi
+
+          # ── Spec floor ────────────────────────────────────────────────────
+          # `--passWithNoTests` above means an empty or mis-globbed suite exits
+          # 0. Combined with the stderr capture below — which hides the runner
+          # summary on success — a green gate could not be distinguished from a
+          # gate that ran zero tests. Establish the floor BEFORE running, so
+          # "0 spec files" is an explicit failure with a name attached.
+          SPEC_COUNT=$( { git ls-files '*.spec.ts' '*.spec.tsx' '*.spec.js' '*.test.ts' '*.test.tsx' '*.test.js' 2>/dev/null || true; } | wc -l | tr -d ' ')
+          if [ "$SPEC_COUNT" -eq 0 ]; then
+            # Fall back to a filesystem sweep before declaring a repo untested —
+            # a repo using an unusual layout must not be hard-failed by a glob
+            # that simply did not match. Only a genuine zero fails the gate.
+            SPEC_COUNT=$(find . -path ./node_modules -prune -o \( -name '*.spec.*' -o -name '*.test.*' -o -path '*__tests__*' \) -type f -print 2>/dev/null | wc -l | tr -d ' ')
+          fi
+          echo "Tracked spec files: $SPEC_COUNT"
+          if [ "$SPEC_COUNT" -eq 0 ]; then
+            echo "::error::No tracked spec files found — the unit tier is not enforced for this repo. Add tests or remove this repo from the prod gate deliberately."
+            RC=1
+          fi
+
           # stderr is captured, not discarded. jest writes its reporter there,
           # so dumping it always is noise — but `2>/dev/null` also swallowed
           # `sh: jest: not found`, which is why an incomplete node_modules
-          # looked like a silent test failure. Keep it quiet on success, print
-          # it on failure.
+          # looked like a silent test failure.
           TEST_ERR=$(mktemp)
-          if command -v timeout &>/dev/null; then
-            timeout 120 npm test -- $EXTRA_FLAGS 2>"$TEST_ERR" || RC=$?
-            [ $RC -eq 124 ] && echo "::warning::Tests hung — forcing exit as success" && RC=0
-          else
-            npm test -- $EXTRA_FLAGS 2>"$TEST_ERR" || RC=$?
+
+          # `timeout` is coreutils — present on the Contabo Linux slots, ABSENT
+          # on the Mac Mini slots that now carry the `contabo` label. The bare
+          # `command -v timeout` check silently dropped all hang protection
+          # there. Resolve gtimeout (coreutils via brew) and fall back to perl,
+          # which is on every macOS box, so the timeout applies on every runner.
+          TIMEOUT_BIN=""
+          if command -v timeout &>/dev/null; then TIMEOUT_BIN="timeout"
+          elif command -v gtimeout &>/dev/null; then TIMEOUT_BIN="gtimeout"
+          fi
+          run_tests_with_timeout() {
+            if [ -n "$TIMEOUT_BIN" ]; then
+              "$TIMEOUT_BIN" 300 npm test -- $EXTRA_FLAGS 2>"$TEST_ERR"
+            elif command -v perl &>/dev/null; then
+              perl -e 'alarm shift; exec @ARGV' 300 npm test -- $EXTRA_FLAGS 2>"$TEST_ERR"
+            else
+              echo "::warning::No timeout mechanism available on this runner — unit tests run unbounded"
+              npm test -- $EXTRA_FLAGS 2>"$TEST_ERR"
+            fi
+          }
+          TEST_RC=0
+          run_tests_with_timeout || TEST_RC=$?
+          # A suite that never finishes is NOT a pass. This previously reset
+          # RC=0 on timeout, so a hung run shipped straight to production with
+          # nothing but a warning annotation — the gate's single largest trust
+          # hole. Treat the timeout as the failure it is; a genuinely slow suite
+          # is a reason to raise the ceiling, not to ignore the result.
+          # 124 = GNU timeout, 142 = perl SIGALRM (128+14).
+          if [ $TEST_RC -eq 124 ] || [ $TEST_RC -eq 142 ]; then
+            echo "::error::Unit tests exceeded the 300s ceiling — failing the gate (hung suites are not passes)"
+          fi
+          [ $TEST_RC -ne 0 ] && RC=$TEST_RC
+
+          # Show the runner summary on SUCCESS too. jest/vitest write it to
+          # stderr, so capturing stderr made a passing gate print no evidence at
+          # all — 2,661 tests and 0 tests looked identical. Always surface the
+          # tail so a green run proves what it ran.
+          if [ $TEST_RC -eq 0 ]; then
+            echo "── test summary ─────────────────────────────────────────────"
+            grep -aE "Tests:|Test Suites:|Test Files|passed|failed" "$TEST_ERR" | tail -10 || tail -10 "$TEST_ERR" || true
+            echo "─────────────────────────────────────────────────────────────"
           fi
           TEST_EXIT=$RC
 
@@ -411,11 +466,109 @@ jobs:
           exit $(( TEST_EXIT | AUDIT_EXIT | LICENSE_EXIT | GITLEAKS_EXIT ))
 
 # ═════════════════════════════════════════════════════════════════════════════
+# API CONTRACT + INTEGRATION — backend only, parallel, both gate the deploy
+# ─────────────────────────────────────────────────────────────────────────────
+# These two tiers existed only in neonbee-deploy-backend.yml (the develop path).
+# Because the estate pushes `main`, which routes here, they never ran on any
+# deploy that actually reached production: the specs were written, maintained,
+# and never enforced. They gate the build now.
+#
+# A repo with no script or no specs WARNS instead of failing — introducing a new
+# gate must not brick deploys for repos that have not backfilled yet. The
+# warning names the repo and tier so the gap is visible rather than silent.
+# ═════════════════════════════════════════════════════════════════════════════
+
+  contract-tests:
+    name: API Contract Tests
+    if: inputs.deploy_type == 'backend'
+    needs: [gate]
+    runs-on: [self-hosted, contabo]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4.3.1
+      - uses: actions/setup-node@v4.4.0
+        with:
+          node-version: ${{ inputs.node_version }}
+      - name: Isolate npm cache per job
+        shell: bash
+        run: echo "NPM_CONFIG_CACHE=$RUNNER_TEMP/npm-cache" >> "$GITHUB_ENV"
+      - name: Install dependencies
+        run: |
+          rm -rf node_modules
+          npm ci --legacy-peer-deps --include=dev
+      - name: Run contract tests
+        env:
+          NODE_ENV: test
+        run: |
+          if ! node -e "process.exit(require('./package.json').scripts?.['test:contract'] ? 0 : 1)" 2>/dev/null; then
+            echo "::warning::No test:contract script — the API contract tier is NOT enforced for ${{ inputs.service_name }}. Backfill required."
+            exit 0
+          fi
+          COUNT=$( { git ls-files '*.contract.spec.ts' 2>/dev/null || true; } | wc -l | tr -d ' ')
+          if [ "$COUNT" -eq 0 ]; then
+            echo "::warning::test:contract is defined but 0 *.contract.spec.ts files exist — the API contract tier is NOT enforced for ${{ inputs.service_name }}."
+            exit 0
+          fi
+          echo "Running $COUNT contract spec file(s)"
+          npm run test:contract
+
+  integration-tests:
+    name: Integration Tests
+    if: inputs.deploy_type == 'backend'
+    needs: [gate]
+    runs-on: [self-hosted, contabo]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4.3.1
+      - uses: actions/setup-node@v4.4.0
+        with:
+          node-version: ${{ inputs.node_version }}
+      - name: Isolate npm cache per job
+        shell: bash
+        run: echo "NPM_CONFIG_CACHE=$RUNNER_TEMP/npm-cache" >> "$GITHUB_ENV"
+      - name: Install dependencies
+        run: |
+          rm -rf node_modules
+          npm ci --legacy-peer-deps --include=dev
+      - name: Run integration tests
+        env:
+          NODE_ENV: test
+          NODE_OPTIONS: --experimental-vm-modules
+          SO360_AUTH_BYPASS: 'true'
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          TEST_TENANT_ID: '3cf1c619-c8f6-49ac-9207-447418d5beee'
+          TEST_ORG_ID: '8317fe18-6ac4-4ac4-b71d-dc13122a905d'
+          TEST_USER_ID: '4a1832f4-f7bb-44bf-ad01-9431d8b14efc'
+        run: |
+          if ! node -e "process.exit(require('./package.json').scripts?.['test:integration'] ? 0 : 1)" 2>/dev/null; then
+            echo "::warning::No test:integration script — the integration tier is NOT enforced for ${{ inputs.service_name }}. Backfill required."
+            exit 0
+          fi
+          COUNT=$( { git ls-files '*.integration.spec.ts' 2>/dev/null || true; } | wc -l | tr -d ' ')
+          if [ "$COUNT" -eq 0 ]; then
+            echo "::warning::test:integration is defined but 0 *.integration.spec.ts files exist — the integration tier is NOT enforced for ${{ inputs.service_name }}."
+            exit 0
+          fi
+          echo "Running $COUNT integration spec file(s)"
+          npm run test:integration
+
+# ═════════════════════════════════════════════════════════════════════════════
 # BUILD + DEPLOY — common setup, then branches by deploy_type
 # ═════════════════════════════════════════════════════════════════════════════
 
   build-deploy:
-    needs: [gate]
+    needs: [gate, contract-tests, integration-tests]
+    # contract/integration are skipped for vite-mfe and nextjs deploys. A
+    # skipped `needs` would normally skip this job too, so the result is
+    # matched explicitly: proceed on success or skipped, never on failure.
+    if: >-
+      !cancelled()
+      && needs.gate.result == 'success'
+      && needs.contract-tests.result != 'failure'
+      && needs.integration-tests.result != 'failure'
     runs-on: [self-hosted, contabo]
     timeout-minutes: 20
     concurrency:

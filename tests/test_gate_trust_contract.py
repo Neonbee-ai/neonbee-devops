@@ -1,0 +1,272 @@
+"""
+BDD specs — the gate must fail loudly, or it is not a gate.
+
+Background
+----------
+Every deploy in the estate passes through a `gate` job before anything is built
+or rsynced. The value of that gate is entirely in its ability to say *no*. Four
+defects were found on 2026-08-19 that each let a broken or unverified build
+through while reporting green:
+
+1. `neonbee-deploy-prod.yml` wrapped the unit suite in `timeout 120` and then
+   reset the exit code to 0 on expiry — a hung suite deployed to production with
+   nothing but a warning annotation.
+
+2. That timeout was guarded by `command -v timeout`, which is absent on macOS.
+   The Mac Mini slots took the `contabo` label on 2026-08-19, so the slots now
+   serving deploys had no hang protection at all.
+
+3. The gate captured test stderr and printed it only on failure. jest and vitest
+   write their summary to stderr, so a passing gate printed no evidence: a run of
+   2,661 tests and a run of 0 tests were indistinguishable in the log. Combined
+   with `--passWithNoTests`, an empty suite was an invisible pass.
+
+4. The API-contract and integration tiers existed only in
+   `neonbee-deploy-backend.yml` (the develop path). The estate pushes `main`,
+   which routes to `neonbee-deploy-prod.yml` — so those specs were written,
+   maintained, and never once enforced on a deploy that reached production.
+
+These specs lock out all four. Run: python3 -m unittest discover tests
+"""
+
+import os
+import re
+import unittest
+
+WORKFLOW_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".github", "workflows"
+)
+
+# The reusable workflows that run a test gate before building.
+GATE_WORKFLOWS = [
+    "neonbee-deploy-backend.yml",
+    "neonbee-deploy-vite-mfe.yml",
+    "neonbee-deploy-nextjs.yml",
+    "neonbee-deploy-prod.yml",
+]
+
+PROD = "neonbee-deploy-prod.yml"
+
+
+def read_workflow(name):
+    with open(os.path.join(WORKFLOW_DIR, name), "r", encoding="utf-8") as fh:
+        return fh.read()
+
+
+def strip_comments(body):
+    """Drop `#` comment lines so prose describing a defect is not mistaken for it."""
+    return "\n".join(
+        line for line in body.splitlines() if not line.lstrip().startswith("#")
+    )
+
+
+class GivenATestSuiteThatNeverFinishes(unittest.TestCase):
+    """A hung suite is a failure, never a pass."""
+
+    # `RC=0` / `TEST_RC=0` appearing on the same line as a 124/142 timeout check.
+    TIMEOUT_RESET = re.compile(
+        r"(?:124|142).*?(?:RC|TEST_RC|TEST_EXIT)\s*=\s*0"
+        r"|(?:RC|TEST_RC|TEST_EXIT)\s*=\s*0.*?(?:124|142)"
+    )
+
+    def test_when_the_suite_times_out_then_no_workflow_resets_the_exit_code(self):
+        for name in GATE_WORKFLOWS:
+            body = strip_comments(read_workflow(name))
+            match = self.TIMEOUT_RESET.search(body)
+            self.assertIsNone(
+                match,
+                f"{name}: a timeout exit code is being reset to 0 "
+                f"({match.group(0).strip() if match else ''!r}). A suite that "
+                "never finishes has verified nothing — treat the timeout as a "
+                "failure and raise the ceiling if the suite is legitimately slow.",
+            )
+
+    def test_when_the_suite_times_out_then_the_gate_reports_an_error(self):
+        body = read_workflow(PROD)
+        self.assertIn(
+            "::error::Unit tests exceeded",
+            body,
+            f"{PROD}: a timed-out suite must emit an ::error:: annotation, not a "
+            "::warning::. A warning does not fail the job.",
+        )
+
+
+class GivenARunnerWithoutCoreutils(unittest.TestCase):
+    """Hang protection must survive on macOS slots, where `timeout` is absent."""
+
+    def test_when_timeout_is_missing_then_a_fallback_is_used(self):
+        body = read_workflow(PROD)
+        self.assertIn(
+            "gtimeout",
+            body,
+            f"{PROD}: `timeout` is coreutils and does not exist on the Mac Mini "
+            "slots that now carry the `contabo` label. Resolve `gtimeout` too.",
+        )
+        self.assertIn(
+            "alarm shift",
+            body,
+            f"{PROD}: neither `timeout` nor `gtimeout` is present on a stock "
+            "macOS runner. A perl `alarm` fallback keeps the ceiling enforced "
+            "everywhere; without it the bound silently disappears.",
+        )
+
+    def test_when_perl_enforces_the_timeout_then_its_signal_code_is_treated_as_a_timeout(self):
+        body = read_workflow(PROD)
+        self.assertIn(
+            "142",
+            body,
+            f"{PROD}: perl's SIGALRM exits 128+14=142, not 124. Checking only "
+            "124 would classify a perl-enforced timeout as an ordinary failure "
+            "and report a misleading cause.",
+        )
+
+
+class GivenAGateThatPasses(unittest.TestCase):
+    """A green gate must prove what it ran."""
+
+    def test_when_the_suite_passes_then_the_summary_is_still_printed(self):
+        body = read_workflow(PROD)
+        self.assertIn(
+            "test summary",
+            body,
+            f"{PROD}: jest and vitest write their summary to stderr, which this "
+            "gate captures. Without printing it on success, '2,661 tests passed' "
+            "and '0 tests ran' produce identical logs.",
+        )
+
+    def test_when_pass_with_no_tests_is_used_then_a_spec_floor_is_asserted(self):
+        for name in GATE_WORKFLOWS:
+            body = read_workflow(name)
+            if "--passWithNoTests" not in strip_comments(body):
+                continue
+            self.assertIn(
+                "SPEC_COUNT",
+                body,
+                f"{name}: `--passWithNoTests` makes an empty or mis-globbed suite "
+                "exit 0. Assert a spec floor before running so a repo with no "
+                "tests fails by name instead of reading as a pass.",
+            )
+
+
+class GivenAWarmRunnerSlot(unittest.TestCase):
+    """A reused node_modules must never be trusted by a gate."""
+
+    def test_when_a_gate_installs_dependencies_then_it_purges_node_modules_first(self):
+        for name in GATE_WORKFLOWS:
+            body = strip_comments(read_workflow(name))
+            gate = body.split("build-deploy:")[0]
+            if "npm ci" not in gate:
+                continue
+            # Assert ORDER, not mere presence. Two weaker forms of this spec
+            # both passed against a broken gate during a mutation run:
+            #   - `"rm -rf node_modules" in gate` also matches
+            #     `rm -rf node_modules/@so360/*` (the ci-stubs scope purge)
+            #   - even an end-of-line match is satisfied by the `runner_ok`
+            #     recovery branch, which purges only AFTER a bad install
+            # What actually matters is that the FIRST install in the gate is
+            # preceded by a whole-tree purge.
+            lines = [ln.strip() for ln in gate.splitlines()]
+            first_ci = next(i for i, ln in enumerate(lines) if ln.startswith("npm ci"))
+            preceding = [ln for ln in lines[:first_ci] if ln]
+            self.assertTrue(
+                preceding and preceding[-1] == "rm -rf node_modules",
+                f"{name}: the first `npm ci` in the gate is not immediately "
+                f"preceded by a whole-tree purge (found {preceding[-1]!r}). "
+                "Contabo and Mac Mini slots are warm and keep node_modules "
+                "between runs, so a stale or partial install is silently reused.",
+            )
+
+    def test_when_a_gate_installs_dependencies_then_it_verifies_the_test_runner_runs(self):
+        for name in GATE_WORKFLOWS:
+            body = read_workflow(name)
+            gate = body.split("build-deploy:")[0]
+            if "npm ci" not in strip_comments(gate):
+                continue
+            self.assertIn(
+                "runner_ok",
+                gate,
+                f"{name}: `npm ci` can exit 0 on a corrupted npm cache and still "
+                "leave the runner unusable — a missing binary exits 127, a "
+                "half-installed one exits 1, and both read as 'tests failed'. "
+                "Execute the runner to prove it works.",
+            )
+
+
+class GivenAProductionDeploy(unittest.TestCase):
+    """The contract and integration tiers must gate the path that actually ships."""
+
+    def test_when_a_backend_deploys_to_prod_then_contract_tests_run(self):
+        body = read_workflow(PROD)
+        self.assertIn(
+            "contract-tests:",
+            body,
+            f"{PROD}: the API contract tier exists only in the develop-path "
+            "workflow. The estate pushes `main`, which routes here, so those "
+            "specs never gate a deploy that reaches production.",
+        )
+
+    def test_when_a_backend_deploys_to_prod_then_integration_tests_run(self):
+        body = read_workflow(PROD)
+        self.assertIn(
+            "integration-tests:",
+            body,
+            f"{PROD}: the integration tier — the only one that catches schema "
+            "drift, tenant-scoping regressions and missing service URLs — does "
+            "not run on the production path.",
+        )
+
+    def test_when_the_tiers_are_defined_then_the_build_waits_on_them(self):
+        body = read_workflow(PROD)
+        needs = re.search(r"build-deploy:\s*\n\s*needs:\s*\[([^\]]*)\]", body)
+        self.assertIsNotNone(needs, f"{PROD}: build-deploy declares no `needs`.")
+        declared = needs.group(1)
+        for job in ("gate", "contract-tests", "integration-tests"):
+            self.assertIn(
+                job,
+                declared,
+                f"{PROD}: build-deploy does not wait on `{job}`, so that tier "
+                "cannot block a deploy no matter what it reports.",
+            )
+
+    def test_when_a_tier_is_skipped_then_the_build_still_proceeds(self):
+        # contract/integration are backend-only. A skipped `needs` skips the
+        # dependent job by default, which would strand every MFE and Next.js
+        # deploy — the result must be matched explicitly instead.
+        body = read_workflow(PROD)
+        self.assertIn(
+            "needs.contract-tests.result != 'failure'",
+            body,
+            f"{PROD}: build-deploy must tolerate a *skipped* contract-tests job "
+            "(vite-mfe and nextjs deploys skip it) while still refusing a "
+            "failed one. A bare `needs` would skip the deploy entirely.",
+        )
+
+    def test_when_a_tier_fails_then_the_build_is_blocked(self):
+        body = read_workflow(PROD)
+        self.assertIn(
+            "needs.gate.result == 'success'",
+            body,
+            f"{PROD}: build-deploy must require the gate to have *succeeded*, "
+            "not merely to have finished. `!cancelled()` alone would let a "
+            "failed gate through.",
+        )
+
+
+class GivenARepoWithNoTestsForATier(unittest.TestCase):
+    """A missing tier is reported by name, never silently skipped or hard-crashed."""
+
+    def test_when_the_script_is_absent_then_the_job_warns_instead_of_crashing(self):
+        for name in (PROD, "neonbee-deploy-backend.yml"):
+            body = read_workflow(name)
+            self.assertIn(
+                "NOT enforced",
+                body,
+                f"{name}: several backends have no `test:contract` script at "
+                "all, so `npm run test:contract` dies with `Missing script`. "
+                "Introducing a gate must not brick those deploys — warn by "
+                "service name so the gap is visible rather than silent.",
+            )
+
+
+if __name__ == "__main__":
+    unittest.main()

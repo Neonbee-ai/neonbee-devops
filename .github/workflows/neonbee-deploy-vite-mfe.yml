@@ -84,7 +84,32 @@ jobs:
           key: npm-v2-${{ runner.os }}-${{ hashFiles('**/package-lock.json') }}
           restore-keys: npm-v2-${{ runner.os }}-
       - name: Install dependencies
-        run: npm ci --legacy-peer-deps
+        run: |
+          # Warm Contabo/Mac Mini slots keep node_modules between runs, so a
+          # bare `npm ci` could reuse a stale or partial tree. The backend gate
+          # already purges first; this one did not.
+          rm -rf node_modules
+          npm ci --legacy-peer-deps
+          # `npm ci` can exit 0 on a corrupted ~/.npm cache (tar TAR_ENTRY_ERROR
+          # warnings only) and still leave the test runner unusable. A missing
+          # binary exits 127 and a half-installed one exits 1 — both read as
+          # "unit tests failed" with no output. Verify by running it.
+          TEST_BIN=$(node -e "const s=require('./package.json').scripts?.test||''; console.log(/vitest/.test(s)?'vitest':/jest/.test(s)?'jest':'')" 2>/dev/null || echo "")
+          runner_ok() {
+            [ -z "$TEST_BIN" ] && return 0
+            [ -x "node_modules/.bin/$TEST_BIN" ] || return 1
+            "node_modules/.bin/$TEST_BIN" --version >/dev/null 2>&1
+          }
+          if ! runner_ok; then
+            echo "::warning::$TEST_BIN cannot run after npm ci — purging npm cache and reinstalling clean"
+            npm cache clean --force
+            rm -rf node_modules
+            npm ci --legacy-peer-deps
+          fi
+          if ! runner_ok; then
+            echo "::error::$TEST_BIN still cannot run after a clean reinstall — this runner slot cannot run the gate"
+            exit 1
+          fi
       - name: Inject ci-stubs for MFE repos
         run: |
           if [ -d ".ci-stubs/@so360" ]; then
