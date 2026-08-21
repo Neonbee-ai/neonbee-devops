@@ -161,11 +161,11 @@ on:
       PAT_TOKEN:                     { required: false }
       INTERNAL_SERVICE_KEY:          { required: false }
       INVENTORY_INTERNAL_KEY:        { required: false }
-      PEOPLE_INTERNAL_KEY:           { required: false }
       # People Connect is the single source of truth for people data; its
       # internal surface is key-guarded. CORE_INTERNAL_KEY is the caller-side
       # alias for the value Core validates as INTERNAL_SERVICE_KEY.
       PEOPLE_INTERNAL_KEY:           { required: false }
+      FLOW_INTERNAL_KEY:           { required: false }
       CORE_INTERNAL_KEY:             { required: false }
       CONTABO_SSH_KEY:               { required: false }
       HA_VM_IP:                      { required: false }
@@ -542,6 +542,8 @@ jobs:
           INTERNAL_SERVICE_KEY: ${{ secrets.INTERNAL_SERVICE_KEY }}
           INVENTORY_INTERNAL_KEY: ${{ secrets.INVENTORY_INTERNAL_KEY }}
           PEOPLE_INTERNAL_KEY: ${{ secrets.PEOPLE_INTERNAL_KEY }}
+          FLOW_INTERNAL_KEY: ${{ secrets.FLOW_INTERNAL_KEY }}
+          CORE_INTERNAL_KEY: ${{ secrets.CORE_INTERNAL_KEY }}
           EMAIL_INTERNAL_KEY: ${{ secrets.EMAIL_INTERNAL_KEY }}
           NOTIFICATION_INTERNAL_KEY: ${{ secrets.NOTIFICATION_INTERNAL_KEY }}
           CHAT_INTERNAL_KEY: ${{ secrets.CHAT_INTERNAL_KEY }}
@@ -609,6 +611,8 @@ jobs:
           INTERNAL_SERVICE_KEY: ${{ secrets.INTERNAL_SERVICE_KEY }}
           INVENTORY_INTERNAL_KEY: ${{ secrets.INVENTORY_INTERNAL_KEY }}
           PEOPLE_INTERNAL_KEY: ${{ secrets.PEOPLE_INTERNAL_KEY }}
+          FLOW_INTERNAL_KEY: ${{ secrets.FLOW_INTERNAL_KEY }}
+          CORE_INTERNAL_KEY: ${{ secrets.CORE_INTERNAL_KEY }}
           EMAIL_INTERNAL_KEY: ${{ secrets.EMAIL_INTERNAL_KEY }}
           NOTIFICATION_INTERNAL_KEY: ${{ secrets.NOTIFICATION_INTERNAL_KEY }}
           CHAT_INTERNAL_KEY: ${{ secrets.CHAT_INTERNAL_KEY }}
@@ -1026,6 +1030,8 @@ jobs:
             [ -n "${{ secrets.INTERNAL_SERVICE_KEY }}" ]      && echo "INTERNAL_SERVICE_KEY=${{ secrets.INTERNAL_SERVICE_KEY }}"       >> .env.ci
             [ -n "${{ secrets.INVENTORY_INTERNAL_KEY }}" ]    && echo "INVENTORY_INTERNAL_KEY=${{ secrets.INVENTORY_INTERNAL_KEY }}"   >> .env.ci
             [ -n "${{ secrets.PEOPLE_INTERNAL_KEY }}" ]       && echo "PEOPLE_INTERNAL_KEY=${{ secrets.PEOPLE_INTERNAL_KEY }}"         >> .env.ci
+            [ -n "${{ secrets.FLOW_INTERNAL_KEY }}" ]         && echo "FLOW_INTERNAL_KEY=${{ secrets.FLOW_INTERNAL_KEY }}"             >> .env.ci
+            [ -n "${{ secrets.CORE_INTERNAL_KEY }}" ]         && echo "CORE_INTERNAL_KEY=${{ secrets.CORE_INTERNAL_KEY }}"             >> .env.ci
             [ -n "${{ secrets.DOCS_INTERNAL_SERVICE_KEY }}" ] && echo "DOCS_INTERNAL_SERVICE_KEY=${{ secrets.DOCS_INTERNAL_SERVICE_KEY }}" >> .env.ci
             [ -n "${{ secrets.SUBSCRIPTION_INTERNAL_KEY }}" ] && echo "SUBSCRIPTION_INTERNAL_KEY=${{ secrets.SUBSCRIPTION_INTERNAL_KEY }}" >> .env.ci
             [ -n "${{ secrets.NEURA_INTERNAL_KEY }}" ]        && echo "NEURA_INTERNAL_KEY=${{ secrets.NEURA_INTERNAL_KEY }}"           >> .env.ci
@@ -1050,6 +1056,8 @@ jobs:
             [ -n "${{ secrets.ACCOUNTING_INTERNAL_KEY_2 }}" ] && echo "ACCOUNTING_INTERNAL_KEY_2=${{ secrets.ACCOUNTING_INTERNAL_KEY_2 }}" >> .env.ci
             [ -n "${{ secrets.INVENTORY_INTERNAL_KEY }}" ]    && echo "INVENTORY_INTERNAL_KEY=${{ secrets.INVENTORY_INTERNAL_KEY }}"   >> .env.ci
             [ -n "${{ secrets.PEOPLE_INTERNAL_KEY }}" ]       && echo "PEOPLE_INTERNAL_KEY=${{ secrets.PEOPLE_INTERNAL_KEY }}"         >> .env.ci
+            [ -n "${{ secrets.FLOW_INTERNAL_KEY }}" ]         && echo "FLOW_INTERNAL_KEY=${{ secrets.FLOW_INTERNAL_KEY }}"             >> .env.ci
+            [ -n "${{ secrets.CORE_INTERNAL_KEY }}" ]         && echo "CORE_INTERNAL_KEY=${{ secrets.CORE_INTERNAL_KEY }}"             >> .env.ci
             [ -n "${{ secrets.CORE_INTERNAL_KEY }}" ]         && echo "CORE_INTERNAL_KEY=${{ secrets.CORE_INTERNAL_KEY }}"             >> .env.ci
             [ -n "${{ secrets.FULFILLMENT_INTERNAL_KEY }}" ]  && echo "FULFILLMENT_INTERNAL_KEY=${{ secrets.FULFILLMENT_INTERNAL_KEY }}" >> .env.ci
             [ -n "${{ secrets.PLATFORM_OPS_INTERNAL_KEY }}" ]  && echo "PLATFORM_OPS_INTERNAL_KEY=${{ secrets.PLATFORM_OPS_INTERNAL_KEY }}" >> .env.ci

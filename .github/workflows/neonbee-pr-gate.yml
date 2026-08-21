@@ -50,6 +50,8 @@ on:
       INTERNAL_SERVICE_KEY:        { required: false }
       INVENTORY_INTERNAL_KEY:      { required: false }
       PEOPLE_INTERNAL_KEY:         { required: false }
+      CORE_INTERNAL_KEY:           { required: false }
+      FLOW_INTERNAL_KEY:           { required: false }
       EMAIL_INTERNAL_KEY:          { required: false }
       NOTIFICATION_INTERNAL_KEY:   { required: false }
       CHAT_INTERNAL_KEY:           { required: false }
@@ -224,6 +226,8 @@ jobs:
           INTERNAL_SERVICE_KEY: ${{ secrets.INTERNAL_SERVICE_KEY }}
           INVENTORY_INTERNAL_KEY: ${{ secrets.INVENTORY_INTERNAL_KEY }}
           PEOPLE_INTERNAL_KEY: ${{ secrets.PEOPLE_INTERNAL_KEY }}
+          FLOW_INTERNAL_KEY: ${{ secrets.FLOW_INTERNAL_KEY }}
+          CORE_INTERNAL_KEY: ${{ secrets.CORE_INTERNAL_KEY }}
           EMAIL_INTERNAL_KEY: ${{ secrets.EMAIL_INTERNAL_KEY }}
           NOTIFICATION_INTERNAL_KEY: ${{ secrets.NOTIFICATION_INTERNAL_KEY }}
           CHAT_INTERNAL_KEY: ${{ secrets.CHAT_INTERNAL_KEY }}
@@ -291,6 +295,8 @@ jobs:
           INTERNAL_SERVICE_KEY: ${{ secrets.INTERNAL_SERVICE_KEY }}
           INVENTORY_INTERNAL_KEY: ${{ secrets.INVENTORY_INTERNAL_KEY }}
           PEOPLE_INTERNAL_KEY: ${{ secrets.PEOPLE_INTERNAL_KEY }}
+          FLOW_INTERNAL_KEY: ${{ secrets.FLOW_INTERNAL_KEY }}
+          CORE_INTERNAL_KEY: ${{ secrets.CORE_INTERNAL_KEY }}
           EMAIL_INTERNAL_KEY: ${{ secrets.EMAIL_INTERNAL_KEY }}
           NOTIFICATION_INTERNAL_KEY: ${{ secrets.NOTIFICATION_INTERNAL_KEY }}
           CHAT_INTERNAL_KEY: ${{ secrets.CHAT_INTERNAL_KEY }}
