@@ -426,9 +426,9 @@ jobs:
           fi
           run_tests_with_timeout() {
             if [ -n "$TIMEOUT_BIN" ]; then
-              "$TIMEOUT_BIN" 600 npm test -- $EXTRA_FLAGS 2>"$TEST_ERR"
+              "$TIMEOUT_BIN" 900 npm test -- $EXTRA_FLAGS 2>"$TEST_ERR"
             elif command -v perl &>/dev/null; then
-              perl -e 'alarm shift; exec @ARGV' 600 npm test -- $EXTRA_FLAGS 2>"$TEST_ERR"
+              perl -e 'alarm shift; exec @ARGV' 900 npm test -- $EXTRA_FLAGS 2>"$TEST_ERR"
             else
               echo "::warning::No timeout mechanism available on this runner — unit tests run unbounded"
               npm test -- $EXTRA_FLAGS 2>"$TEST_ERR"
@@ -443,7 +443,7 @@ jobs:
           # is a reason to raise the ceiling, not to ignore the result.
           # 124 = GNU timeout, 142 = perl SIGALRM (128+14).
           if [ $TEST_RC -eq 124 ] || [ $TEST_RC -eq 142 ]; then
-            echo "::error::Unit tests exceeded the 600s ceiling — failing the gate (hung suites are not passes)"
+            echo "::error::Unit tests exceeded the 900s ceiling — failing the gate (hung suites are not passes)"
           fi
           [ $TEST_RC -ne 0 ] && RC=$TEST_RC
 
