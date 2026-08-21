@@ -182,6 +182,12 @@ on:
 # (enforced June 16 2026); this replaces it.
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  # Contabo slots intermittently drop npm registry connections (ECONNRESET,
+  # three failures across runner-07/08 on 2026-08-20/21). Retry fetches inside
+  # npm itself instead of burning a whole gate cycle per blip.
+  NPM_CONFIG_FETCH_RETRIES: '5'
+  NPM_CONFIG_FETCH_RETRY_MINTIMEOUT: '2000'
+  NPM_CONFIG_FETCH_RETRY_MAXTIMEOUT: '30000'
 
 # ═════════════════════════════════════════════════════════════════════════════
 # GATE — identical for all 46 repos

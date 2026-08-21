@@ -53,6 +53,12 @@ on:
 
 env:
   ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: true
+  # Contabo slots intermittently drop npm registry connections (ECONNRESET,
+  # three failures across runner-07/08 on 2026-08-20/21). Retry fetches inside
+  # npm itself instead of burning a whole gate cycle per blip.
+  NPM_CONFIG_FETCH_RETRIES: '5'
+  NPM_CONFIG_FETCH_RETRY_MINTIMEOUT: '2000'
+  NPM_CONFIG_FETCH_RETRY_MAXTIMEOUT: '30000'
 
 jobs:
 
