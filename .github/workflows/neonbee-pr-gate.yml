@@ -194,6 +194,76 @@ jobs:
             run_gitleaks /tmp/gitleaks
           fi
 
+      # ── SAST ───────────────────────────────────────────────────────────
+      # gitleaks finds committed secrets; this finds vulnerable CODE — the
+      # injection sinks, unsafe deserialisation and auth mistakes a secrets
+      # scanner is blind to. Diff-scoped on PRs so it reviews what the PR
+      # changed rather than re-reporting the estate's whole backlog.
+      #
+      # REPORT-ONLY for now: it annotates and summarises but does not fail the
+      # gate. Nothing in the estate has been triaged against these rules yet,
+      # and a gate that goes red on day one for pre-existing findings is a
+      # gate people learn to bypass. Flip `SEMGREP_BLOCKING` to true once the
+      # baseline is clean.
+      - name: SAST (semgrep)
+        continue-on-error: true
+        env:
+          SEMGREP_BLOCKING: 'false'
+        run: |
+          if ! command -v semgrep &>/dev/null; then
+            python3 -m pip install --quiet --user semgrep 2>/dev/null || true
+            export PATH="$HOME/.local/bin:$PATH"
+          fi
+          if ! command -v semgrep &>/dev/null; then
+            echo "::warning::semgrep unavailable on this runner — SAST did NOT run."
+            echo "::warning::Not treating an unrun scan as a pass; install semgrep on the runner image."
+            exit 0
+          fi
+
+          # Only scan what the PR touched. --baseline-commit needs the merge
+          # base, which the fetch-depth: 0 checkout above already provides.
+          BASE="${{ github.event.pull_request.base.sha }}"
+          SCOPE=()
+          if [ -n "$BASE" ] && git cat-file -e "$BASE^{commit}" 2>/dev/null; then
+            SCOPE=(--baseline-commit "$BASE")
+            echo "Scanning changes since $BASE"
+          else
+            echo "::warning::No usable base commit — scanning the full tree instead of the diff."
+          fi
+
+          set +e
+          semgrep scan \
+            --config=p/typescript \
+            --config=p/javascript \
+            --config=p/nodejsscan \
+            --severity=ERROR \
+            --error \
+            --quiet \
+            --metrics=off \
+            --exclude=dist --exclude=coverage --exclude=node_modules \
+            "${SCOPE[@]}"
+          RC=$?
+          set -e
+
+          if [ $RC -eq 0 ]; then
+            echo "### SAST: no ERROR-severity findings in this diff" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          {
+            echo "### SAST findings (report-only)"
+            echo ""
+            echo "semgrep reported ERROR-severity findings in this PR's diff."
+            echo "Expand the **SAST (semgrep)** step above for file and rule detail."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$SEMGREP_BLOCKING" = "true" ]; then
+            echo "::error::SAST findings present and SEMGREP_BLOCKING is true"
+            exit $RC
+          fi
+          echo "::warning::SAST findings present — report-only, not failing the gate"
+          exit 0
+
   contract-tests:
     name: API Contract Tests
     if: inputs.deploy_type == 'backend'

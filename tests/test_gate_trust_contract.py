@@ -374,5 +374,61 @@ class GivenASecretsScanThatWasKilled(unittest.TestCase):
             )
 
 
+class GivenAStaticAnalysisPass(unittest.TestCase):
+    """SAST is only worth having if an unrun scan cannot read as a clean one.
+
+    The same trap as the gitleaks retry loop: semgrep may be absent from a
+    runner image, and the easy failure mode is a step that quietly exits 0 and
+    reports a green gate having analysed nothing.
+    """
+
+    def test_when_a_pull_request_is_gated_then_sast_runs(self):
+        body = read_workflow(PR_GATE)
+        self.assertIn(
+            "semgrep",
+            body,
+            f"{PR_GATE}: no SAST step. gitleaks finds committed secrets, not "
+            "vulnerable code — they are not substitutes for each other.",
+        )
+
+    def test_when_semgrep_is_missing_then_the_gate_says_so_rather_than_passing_silently(self):
+        body = read_workflow(PR_GATE)
+        self.assertIn(
+            "SAST did NOT run",
+            body,
+            f"{PR_GATE}: when semgrep is unavailable the step must annotate "
+            "that the scan did not happen. A silent exit 0 makes an unrun "
+            "scan indistinguishable from a clean one.",
+        )
+
+    def test_when_sast_is_report_only_then_it_is_explicit_and_switchable(self):
+        # Report-only is a deliberate phase, not an accident. It must be one
+        # named switch, so turning enforcement on is a one-line change rather
+        # than an archaeology exercise.
+        body = read_workflow(PR_GATE)
+        self.assertIn(
+            "SEMGREP_BLOCKING",
+            body,
+            f"{PR_GATE}: SAST severity must be governed by a named flag.",
+        )
+        self.assertIn(
+            'if [ "$SEMGREP_BLOCKING" = "true" ]',
+            body,
+            f"{PR_GATE}: the blocking flag must actually be honoured — a flag "
+            "that is declared but never read is worse than no flag, because "
+            "it reads as enforcement that is not there.",
+        )
+
+    def test_when_sast_scans_then_it_is_scoped_to_the_pull_request_diff(self):
+        body = read_workflow(PR_GATE)
+        self.assertIn(
+            "--baseline-commit",
+            body,
+            f"{PR_GATE}: SAST must scan the PR diff, not the whole tree. A "
+            "full-tree scan re-reports the estate's existing backlog on every "
+            "PR, which is how a security step becomes noise people skip.",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
