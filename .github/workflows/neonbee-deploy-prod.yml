@@ -117,6 +117,7 @@ on:
       CORS_ORIGINS_PROD:             { required: false }
       ENCRYPTION_KEY:                { required: false }
       CHANNEL_ENCRYPTION_KEY:        { required: false }
+      PAYROLL_ENCRYPTION_KEY:        { required: false }
       CF_R2_ACCOUNT_ID:              { required: false }
       CF_R2_ACCESS_KEY_ID:           { required: false }
       CF_R2_SECRET_ACCESS_KEY:       { required: false }
@@ -1005,6 +1006,7 @@ jobs:
               echo "CORS_ORIGINS=${{ secrets.CORS_ORIGINS_PROD }}"
               echo "ENCRYPTION_KEY=${{ secrets.ENCRYPTION_KEY }}"
               echo "CHANNEL_ENCRYPTION_KEY=${{ secrets.CHANNEL_ENCRYPTION_KEY }}"
+              echo "PAYROLL_ENCRYPTION_KEY=${{ secrets.PAYROLL_ENCRYPTION_KEY }}"
               echo "CF_R2_ACCOUNT_ID=${{ secrets.CF_R2_ACCOUNT_ID }}"
               echo "CF_R2_ACCESS_KEY_ID=${{ secrets.CF_R2_ACCESS_KEY_ID }}"
               echo "CF_R2_SECRET_ACCESS_KEY=${{ secrets.CF_R2_SECRET_ACCESS_KEY }}"

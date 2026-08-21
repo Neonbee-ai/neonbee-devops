@@ -68,6 +68,7 @@ on:
       STOREFRONT_JWT_SECRET_STAGING: { required: false }
       CORS_ORIGINS_STAGING:         { required: false }
       ENCRYPTION_KEY:               { required: false }
+      PAYROLL_ENCRYPTION_KEY:       { required: false }
       PAT_TOKEN:                    { required: false }
       # Bunny CDN (media uploads — projects, people-connect, etc.)
       BUNNY_STORAGE_HOSTNAME:       { required: false }
@@ -490,6 +491,7 @@ jobs:
               echo "SUPABASE_SERVICE_ROLE_KEY=${{ secrets.SUPABASE_SERVICE_KEY }}"
               echo "JWT_SECRET=${{ secrets.JWT_SECRET }}"
               echo "ENCRYPTION_KEY=${{ secrets.ENCRYPTION_KEY }}"
+              echo "PAYROLL_ENCRYPTION_KEY=${{ secrets.PAYROLL_ENCRYPTION_KEY }}"
               echo "CORS_ORIGINS=${{ secrets.CORS_ORIGINS_DEV }}"
             } > .env.ci
 
@@ -627,6 +629,7 @@ jobs:
               echo "SUPABASE_SERVICE_ROLE_KEY=${{ secrets.SUPABASE_SERVICE_KEY_STAGING }}"
               echo "JWT_SECRET=${{ secrets.JWT_SECRET_STAGING }}"
               echo "ENCRYPTION_KEY=${{ secrets.ENCRYPTION_KEY }}"
+              echo "PAYROLL_ENCRYPTION_KEY=${{ secrets.PAYROLL_ENCRYPTION_KEY }}"
               echo "CORS_ORIGINS=${{ secrets.CORS_ORIGINS_STAGING }}"
             } > .env.ci
 
