@@ -95,7 +95,29 @@ jobs:
           # bare `npm ci` could reuse a stale or partial tree. The backend gate
           # already purges first; this one did not.
           rm -rf node_modules
-          npm ci --legacy-peer-deps
+          npm_ci_retry() {
+            # The registry drops connections mid-tarball on this fleet:
+            # ECONNRESET killed core integration-tests, crm contract-tests and
+            # crm build-deploy on 2026-08-22 alone. NPM_CONFIG_FETCH_RETRIES
+            # only covers fetches npm itself classifies as retryable, and a
+            # socket reset during a tarball read is not always one of them.
+            # Purge inside the loop so every attempt installs from clean —
+            # warm slots keep node_modules between runs.
+            local attempt rc
+            for attempt in 1 2 3; do
+              rm -rf node_modules
+              npm ci --legacy-peer-deps && return 0
+              rc=$?
+              if [ $attempt -lt 3 ]; then
+                echo "::warning::npm ci failed (exit $rc) on attempt $attempt — retrying after cache clean"
+                npm cache clean --force >/dev/null 2>&1 || true
+                sleep $((attempt * 15))
+              fi
+            done
+            echo "::error::npm ci failed on every attempt — dependencies are NOT installed. Not continuing with a partial tree."
+            return 1
+          }
+          npm_ci_retry
           # `npm ci` can exit 0 on a corrupted ~/.npm cache (tar TAR_ENTRY_ERROR
           # warnings only) and still leave the test runner unusable. A missing
           # binary exits 127 and a half-installed one exits 1 — both read as
@@ -110,7 +132,29 @@ jobs:
             echo "::warning::$TEST_BIN cannot run after npm ci — purging npm cache and reinstalling clean"
             npm cache clean --force
             rm -rf node_modules
-            npm ci --legacy-peer-deps
+            npm_ci_retry() {
+            # The registry drops connections mid-tarball on this fleet:
+            # ECONNRESET killed core integration-tests, crm contract-tests and
+            # crm build-deploy on 2026-08-22 alone. NPM_CONFIG_FETCH_RETRIES
+            # only covers fetches npm itself classifies as retryable, and a
+            # socket reset during a tarball read is not always one of them.
+            # Purge inside the loop so every attempt installs from clean —
+            # warm slots keep node_modules between runs.
+            local attempt rc
+            for attempt in 1 2 3; do
+              rm -rf node_modules
+              npm ci --legacy-peer-deps && return 0
+              rc=$?
+              if [ $attempt -lt 3 ]; then
+                echo "::warning::npm ci failed (exit $rc) on attempt $attempt — retrying after cache clean"
+                npm cache clean --force >/dev/null 2>&1 || true
+                sleep $((attempt * 15))
+              fi
+            done
+            echo "::error::npm ci failed on every attempt — dependencies are NOT installed. Not continuing with a partial tree."
+            return 1
+          }
+          npm_ci_retry
           fi
           if ! runner_ok; then
             echo "::error::$TEST_BIN still cannot run after a clean reinstall — this runner slot cannot run the gate"
@@ -238,7 +282,29 @@ jobs:
           esac
           # --include=dev: Docker-fleet runners may set NODE_ENV=production, which
           # makes `npm ci` omit devDeps and breaks the vite build (vite: not found).
-          npm ci --legacy-peer-deps --include=dev
+          npm_ci_retry() {
+            # The registry drops connections mid-tarball on this fleet:
+            # ECONNRESET killed core integration-tests, crm contract-tests and
+            # crm build-deploy on 2026-08-22 alone. NPM_CONFIG_FETCH_RETRIES
+            # only covers fetches npm itself classifies as retryable, and a
+            # socket reset during a tarball read is not always one of them.
+            # Purge inside the loop so every attempt installs from clean —
+            # warm slots keep node_modules between runs.
+            local attempt rc
+            for attempt in 1 2 3; do
+              rm -rf node_modules
+              npm ci --legacy-peer-deps --include=dev && return 0
+              rc=$?
+              if [ $attempt -lt 3 ]; then
+                echo "::warning::npm ci failed (exit $rc) on attempt $attempt — retrying after cache clean"
+                npm cache clean --force >/dev/null 2>&1 || true
+                sleep $((attempt * 15))
+              fi
+            done
+            echo "::error::npm ci failed on every attempt — dependencies are NOT installed. Not continuing with a partial tree."
+            return 1
+          }
+          npm_ci_retry
           mkdir -p node_modules/@so360
           rm -rf node_modules/@so360/* && cp -r .ci-stubs/@so360/* node_modules/@so360/ 2>/dev/null || true
           printf '%s\n' \
@@ -260,7 +326,29 @@ jobs:
           esac
           # --include=dev: Docker-fleet runners may set NODE_ENV=production, which
           # makes `npm ci` omit devDeps and breaks the vite build (vite: not found).
-          npm ci --legacy-peer-deps --include=dev
+          npm_ci_retry() {
+            # The registry drops connections mid-tarball on this fleet:
+            # ECONNRESET killed core integration-tests, crm contract-tests and
+            # crm build-deploy on 2026-08-22 alone. NPM_CONFIG_FETCH_RETRIES
+            # only covers fetches npm itself classifies as retryable, and a
+            # socket reset during a tarball read is not always one of them.
+            # Purge inside the loop so every attempt installs from clean —
+            # warm slots keep node_modules between runs.
+            local attempt rc
+            for attempt in 1 2 3; do
+              rm -rf node_modules
+              npm ci --legacy-peer-deps --include=dev && return 0
+              rc=$?
+              if [ $attempt -lt 3 ]; then
+                echo "::warning::npm ci failed (exit $rc) on attempt $attempt — retrying after cache clean"
+                npm cache clean --force >/dev/null 2>&1 || true
+                sleep $((attempt * 15))
+              fi
+            done
+            echo "::error::npm ci failed on every attempt — dependencies are NOT installed. Not continuing with a partial tree."
+            return 1
+          }
+          npm_ci_retry
           mkdir -p node_modules/@so360
           rm -rf node_modules/@so360/* && cp -r .ci-stubs/@so360/* node_modules/@so360/ 2>/dev/null || true
           printf '%s\n' \

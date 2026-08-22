@@ -430,5 +430,43 @@ class GivenAStaticAnalysisPass(unittest.TestCase):
         )
 
 
+class GivenAFlakyRegistry(unittest.TestCase):
+    """A dropped socket must not read as a broken build.
+
+    The npm registry reset connections mid-tarball three times on 2026-08-22
+    (core integration-tests, crm contract-tests, crm build-deploy). Each cost a
+    green pipeline and an operator's attention for a fault that had nothing to
+    do with the change under test. NPM_CONFIG_FETCH_RETRIES only covers what
+    npm itself classifies as retryable; a reset during a tarball read is not
+    always in that set.
+    """
+
+    def test_when_npm_install_drops_a_socket_then_it_is_retried(self):
+        for name in GATE_WORKFLOWS:
+            body = read_workflow(name)
+            if "npm ci" not in body:
+                continue
+            self.assertIn(
+                "npm_ci_retry",
+                body,
+                f"{name}: `npm ci` is called without a retry wrapper. A "
+                "registry-side connection reset is not a build failure and "
+                "must not be reported as one.",
+            )
+
+    def test_when_every_npm_attempt_fails_then_the_job_stops(self):
+        for name in GATE_WORKFLOWS:
+            body = read_workflow(name)
+            if "npm_ci_retry" not in body:
+                continue
+            self.assertIn(
+                "dependencies are NOT installed",
+                body,
+                f"{name}: exhausting the npm retries must fail loudly. "
+                "Continuing with a partial node_modules is how a missing test "
+                "runner gets reported as a passing gate.",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()
