@@ -162,6 +162,15 @@ on:
       PAT_TOKEN:                     { required: false }
       INTERNAL_SERVICE_KEY:          { required: false }
       INVENTORY_INTERNAL_KEY:        { required: false }
+      # Public base the Daily Store Admin backend is reachable at, handed to
+      # merchants' stores as the webhook delivery URL by the pairing flow. Not
+      # sensitive, but it is environment-specific and MUST NOT be guessed —
+      # a wrong value is baked into every WooCommerce plugin install and only
+      # surfaces as "webhooks never arrive".
+      DAILYSTORE_PUBLIC_URL:         { required: false }
+      # Guards the internal live-order lookup Inbox calls; fail-CLOSED, so the
+      # route refuses until this is present.
+      DAILYSTORE_INTERNAL_KEY:       { required: false }
       # People Connect is the single source of truth for people data; its
       # internal surface is key-guarded. CORE_INTERNAL_KEY is the caller-side
       # alias for the value Core validates as INTERNAL_SERVICE_KEY.
@@ -1257,6 +1266,8 @@ jobs:
             [ -n "${{ secrets.MOBILITY_INTERNAL_KEY }}" ]     && echo "MOBILITY_INTERNAL_KEY=${{ secrets.MOBILITY_INTERNAL_KEY }}"     >> .env.ci
             [ -n "${{ secrets.INTERNAL_SERVICE_KEY }}" ]      && echo "INTERNAL_SERVICE_KEY=${{ secrets.INTERNAL_SERVICE_KEY }}"       >> .env.ci
             [ -n "${{ secrets.INVENTORY_INTERNAL_KEY }}" ]    && echo "INVENTORY_INTERNAL_KEY=${{ secrets.INVENTORY_INTERNAL_KEY }}"   >> .env.ci
+            [ -n "${{ secrets.DAILYSTORE_PUBLIC_URL }}" ]     && echo "DAILYSTORE_PUBLIC_URL=${{ secrets.DAILYSTORE_PUBLIC_URL }}"     >> .env.ci
+            [ -n "${{ secrets.DAILYSTORE_INTERNAL_KEY }}" ]   && echo "DAILYSTORE_INTERNAL_KEY=${{ secrets.DAILYSTORE_INTERNAL_KEY }}" >> .env.ci
             [ -n "${{ secrets.PEOPLE_INTERNAL_KEY }}" ]       && echo "PEOPLE_INTERNAL_KEY=${{ secrets.PEOPLE_INTERNAL_KEY }}"         >> .env.ci
             [ -n "${{ secrets.FLOW_INTERNAL_KEY }}" ]         && echo "FLOW_INTERNAL_KEY=${{ secrets.FLOW_INTERNAL_KEY }}"             >> .env.ci
             [ -n "${{ secrets.CORE_INTERNAL_KEY }}" ]         && echo "CORE_INTERNAL_KEY=${{ secrets.CORE_INTERNAL_KEY }}"             >> .env.ci
