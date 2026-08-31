@@ -228,7 +228,15 @@ jobs:
             echo "::error::No tracked spec files found — the unit tier is not enforced for this repo."
             exit 1
           fi
-          npm test -- --passWithNoTests --forceExit --ci
+          # jest and vitest don't share a flag surface: --forceExit/--ci are
+          # jest-only and vitest's CLI hard-errors on an unknown option
+          # instead of ignoring it, failing every vitest repo's build outright.
+          TEST_BIN=$(node -e "const s=require('./package.json').scripts?.test||''; console.log(/vitest/.test(s)?'vitest':/jest/.test(s)?'jest':'')" 2>/dev/null || echo "")
+          if [ "$TEST_BIN" = "vitest" ]; then
+            npm test -- --passWithNoTests --run
+          else
+            npm test -- --passWithNoTests --forceExit --ci
+          fi
       - name: Lint
         run: npm run lint --if-present
       - name: Security audit
