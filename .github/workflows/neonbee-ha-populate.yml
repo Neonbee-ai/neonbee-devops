@@ -121,29 +121,34 @@ jobs:
             [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
             nvm use 22
 
+            # PM2 names carry the -prod-ha suffix. A stale plain -ha name is far
+            # more damaging here than in the env-patch workflow: `pm2 delete`
+            # matches nothing, then `pm2 start` creates a SECOND process on a
+            # port the real one already holds, crash-looping the standby.
+            # Verify against `pm2 jlist` on the HA VM before editing this list.
             SERVICES=(
-              "core-ha:/github/neonbee/so360-core:8000"
-              "crm-ha:/github/neonbee/so360-crm-be:8003"
-              "inventory-ha:/github/neonbee/so360-inventory-be:8006"
-              "accounting-ha:/github/neonbee/so360-accounting-be:8008"
-              "projects-ha:/github/neonbee/so360-projects-be:8010"
-              "timesheet-ha:/github/neonbee/so360-timesheet-be:8012"
-              "people-connect-ha:/github/neonbee/so360-people-connect-be:8015"
-              "inbox-ha:/github/neonbee/so360-inbox-be:8017"
-              "neura-ha:/github/neonbee/so360-neura-be:8018"
-              "flow-ha:/github/neonbee/so360-flow-be:8021"
-              "insight-ha:/github/neonbee/so360-insight-be:8023"
-              "subscription-ha:/github/neonbee/so360-subscription-be:8026"
-              "forms-ha:/github/neonbee/so360-forms-be:8027"
-              "dailystore-ha:/github/neonbee/so360-dailystore-admin-be:8029"
-              "fulfillment-ha:/github/neonbee/so360-fulfillment-be:8032"
-              "support-ha:/github/neonbee/so360-support-be:8033"
-              "manufacturing-ha:/github/neonbee/so360-manufacturing-be:8034"
-              "chat-ha:/github/neonbee/so360-chat-be:8036"
-              "documents-ha:/github/neonbee/so360-documents-be:8037"
-              "sign-ha:/github/neonbee/so360-sign-be:8038"
-              "mobility-ha:/github/neonbee/so360-mobility-be:8040"
-              "folio-ha:/github/neonbee/so360-folio-be:8044"
+              "core-prod-ha:/github/neonbee/so360-core:8000"
+              "crm-prod-ha:/github/neonbee/so360-crm-be:8003"
+              "inventory-prod-ha:/github/neonbee/so360-inventory-be:8006"
+              "accounting-prod-ha:/github/neonbee/so360-accounting-be:8008"
+              "projects-prod-ha:/github/neonbee/so360-projects-be:8010"
+              "timesheet-prod-ha:/github/neonbee/so360-timesheet-be:8012"
+              "people-connect-prod-ha:/github/neonbee/so360-people-connect-be:8015"
+              "inbox-prod-ha:/github/neonbee/so360-inbox-be:8017"
+              "neura-prod-ha:/github/neonbee/so360-neura-be:8018"
+              "flow-prod-ha:/github/neonbee/so360-flow-be:8021"
+              "insight-prod-ha:/github/neonbee/so360-insight-be:8023"
+              "subscription-prod-ha:/github/neonbee/so360-subscription-be:8026"
+              "forms-prod-ha:/github/neonbee/so360-forms-be:8027"
+              "dailystore-admin-prod-ha:/github/neonbee/so360-dailystore-admin-be:8029"
+              "fulfillment-prod-ha:/github/neonbee/so360-fulfillment-be:8032"
+              "support-prod-ha:/github/neonbee/so360-support-be:8033"
+              "manufacturing-prod-ha:/github/neonbee/so360-manufacturing-be:8034"
+              "chat-prod-ha:/github/neonbee/so360-chat-be:8036"
+              "documents-prod-ha:/github/neonbee/so360-documents-be:8037"
+              "sign-prod-ha:/github/neonbee/so360-sign-be:8038"
+              "mobility-be-prod-ha:/github/neonbee/so360-mobility-be:8040"
+              "folio-prod-ha:/github/neonbee/so360-folio-be:8044"
             )
 
             setup_service() {

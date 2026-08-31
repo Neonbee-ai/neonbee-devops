@@ -70,23 +70,48 @@ jobs:
             [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
             nvm use 22
 
+            # PM2 names carry the -prod-ha suffix. They were plain -ha when this
+            # workflow was written (the 2026-06-21 run really did restart 22
+            # services); the rename left every entry matching nothing, so from
+            # then until 2026-08-31 this step printed SKIP for all of them and
+            # still reported success — an env sync that never took effect.
+            # Verify against `pm2 jlist` on the HA VM before editing this list.
             SERVICES=(
-              'core-ha:8000' 'crm-ha:8003' 'inventory-ha:8006' 'accounting-ha:8008'
-              'projects-ha:8010' 'timesheet-ha:8012' 'people-connect-ha:8015'
-              'inbox-ha:8017' 'neura-ha:8018' 'flow-ha:8021' 'insight-ha:8023'
-              'subscription-ha:8026' 'forms-ha:8027' 'dailystore-ha:8029'
-              'fulfillment-ha:8032' 'support-ha:8033' 'manufacturing-ha:8034'
-              'chat-ha:8036' 'documents-ha:8037' 'sign-ha:8038'
-              'mobility-ha:8040' 'folio-ha:8044'
+              'core-prod-ha:8000' 'crm-prod-ha:8003' 'inventory-prod-ha:8006'
+              'accounting-prod-ha:8008' 'projects-prod-ha:8010' 'timesheet-prod-ha:8012'
+              'people-connect-prod-ha:8015' 'inbox-prod-ha:8017' 'neura-prod-ha:8018'
+              'flow-prod-ha:8021' 'insight-prod-ha:8023' 'subscription-prod-ha:8026'
+              'forms-prod-ha:8027' 'dailystore-admin-prod-ha:8029'
+              'fulfillment-prod-ha:8032' 'support-prod-ha:8033'
+              'manufacturing-prod-ha:8034' 'chat-prod-ha:8036' 'documents-prod-ha:8037'
+              'sign-prod-ha:8038' 'mobility-be-prod-ha:8040' 'folio-prod-ha:8044'
+              'connect-prod-ha:8048' 'signal-prod-ha:8049' 'platform-help-prod-ha:8052'
             )
+            MISSING=0
             for SVC in "${SERVICES[@]}"; do
               NAME=${SVC%%:*}; PORT=${SVC##*:}
-              PORT=$PORT pm2 restart "$NAME" --update-env 2>/dev/null && \
-                echo "Restarted $NAME :$PORT" || echo "SKIP $NAME"
+              if PORT=$PORT pm2 restart "$NAME" --update-env 2>/dev/null; then
+                echo "Restarted $NAME :$PORT"
+              else
+                echo "MISSING $NAME — no such PM2 process"
+                MISSING=$((MISSING+1))
+              fi
             done
 
             pm2 save
-            echo "Restart complete"
+            echo "Restart complete: ${#SERVICES[@]} expected, $MISSING missing"
+
+            # Fail loudly rather than reporting success having restarted nothing.
+            # A handful of missing processes is normal drift on a standby; all of
+            # them missing means the naming convention moved again, which is the
+            # exact failure this step shipped with for two months.
+            if [ "$MISSING" -eq "${#SERVICES[@]}" ]; then
+              echo "::error::Every PM2 process name missed — the HA naming convention has changed. Env files were synced but NOTHING was restarted."
+              exit 1
+            fi
+            if [ "$MISSING" -gt 0 ]; then
+              echo "::warning::$MISSING of ${#SERVICES[@]} HA processes were not found; their env is synced but they were not restarted."
+            fi
           RESTART
 
       - name: Verify services are up
