@@ -1289,6 +1289,7 @@ jobs:
             [ -n "${{ secrets.ANTHROPIC_API_KEY }}" ]         && echo "ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}"           >> .env.ci
             [ -n "${{ secrets.CONNECT_ENCRYPTION_KEY }}" ]    && echo "CONNECT_ENCRYPTION_KEY=${{ secrets.CONNECT_ENCRYPTION_KEY }}" >> .env.ci
             [ -n "${{ secrets.CONNECT_INTERNAL_KEY }}" ]      && echo "CONNECT_INTERNAL_KEY=${{ secrets.CONNECT_INTERNAL_KEY }}"     >> .env.ci
+            [ -n "${{ secrets.CONNECT_INTERNAL_KEYS }}" ]     && echo "CONNECT_INTERNAL_KEYS=${{ secrets.CONNECT_INTERNAL_KEYS }}"   >> .env.ci
             [ -n "${{ secrets.CRM_SYNC_INTERNAL_KEY }}" ]     && echo "CRM_SYNC_INTERNAL_KEY=${{ secrets.CRM_SYNC_INTERNAL_KEY }}"   >> .env.ci
             [ -n "${{ secrets.SUPPORT_INTERNAL_KEY }}" ]      && echo "SUPPORT_INTERNAL_KEY=${{ secrets.SUPPORT_INTERNAL_KEY }}"     >> .env.ci
             [ -n "${{ secrets.ACCOUNTING_INTERNAL_KEY }}" ]   && echo "ACCOUNTING_INTERNAL_KEY=${{ secrets.ACCOUNTING_INTERNAL_KEY }}" >> .env.ci
