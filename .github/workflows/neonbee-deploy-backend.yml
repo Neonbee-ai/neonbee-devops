@@ -87,6 +87,7 @@ on:
       INTERNAL_SERVICE_KEY:         { required: false }
       INVENTORY_INTERNAL_KEY:       { required: false }
       PEOPLE_INTERNAL_KEY:          { required: false }
+      PEOPLE_INTERNAL_KEY_2:        { required: false }
       CORE_INTERNAL_KEY:           { required: false }
       FLOW_INTERNAL_KEY:           { required: false }
       EMAIL_INTERNAL_KEY:           { required: false }
@@ -643,6 +644,8 @@ jobs:
             [ -n "${{ secrets.MANUFACTURING_INTERNAL_KEY }}" ] && echo "MANUFACTURING_INTERNAL_KEY=${{ secrets.MANUFACTURING_INTERNAL_KEY }}" >> .env.ci
             [ -n "${{ secrets.ACCOUNTING_INTERNAL_KEY }}" ]    && echo "ACCOUNTING_INTERNAL_KEY=${{ secrets.ACCOUNTING_INTERNAL_KEY }}"       >> .env.ci
             [ -n "${{ secrets.ACCOUNTING_INTERNAL_KEY_2 }}" ]  && echo "ACCOUNTING_INTERNAL_KEY_2=${{ secrets.ACCOUNTING_INTERNAL_KEY_2 }}"   >> .env.ci
+            [ -n "${{ secrets.PEOPLE_INTERNAL_KEY }}" ]        && echo "PEOPLE_INTERNAL_KEY=${{ secrets.PEOPLE_INTERNAL_KEY }}"               >> .env.ci
+            [ -n "${{ secrets.PEOPLE_INTERNAL_KEY_2 }}" ]      && echo "PEOPLE_INTERNAL_KEY_2=${{ secrets.PEOPLE_INTERNAL_KEY_2 }}"           >> .env.ci
             [ -n "${{ secrets.SUBSCRIPTION_INTERNAL_KEY }}" ]  && echo "SUBSCRIPTION_INTERNAL_KEY=${{ secrets.SUBSCRIPTION_INTERNAL_KEY }}"   >> .env.ci
             [ -n "${{ secrets.VAPID_PUBLIC_KEY }}" ]            && echo "VAPID_PUBLIC_KEY=${{ secrets.VAPID_PUBLIC_KEY }}"                       >> .env.ci
             [ -n "${{ secrets.VAPID_PRIVATE_KEY }}" ]           && echo "VAPID_PRIVATE_KEY=${{ secrets.VAPID_PRIVATE_KEY }}"                     >> .env.ci
@@ -781,6 +784,8 @@ jobs:
             [ -n "${{ secrets.MANUFACTURING_INTERNAL_KEY }}" ] && echo "MANUFACTURING_INTERNAL_KEY=${{ secrets.MANUFACTURING_INTERNAL_KEY }}" >> .env.ci
             [ -n "${{ secrets.ACCOUNTING_INTERNAL_KEY }}" ]    && echo "ACCOUNTING_INTERNAL_KEY=${{ secrets.ACCOUNTING_INTERNAL_KEY }}"       >> .env.ci
             [ -n "${{ secrets.ACCOUNTING_INTERNAL_KEY_2 }}" ]  && echo "ACCOUNTING_INTERNAL_KEY_2=${{ secrets.ACCOUNTING_INTERNAL_KEY_2 }}"   >> .env.ci
+            [ -n "${{ secrets.PEOPLE_INTERNAL_KEY }}" ]        && echo "PEOPLE_INTERNAL_KEY=${{ secrets.PEOPLE_INTERNAL_KEY }}"               >> .env.ci
+            [ -n "${{ secrets.PEOPLE_INTERNAL_KEY_2 }}" ]      && echo "PEOPLE_INTERNAL_KEY_2=${{ secrets.PEOPLE_INTERNAL_KEY_2 }}"           >> .env.ci
             [ -n "${{ secrets.SUBSCRIPTION_INTERNAL_KEY }}" ]  && echo "SUBSCRIPTION_INTERNAL_KEY=${{ secrets.SUBSCRIPTION_INTERNAL_KEY }}"   >> .env.ci
             [ -n "${{ secrets.GOOGLE_CLIENT_ID }}" ]            && echo "GOOGLE_CLIENT_ID=${{ secrets.GOOGLE_CLIENT_ID }}"                       >> .env.ci
             [ -n "${{ secrets.GOOGLE_CLIENT_SECRET }}" ]        && echo "GOOGLE_CLIENT_SECRET=${{ secrets.GOOGLE_CLIENT_SECRET }}"               >> .env.ci

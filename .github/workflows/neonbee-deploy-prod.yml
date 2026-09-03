@@ -175,6 +175,7 @@ on:
       # internal surface is key-guarded. CORE_INTERNAL_KEY is the caller-side
       # alias for the value Core validates as INTERNAL_SERVICE_KEY.
       PEOPLE_INTERNAL_KEY:           { required: false }
+      PEOPLE_INTERNAL_KEY_2:         { required: false }
       FLOW_INTERNAL_KEY:           { required: false }
       CORE_INTERNAL_KEY:             { required: false }
       CONTABO_SSH_KEY:               { required: false }
@@ -1269,6 +1270,7 @@ jobs:
             [ -n "${{ secrets.DAILYSTORE_PUBLIC_URL }}" ]     && echo "DAILYSTORE_PUBLIC_URL=${{ secrets.DAILYSTORE_PUBLIC_URL }}"     >> .env.ci
             [ -n "${{ secrets.DAILYSTORE_INTERNAL_KEY }}" ]   && echo "DAILYSTORE_INTERNAL_KEY=${{ secrets.DAILYSTORE_INTERNAL_KEY }}" >> .env.ci
             [ -n "${{ secrets.PEOPLE_INTERNAL_KEY }}" ]       && echo "PEOPLE_INTERNAL_KEY=${{ secrets.PEOPLE_INTERNAL_KEY }}"         >> .env.ci
+            [ -n "${{ secrets.PEOPLE_INTERNAL_KEY_2 }}" ]     && echo "PEOPLE_INTERNAL_KEY_2=${{ secrets.PEOPLE_INTERNAL_KEY_2 }}"     >> .env.ci
             [ -n "${{ secrets.FLOW_INTERNAL_KEY }}" ]         && echo "FLOW_INTERNAL_KEY=${{ secrets.FLOW_INTERNAL_KEY }}"             >> .env.ci
             [ -n "${{ secrets.CORE_INTERNAL_KEY }}" ]         && echo "CORE_INTERNAL_KEY=${{ secrets.CORE_INTERNAL_KEY }}"             >> .env.ci
             [ -n "${{ secrets.DOCS_INTERNAL_SERVICE_KEY }}" ] && echo "DOCS_INTERNAL_SERVICE_KEY=${{ secrets.DOCS_INTERNAL_SERVICE_KEY }}" >> .env.ci
@@ -1299,6 +1301,7 @@ jobs:
             [ -n "${{ secrets.ACCOUNTING_INTERNAL_KEY_2 }}" ] && echo "ACCOUNTING_INTERNAL_KEY_2=${{ secrets.ACCOUNTING_INTERNAL_KEY_2 }}" >> .env.ci
             [ -n "${{ secrets.INVENTORY_INTERNAL_KEY }}" ]    && echo "INVENTORY_INTERNAL_KEY=${{ secrets.INVENTORY_INTERNAL_KEY }}"   >> .env.ci
             [ -n "${{ secrets.PEOPLE_INTERNAL_KEY }}" ]       && echo "PEOPLE_INTERNAL_KEY=${{ secrets.PEOPLE_INTERNAL_KEY }}"         >> .env.ci
+            [ -n "${{ secrets.PEOPLE_INTERNAL_KEY_2 }}" ]     && echo "PEOPLE_INTERNAL_KEY_2=${{ secrets.PEOPLE_INTERNAL_KEY_2 }}"     >> .env.ci
             [ -n "${{ secrets.FLOW_INTERNAL_KEY }}" ]         && echo "FLOW_INTERNAL_KEY=${{ secrets.FLOW_INTERNAL_KEY }}"             >> .env.ci
             [ -n "${{ secrets.CORE_INTERNAL_KEY }}" ]         && echo "CORE_INTERNAL_KEY=${{ secrets.CORE_INTERNAL_KEY }}"             >> .env.ci
             [ -n "${{ secrets.CORE_INTERNAL_KEY }}" ]         && echo "CORE_INTERNAL_KEY=${{ secrets.CORE_INTERNAL_KEY }}"             >> .env.ci
