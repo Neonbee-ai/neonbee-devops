@@ -1293,6 +1293,7 @@ jobs:
             # Failure→ticket bridge (Core): GitHub token used to file one issue
             # per platform_error_events fingerprint. Absent = bridge stays off.
             [ -n "${{ secrets.FAILURE_TICKETS_GH_TOKEN }}" ]  && echo "FAILURE_TICKETS_GH_TOKEN=${{ secrets.FAILURE_TICKETS_GH_TOKEN }}" >> .env.ci
+            [ -n "${{ secrets.FAILURE_TICKETS_PULSE_KEY }}" ] && echo "FAILURE_TICKETS_PULSE_KEY=${{ secrets.FAILURE_TICKETS_PULSE_KEY }}" >> .env.ci
             [ -n "${{ secrets.CONNECT_INTERNAL_KEY }}" ]      && echo "CONNECT_INTERNAL_KEY=${{ secrets.CONNECT_INTERNAL_KEY }}"     >> .env.ci
             [ -n "${{ secrets.CONNECT_INTERNAL_KEYS }}" ]     && echo "CONNECT_INTERNAL_KEYS=${{ secrets.CONNECT_INTERNAL_KEYS }}"   >> .env.ci
             [ -n "${{ secrets.CRM_SYNC_INTERNAL_KEY }}" ]     && echo "CRM_SYNC_INTERNAL_KEY=${{ secrets.CRM_SYNC_INTERNAL_KEY }}"   >> .env.ci
