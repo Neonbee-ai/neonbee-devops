@@ -1288,6 +1288,9 @@ jobs:
             [ -n "${{ secrets.OPENAI_API_KEY }}" ]            && echo "OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}"                 >> .env.ci
             [ -n "${{ secrets.ANTHROPIC_API_KEY }}" ]         && echo "ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}"           >> .env.ci
             [ -n "${{ secrets.CONNECT_ENCRYPTION_KEY }}" ]    && echo "CONNECT_ENCRYPTION_KEY=${{ secrets.CONNECT_ENCRYPTION_KEY }}" >> .env.ci
+            # Failure→ticket bridge (Core): GitHub token used to file one issue
+            # per platform_error_events fingerprint. Absent = bridge stays off.
+            [ -n "${{ secrets.FAILURE_TICKETS_GH_TOKEN }}" ]  && echo "FAILURE_TICKETS_GH_TOKEN=${{ secrets.FAILURE_TICKETS_GH_TOKEN }}" >> .env.ci
             [ -n "${{ secrets.CONNECT_INTERNAL_KEY }}" ]      && echo "CONNECT_INTERNAL_KEY=${{ secrets.CONNECT_INTERNAL_KEY }}"     >> .env.ci
             [ -n "${{ secrets.CONNECT_INTERNAL_KEYS }}" ]     && echo "CONNECT_INTERNAL_KEYS=${{ secrets.CONNECT_INTERNAL_KEYS }}"   >> .env.ci
             [ -n "${{ secrets.CRM_SYNC_INTERNAL_KEY }}" ]     && echo "CRM_SYNC_INTERNAL_KEY=${{ secrets.CRM_SYNC_INTERNAL_KEY }}"   >> .env.ci
