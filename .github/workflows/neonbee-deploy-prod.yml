@@ -1298,6 +1298,13 @@ jobs:
             [ -n "${{ secrets.CONNECT_INTERNAL_KEYS }}" ]     && echo "CONNECT_INTERNAL_KEYS=${{ secrets.CONNECT_INTERNAL_KEYS }}"   >> .env.ci
             [ -n "${{ secrets.CRM_SYNC_INTERNAL_KEY }}" ]     && echo "CRM_SYNC_INTERNAL_KEY=${{ secrets.CRM_SYNC_INTERNAL_KEY }}"   >> .env.ci
             [ -n "${{ secrets.SUPPORT_INTERNAL_KEY }}" ]      && echo "SUPPORT_INTERNAL_KEY=${{ secrets.SUPPORT_INTERNAL_KEY }}"     >> .env.ci
+            # AWS SES (Inbox email channel outbound + inbound S3 bodies). Absent from
+            # every workflow until 2026-09-11 — the VM never received them, so
+            # SES-backed agent replies could not send. Conditional like the rest.
+            [ -n "${{ secrets.AWS_ACCESS_KEY_ID }}" ]         && echo "AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}"             >> .env.ci
+            [ -n "${{ secrets.AWS_SECRET_ACCESS_KEY }}" ]     && echo "AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}"     >> .env.ci
+            [ -n "${{ secrets.AWS_REGION }}" ]                && echo "AWS_REGION=${{ secrets.AWS_REGION }}"                           >> .env.ci
+            [ -n "${{ secrets.INBOX_EMAIL_S3_BUCKET }}" ]     && echo "INBOX_EMAIL_S3_BUCKET=${{ secrets.INBOX_EMAIL_S3_BUCKET }}"     >> .env.ci
             [ -n "${{ secrets.ACCOUNTING_INTERNAL_KEY }}" ]   && echo "ACCOUNTING_INTERNAL_KEY=${{ secrets.ACCOUNTING_INTERNAL_KEY }}" >> .env.ci
             [ -n "${{ secrets.ACCOUNTING_INTERNAL_KEY_2 }}" ] && echo "ACCOUNTING_INTERNAL_KEY_2=${{ secrets.ACCOUNTING_INTERNAL_KEY_2 }}" >> .env.ci
             [ -n "${{ secrets.INVENTORY_INTERNAL_KEY }}" ]    && echo "INVENTORY_INTERNAL_KEY=${{ secrets.INVENTORY_INTERNAL_KEY }}"   >> .env.ci
