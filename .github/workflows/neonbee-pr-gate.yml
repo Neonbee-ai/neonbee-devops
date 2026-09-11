@@ -37,6 +37,14 @@ on:
         required: false
         type: string
         default: '22'
+      typecheck:
+        description: >-
+          Run `tsc --noEmit` as part of the gate. OPT-IN (default false)
+          because a repo with pre-existing type errors would go red on its
+          next unrelated PR; enable it per repo once that repo is clean.
+        required: false
+        type: boolean
+        default: false
     secrets:
       # All optional: a fork PR receives no secrets, and a gate that fails on
       # provenance rather than on the code trains people to ignore it. The
@@ -191,6 +199,34 @@ jobs:
 
       - name: Lint
         run: npm run lint --if-present
+
+      # Why this tier exists.
+      #
+      # jest and vitest TRANSPILE without type checking, so a type-only error
+      # passes every test and surfaces only in the deploy workflow's build
+      # step — after the merge. Three reached a deploy in one change wave:
+      # TS1117 (duplicate object key), TS2554 (wrong argument count) and
+      # TS1135 (malformed argument list). Each was invisible here and red
+      # there, which is the exact asymmetry test_when_a_pull_request_is_gated_
+      # then_it_still_runs_every_tier exists to prevent: a PR gate weaker than
+      # the deploy gate relocates the problem instead of solving it.
+      #
+      # This emits nothing, so it does not violate the no-build charter — it is
+      # verification, like the tests above it.
+      - name: Typecheck
+        if: inputs.typecheck
+        run: |
+          # Prefer the repo's own script; fall back to the build tsconfig when
+          # one exists (it usually excludes specs), else the root tsconfig.
+          if npm run | grep -qE '^  (typecheck|type-check)$'; then
+            npm run typecheck --if-present || npm run type-check --if-present
+          elif [ -f tsconfig.build.json ]; then
+            npx --no-install tsc --noEmit -p tsconfig.build.json
+          elif [ -f tsconfig.json ]; then
+            npx --no-install tsc --noEmit -p tsconfig.json
+          else
+            echo "::warning::No tsconfig found — typecheck skipped for this repo."
+          fi
 
       - name: Security audit
         run: |

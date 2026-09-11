@@ -312,6 +312,35 @@ class GivenAPullRequestGate(unittest.TestCase):
                 "relocates the problem.",
             )
 
+    def test_when_a_pull_request_is_gated_then_a_typecheck_tier_exists(self):
+        # jest and vitest transpile WITHOUT type checking, so a type-only error
+        # passes every test here and fails only in the deploy workflow's build
+        # step — after the merge. Three reached a deploy in one change wave
+        # (TS1117, TS2554, TS1135). A PR gate that cannot see them is weaker
+        # than the deploy gate, which is the asymmetry this file exists to stop.
+        body = read_workflow(PR_GATE)
+        self.assertIn(
+            "name: Typecheck",
+            body,
+            f"{PR_GATE}: missing the Typecheck step. Tests transpile without "
+            "checking types, so without it a type-only error can only be "
+            "caught after merge.",
+        )
+
+    def test_when_the_typecheck_tier_exists_then_it_is_opt_in(self):
+        # Enabling it for every repo at once would turn the next unrelated PR
+        # red anywhere a pre-existing type error is already sitting. Repos opt
+        # in as they are cleaned.
+        body = read_workflow(PR_GATE)
+        self.assertIn("if: inputs.typecheck", body, f"{PR_GATE}: typecheck must be gated on its input.")
+        self.assertIn("default: false", body, f"{PR_GATE}: the typecheck input must default to false.")
+
+    def test_when_the_typecheck_tier_runs_then_it_emits_nothing(self):
+        # The gate's charter is verification only — it must never build. tsc
+        # with --noEmit produces no artefact, so it stays within that.
+        body = read_workflow(PR_GATE)
+        self.assertIn("--noEmit", body, f"{PR_GATE}: typecheck must use --noEmit so the gate never emits a build.")
+
     def test_when_a_pull_request_is_gated_then_secrets_are_not_required(self):
         # A required secret that a fork PR cannot supply fails the gate for
         # reasons unrelated to the change under review.
