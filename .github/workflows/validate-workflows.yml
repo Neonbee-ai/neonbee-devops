@@ -20,12 +20,30 @@ jobs:
           done
           echo "All workflow files are valid YAML."
 
+  # ── Contract tests ──────────────────────────────────────────────────────────
+  # tests/ asserts the trust invariants across every gate workflow — that a PR
+  # gate has no deploy job, that a timeout cannot be swallowed into a pass, that
+  # each tier is present. Those assertions existed but were never EXECUTED by
+  # CI: this workflow only checked that the YAML parses, so a change that broke
+  # an invariant would have gone in green.
+  #
+  # Running them here makes the contract enforceable rather than documentary.
+  contract:
+    name: Gate trust contract
+    runs-on: [self-hosted, contabo]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run contract tests
+        run: |
+          pip3 install pyyaml -q --break-system-packages 2>/dev/null || pip3 install pyyaml -q 2>/dev/null || true
+          python3 -m unittest discover -s tests -p 'test_*.py' -v
+
   # ── Notify: Microsoft Teams webhook on completion ───────────────────────────
   # Additive only. Runs after the job regardless of outcome. No-ops when
   # NOTIFY_WEBHOOK_URL is unset; never fails the workflow.
   notify:
     name: Notify Teams
-    needs: [lint]
+    needs: [lint, contract]
     if: always()
     runs-on: [self-hosted, contabo]
     steps:
