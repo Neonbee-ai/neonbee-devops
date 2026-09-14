@@ -98,6 +98,15 @@ jobs:
         shell: bash
         run: echo "NPM_CONFIG_CACHE=$RUNNER_TEMP/npm-cache" >> "$GITHUB_ENV"
 
+      - name: Configure private package registry
+        # Idempotent (npm config set, not an append) since this runs on a
+        # persistent self-hosted runner shared across jobs. Harmless when a
+        # repo has no @so360 scoped dependency.
+        run: |
+          npm config set @so360:registry https://npm.pkg.github.com --global
+          npm config set //npm.pkg.github.com/:_authToken "${PAT_TOKEN}" --global
+        env:
+          PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
       - name: Install dependencies
         run: |
           # Warm slots keep node_modules between runs — purge before installing.
@@ -366,6 +375,15 @@ jobs:
       - name: Isolate npm cache per job
         shell: bash
         run: echo "NPM_CONFIG_CACHE=$RUNNER_TEMP/npm-cache" >> "$GITHUB_ENV"
+      - name: Configure private package registry
+        # Idempotent (npm config set, not an append) since this runs on a
+        # persistent self-hosted runner shared across jobs. Harmless when a
+        # repo has no @so360 scoped dependency.
+        run: |
+          npm config set @so360:registry https://npm.pkg.github.com --global
+          npm config set //npm.pkg.github.com/:_authToken "${PAT_TOKEN}" --global
+        env:
+          PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
       - name: Install dependencies
         run: |
           rm -rf node_modules
@@ -452,6 +470,15 @@ jobs:
       - name: Isolate npm cache per job
         shell: bash
         run: echo "NPM_CONFIG_CACHE=$RUNNER_TEMP/npm-cache" >> "$GITHUB_ENV"
+      - name: Configure private package registry
+        # Idempotent (npm config set, not an append) since this runs on a
+        # persistent self-hosted runner shared across jobs. Harmless when a
+        # repo has no @so360 scoped dependency.
+        run: |
+          npm config set @so360:registry https://npm.pkg.github.com --global
+          npm config set //npm.pkg.github.com/:_authToken "${PAT_TOKEN}" --global
+        env:
+          PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
       - name: Install dependencies
         run: |
           rm -rf node_modules

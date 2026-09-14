@@ -249,6 +249,15 @@ jobs:
           key: npm-v2-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
           restore-keys: npm-v2-${{ runner.os }}-
 
+      - name: Configure private package registry
+        # Idempotent (npm config set, not an append) since this runs on a
+        # persistent self-hosted runner shared across jobs. Harmless when a
+        # repo has no @so360 scoped dependency.
+        run: |
+          npm config set @so360:registry https://npm.pkg.github.com --global
+          npm config set //npm.pkg.github.com/:_authToken "${PAT_TOKEN}" --global
+        env:
+          PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
       - name: Install dependencies
         # --include=dev is mandatory: some runners in the Docker fleet have
         # NODE_ENV=production in their environment, which makes `npm ci` omit
@@ -579,6 +588,15 @@ jobs:
       - name: Isolate npm cache per job
         shell: bash
         run: echo "NPM_CONFIG_CACHE=$RUNNER_TEMP/npm-cache" >> "$GITHUB_ENV"
+      - name: Configure private package registry
+        # Idempotent (npm config set, not an append) since this runs on a
+        # persistent self-hosted runner shared across jobs. Harmless when a
+        # repo has no @so360 scoped dependency.
+        run: |
+          npm config set @so360:registry https://npm.pkg.github.com --global
+          npm config set //npm.pkg.github.com/:_authToken "${PAT_TOKEN}" --global
+        env:
+          PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
       - name: Install dependencies
         run: |
           rm -rf node_modules
@@ -665,6 +683,15 @@ jobs:
       - name: Isolate npm cache per job
         shell: bash
         run: echo "NPM_CONFIG_CACHE=$RUNNER_TEMP/npm-cache" >> "$GITHUB_ENV"
+      - name: Configure private package registry
+        # Idempotent (npm config set, not an append) since this runs on a
+        # persistent self-hosted runner shared across jobs. Harmless when a
+        # repo has no @so360 scoped dependency.
+        run: |
+          npm config set @so360:registry https://npm.pkg.github.com --global
+          npm config set //npm.pkg.github.com/:_authToken "${PAT_TOKEN}" --global
+        env:
+          PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
       - name: Install dependencies
         run: |
           rm -rf node_modules
