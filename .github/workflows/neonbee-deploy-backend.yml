@@ -600,7 +600,7 @@ jobs:
 
       # ── Dev ──────────────────────────────────────────────────────────────
       - name: Deploy to Dev
-        if: github.ref == 'refs/heads/main'
+        if: github.ref == 'refs/heads/develop'
         env:
           SERVER_IP: ${{ secrets.SERVER_IP }}
           SERVICE_DIR: ${{ inputs.service_dir }}
@@ -609,6 +609,18 @@ jobs:
           HEALTH: ${{ inputs.health_path }}
         run: |
           ssh-keyscan -H $SERVER_IP >> ~/.ssh/known_hosts 2>/dev/null
+
+          # ── Directory isolation ──────────────────────────────────────────
+          # The dev tier MUST NOT deploy into the prod tree. On the Contabo VM
+          # /github/neonbee/so360-* is what the *-prod-ha PM2 apps serve from,
+          # so an rsync --delete + .env rewrite there would hand production a
+          # dev build (dev Supabase, SERVICE_PORT_BAND, CORS) at its next
+          # restart. Remap every path into /github/neonbee-dev/ instead.
+          case "$SERVICE_DIR" in
+            /github/neonbee/*) SERVICE_DIR="/github/neonbee-dev/${SERVICE_DIR#/github/neonbee/}" ;;
+            *)                 SERVICE_DIR="${SERVICE_DIR%/}-dev" ;;
+          esac
+          echo "dev deploy target: $SERVICE_DIR"
 
           CURRENT=$(ssh root@$SERVER_IP "cat '$SERVICE_DIR/.slot' 2>/dev/null || echo blue")
           NEW_SLOT=$([[ "$CURRENT" == "blue" ]] && echo green || echo blue)
@@ -763,6 +775,18 @@ jobs:
           HEALTH: ${{ inputs.health_path }}
         run: |
           ssh-keyscan -H $SERVER_IP >> ~/.ssh/known_hosts 2>/dev/null
+
+          # ── Directory isolation ──────────────────────────────────────────
+          # The staging tier MUST NOT deploy into the prod tree. On the Contabo VM
+          # /github/neonbee/so360-* is what the *-prod-ha PM2 apps serve from,
+          # so an rsync --delete + .env rewrite there would hand production a
+          # staging build (dev Supabase, SERVICE_PORT_BAND, CORS) at its next
+          # restart. Remap every path into /github/neonbee-staging/ instead.
+          case "$SERVICE_DIR" in
+            /github/neonbee/*) SERVICE_DIR="/github/neonbee-staging/${SERVICE_DIR#/github/neonbee/}" ;;
+            *)                 SERVICE_DIR="${SERVICE_DIR%/}-staging" ;;
+          esac
+          echo "staging deploy target: $SERVICE_DIR"
 
           CURRENT=$(ssh root@$SERVER_IP "cat '$SERVICE_DIR/.slot' 2>/dev/null || echo blue")
           NEW_SLOT=$([[ "$CURRENT" == "blue" ]] && echo green || echo blue)

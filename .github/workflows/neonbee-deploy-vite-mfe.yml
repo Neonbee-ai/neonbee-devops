@@ -40,6 +40,16 @@ on:
         required: false
         type: string
         default: 'https://staging.api.skyoffice360.com/core'
+      vite_env_dev:
+        description: 'Extra VITE_* lines for the dev build (mirrors prod vite_env)'
+        required: false
+        type: string
+        default: ''
+      vite_env_staging:
+        description: 'Extra VITE_* lines for the staging build'
+        required: false
+        type: string
+        default: ''
       is_mfe:
         required: false
         type: boolean
@@ -266,7 +276,7 @@ jobs:
 
       # Build on Contabo runner — dist/ generated here, never on target VM
       - name: Install + build (dev)
-        if: github.ref == 'refs/heads/main'
+        if: github.ref == 'refs/heads/develop'
         run: |
           # Remove stale so360-shell-fe symlink from previous prod deploys so
           # vite.config.ts aliases fall back to node_modules/@so360/ stubs.
@@ -312,6 +322,12 @@ jobs:
             "VITE_SO360_CORE_API=${{ inputs.vite_core_api_dev }}" \
             "VITE_ENVIRONMENT=cloud" \
             > .env
+          # Per-module VITE_* (remote URLs, module APIs) — the dev mirror of
+          # the prod caller's vite_env. Without these the shell falls back to
+          # localhost:30xx remotes and federation fetches nothing.
+          EXTRA_VITE='${{ inputs.vite_env_dev }}'
+          [ -n "$EXTRA_VITE" ] && printf '%s\n' "$EXTRA_VITE" >> .env
+          sed -i '/^$/d' .env
           npm run build
 
       - name: Install + build (staging)
@@ -356,11 +372,17 @@ jobs:
             "VITE_SO360_CORE_API=${{ inputs.vite_core_api_staging }}" \
             "VITE_ENVIRONMENT=cloud" \
             > .env
+          # Per-module VITE_* (remote URLs, module APIs) — the staging mirror of
+          # the prod caller's vite_env. Without these the shell falls back to
+          # localhost:30xx remotes and federation fetches nothing.
+          EXTRA_VITE='${{ inputs.vite_env_staging }}'
+          [ -n "$EXTRA_VITE" ] && printf '%s\n' "$EXTRA_VITE" >> .env
+          sed -i '/^$/d' .env
           npm run build
 
       # ── Dev ──────────────────────────────────────────────────────────────
       - name: Deploy to Dev
-        if: github.ref == 'refs/heads/main'
+        if: github.ref == 'refs/heads/develop'
         env:
           SERVER_IP: ${{ secrets.SERVER_IP }}
           NGINX_ROOT: ${{ inputs.nginx_root_dev }}
