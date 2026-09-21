@@ -278,6 +278,16 @@ jobs:
       - name: Install + build (dev)
         if: github.ref == 'refs/heads/develop'
         run: |
+          # ── Dev database guard ───────────────────────────────────────────
+          # Without a dev Supabase project the bundle would either embed the
+          # PRODUCTION project or empty credentials. Stop before anything is
+          # built or rsynced (the deploy uses --delete, so publishing an empty
+          # dist/ would wipe whatever dev-cdn currently serves).
+          if [ -z "${{ secrets.SUPABASE_URL_DEV }}" ]; then
+            echo "::warning title=Dev build skipped::No SUPABASE_URL_DEV secret — not building ${{ inputs.service_name }} for dev against the production Supabase project."
+            exit 0
+          fi
+
           # Remove stale so360-shell-fe symlink from previous prod deploys so
           # vite.config.ts aliases fall back to node_modules/@so360/ stubs.
           # Guard: never remove a path that CONTAINS the live checkout. The
@@ -320,6 +330,8 @@ jobs:
           printf '%s\n' \
             "VITE_BASE_URL=${{ inputs.vite_base_url_dev }}" \
             "VITE_SO360_CORE_API=${{ inputs.vite_core_api_dev }}" \
+            "VITE_SUPABASE_URL=${{ secrets.SUPABASE_URL_DEV }}" \
+            "VITE_SUPABASE_ANON_KEY=${{ secrets.SUPABASE_ANON_KEY_DEV }}" \
             "VITE_ENVIRONMENT=cloud" \
             > .env
           # Per-module VITE_* (remote URLs, module APIs) — the dev mirror of
@@ -370,6 +382,8 @@ jobs:
           printf '%s\n' \
             "VITE_BASE_URL=${{ inputs.vite_base_url_staging }}" \
             "VITE_SO360_CORE_API=${{ inputs.vite_core_api_staging }}" \
+            "VITE_SUPABASE_URL=${{ secrets.SUPABASE_URL_STAGING }}" \
+            "VITE_SUPABASE_ANON_KEY=${{ secrets.SUPABASE_ANON_KEY_STAGING }}" \
             "VITE_ENVIRONMENT=cloud" \
             > .env
           # Per-module VITE_* (remote URLs, module APIs) — the staging mirror of
@@ -387,6 +401,16 @@ jobs:
           SERVER_IP: ${{ secrets.SERVER_IP }}
           NGINX_ROOT: ${{ inputs.nginx_root_dev }}
         run: |
+          # ── Dev database guard ───────────────────────────────────────────
+          # Without a dev Supabase project the bundle would either embed the
+          # PRODUCTION project or empty credentials. Stop before anything is
+          # rsynced (the deploy uses --delete, so publishing an empty
+          # dist/ would wipe whatever dev-cdn currently serves).
+          if [ -z "${{ secrets.SUPABASE_URL_DEV }}" ]; then
+            echo "::warning title=Dev deploy skipped::No SUPABASE_URL_DEV secret — not deploying ${{ inputs.service_name }} for dev against the production Supabase project."
+            exit 0
+          fi
+
           ssh-keyscan -H $SERVER_IP >> ~/.ssh/known_hosts 2>/dev/null
 
           # Backup current assets before overwriting (Blue/Green rollback target)

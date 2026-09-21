@@ -56,6 +56,10 @@ on:
       SERVER_IP:                    { required: true }
       INTERNAL_TOOLS_VM:            { required: false }
       SUPABASE_URL:                 { required: false }
+      SUPABASE_URL_DEV:             { required: false }
+      SUPABASE_ANON_KEY_DEV:        { required: false }
+      SUPABASE_SERVICE_KEY_DEV:     { required: false }
+      JWT_SECRET_DEV:               { required: false }
       SUPABASE_ANON_KEY:            { required: false }
       SUPABASE_SERVICE_KEY:         { required: false }
       JWT_SECRET:                   { required: false }
@@ -609,6 +613,24 @@ jobs:
           HEALTH: ${{ inputs.health_path }}
         run: |
           ssh-keyscan -H $SERVER_IP >> ~/.ssh/known_hosts 2>/dev/null
+          # ── Dev database guard ───────────────────────────────────────────
+          # Dev must never boot against the production Supabase project. CI has
+          # no dev DB yet (only SUPABASE_* = prod and blank *_STAGING), so until
+          # SUPABASE_URL_DEV exists this step stops here — loudly, in the log and
+          # the run summary, never as a silent skip like the refs/heads/main gate
+          # that quietly killed this tier for four months.
+          if [ -z "${{ secrets.SUPABASE_URL_DEV }}" ]; then
+            echo "::warning title=Dev deploy skipped::No SUPABASE_URL_DEV secret — refusing to start ${{ inputs.service_name }} against the production database. Add SUPABASE_URL_DEV / SUPABASE_ANON_KEY_DEV / SUPABASE_SERVICE_KEY_DEV to enable the dev tier."
+            {
+              echo "### Dev deploy skipped — no dev database"
+              echo ""
+              echo "\`${{ inputs.service_name }}\` was built and tested, but not deployed."
+              echo "The dev tier has no Supabase project of its own, and deploying would"
+              echo "point it at production data. Set \`SUPABASE_URL_DEV\`,"
+              echo "\`SUPABASE_ANON_KEY_DEV\` and \`SUPABASE_SERVICE_KEY_DEV\` to turn it on."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
 
           # ── Directory isolation ──────────────────────────────────────────
           # The dev tier MUST NOT deploy into the prod tree. On the Contabo VM
@@ -651,12 +673,12 @@ jobs:
               echo "RELEASE_SHA=${{ github.sha }}"
               echo "SERVICE_PORT_BAND=6000"
               echo "PORT=$PORT"
-              echo "SUPABASE_URL=${{ secrets.SUPABASE_URL }}"
-              echo "SUPABASE_KEY=${{ secrets.SUPABASE_ANON_KEY }}"
-              echo "SUPABASE_ANON_KEY=${{ secrets.SUPABASE_ANON_KEY }}"
-              echo "SUPABASE_SERVICE_KEY=${{ secrets.SUPABASE_SERVICE_KEY }}"
-              echo "SUPABASE_SERVICE_ROLE_KEY=${{ secrets.SUPABASE_SERVICE_KEY }}"
-              echo "JWT_SECRET=${{ secrets.JWT_SECRET }}"
+              echo "SUPABASE_URL=${{ secrets.SUPABASE_URL_DEV }}"
+              echo "SUPABASE_KEY=${{ secrets.SUPABASE_ANON_KEY_DEV }}"
+              echo "SUPABASE_ANON_KEY=${{ secrets.SUPABASE_ANON_KEY_DEV }}"
+              echo "SUPABASE_SERVICE_KEY=${{ secrets.SUPABASE_SERVICE_KEY_DEV }}"
+              echo "SUPABASE_SERVICE_ROLE_KEY=${{ secrets.SUPABASE_SERVICE_KEY_DEV }}"
+              echo "JWT_SECRET=${{ secrets.JWT_SECRET_DEV || secrets.JWT_SECRET }}"
               echo "ENCRYPTION_KEY=${{ secrets.ENCRYPTION_KEY }}"
               echo "PAYROLL_ENCRYPTION_KEY=${{ secrets.PAYROLL_ENCRYPTION_KEY }}"
               echo "CORS_ORIGINS=${{ secrets.CORS_ORIGINS_DEV }}"
