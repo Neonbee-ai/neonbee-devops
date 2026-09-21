@@ -54,6 +54,11 @@ on:
         required: false
         type: boolean
         default: true
+      is_shell:
+        description: 'The host shell: build packages/* for real instead of using .ci-stubs'
+        required: false
+        type: boolean
+        default: false
       node_version:
         required: false
         type: string
@@ -323,8 +328,18 @@ jobs:
             return 1
           }
           npm_ci_retry
-          mkdir -p node_modules/@so360
-          rm -rf node_modules/@so360/* && cp -r .ci-stubs/@so360/* node_modules/@so360/ 2>/dev/null || true
+          if [ "${{ inputs.is_shell }}" = "true" ]; then
+            # The shell OWNS @so360/*: packages/ is its own workspace. Stubbing
+            # them makes tsc fail with TS2307 "Cannot find module
+            # '@so360/design-system'" — the dev build has done exactly that
+            # since the tier went dark. Build them for real, as prod does.
+            for p in shell-context design-system event-bus formatters; do
+              (cd "packages/$p" && npm run build) || { echo "::error::failed to build @so360/$p"; exit 1; }
+            done
+          else
+            mkdir -p node_modules/@so360
+            rm -rf node_modules/@so360/* && cp -r .ci-stubs/@so360/* node_modules/@so360/ 2>/dev/null || true
+          fi
           printf '%s\n' \
             "VITE_BASE_URL=${{ inputs.vite_base_url_dev }}" \
             "VITE_SO360_CORE_API=${{ inputs.vite_core_api_dev }}" \
@@ -375,8 +390,18 @@ jobs:
             return 1
           }
           npm_ci_retry
-          mkdir -p node_modules/@so360
-          rm -rf node_modules/@so360/* && cp -r .ci-stubs/@so360/* node_modules/@so360/ 2>/dev/null || true
+          if [ "${{ inputs.is_shell }}" = "true" ]; then
+            # The shell OWNS @so360/*: packages/ is its own workspace. Stubbing
+            # them makes tsc fail with TS2307 "Cannot find module
+            # '@so360/design-system'" — the dev build has done exactly that
+            # since the tier went dark. Build them for real, as prod does.
+            for p in shell-context design-system event-bus formatters; do
+              (cd "packages/$p" && npm run build) || { echo "::error::failed to build @so360/$p"; exit 1; }
+            done
+          else
+            mkdir -p node_modules/@so360
+            rm -rf node_modules/@so360/* && cp -r .ci-stubs/@so360/* node_modules/@so360/ 2>/dev/null || true
+          fi
           printf '%s\n' \
             "VITE_BASE_URL=${{ inputs.vite_base_url_staging }}" \
             "VITE_SO360_CORE_API=${{ inputs.vite_core_api_staging }}" \
