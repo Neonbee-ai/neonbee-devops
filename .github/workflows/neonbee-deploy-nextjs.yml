@@ -337,23 +337,21 @@ jobs:
           PORT: ${{ inputs.port_dev }}
         run: |
           ssh-keyscan -H $SERVER_IP >> ~/.ssh/known_hosts 2>/dev/null
-          # ── Dev database guard ───────────────────────────────────────────
-          # Dev must never boot against the production Supabase project. CI has
-          # no dev DB yet (only SUPABASE_* = prod and blank *_STAGING), so until
-          # SUPABASE_URL_DEV exists this step stops here — loudly, in the log and
-          # the run summary, never as a silent skip like the refs/heads/main gate
-          # that quietly killed this tier for four months.
+          # ── Dev database ─────────────────────────────────────────────────
+          # There is no dev Supabase project: CI holds one set of credentials
+          # and they are production's. Dev therefore runs against the SAME
+          # database as prod (user decision, 2026-09-21) — SUPABASE_*_DEV
+          # overrides it the moment those secrets exist. Say so on every deploy
+          # so nobody discovers it from a support ticket.
           if [ -z "${{ secrets.SUPABASE_URL_DEV }}" ]; then
-            echo "::warning title=Dev deploy skipped::No SUPABASE_URL_DEV secret — refusing to start ${{ inputs.service_name }} against the production database. Add SUPABASE_URL_DEV / SUPABASE_ANON_KEY_DEV / SUPABASE_SERVICE_KEY_DEV to enable the dev tier."
+            echo "::warning title=Dev is on the PRODUCTION database::No SUPABASE_URL_DEV secret — ${{ inputs.service_name }} (dev) reads and writes production data. Anything you create while testing on dev is real."
             {
-              echo "### Dev deploy skipped — no dev database"
+              echo "### ⚠️ Dev runs on the production database"
               echo ""
-              echo "\`${{ inputs.service_name }}\` was built and tested, but not deployed."
-              echo "The dev tier has no Supabase project of its own, and deploying would"
-              echo "point it at production data. Set \`SUPABASE_URL_DEV\`,"
-              echo "\`SUPABASE_ANON_KEY_DEV\` and \`SUPABASE_SERVICE_KEY_DEV\` to turn it on."
+              echo "\`${{ inputs.service_name }}\` was deployed to dev against the **production**"
+              echo "Supabase project, because no \`SUPABASE_URL_DEV\` secret exists."
+              echo "Test data written on dev is production data."
             } >> "$GITHUB_STEP_SUMMARY"
-            exit 0
           fi
 
           # ── Directory isolation ──────────────────────────────────────────
