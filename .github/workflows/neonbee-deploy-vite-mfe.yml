@@ -306,17 +306,24 @@ jobs:
           STALE_PKG="$RUNNER_PARENT/so360-shell-fe"
           if [ "${{ inputs.needs_shell_packages }}" = "true" ] && [ "${{ inputs.is_shell }}" != "true" ]; then
             rm -rf _shell-fe
-            git clone --depth 1 --filter=blob:none --sparse --branch develop \
-              "https://x-access-token:${{ secrets.PAT_TOKEN }}@github.com/Neonbee-ai/so360-shell-fe.git" \
-              _shell-fe \
-            || git clone --depth 1 --filter=blob:none --sparse \
-              "https://x-access-token:${{ secrets.PAT_TOKEN }}@github.com/Neonbee-ai/so360-shell-fe.git" \
-              _shell-fe
-            (cd _shell-fe && git sparse-checkout set packages)
-            case "$GITHUB_WORKSPACE/" in
-              "$STALE_PKG"/*) echo "Not relinking: $STALE_PKG contains the live checkout" ;;
-              *) rm -rf "$STALE_PKG"; ln -s "$GITHUB_WORKSPACE/_shell-fe" "$STALE_PKG" ;;
-            esac
+            # PAT_TOKEN is an org secret and org secrets do not reach every
+            # private repo on this plan: 16 callers have none, so this clone
+            # exited 128 ("Authentication failed") and took the deploy with it.
+            if git clone --depth 1 --filter=blob:none --sparse --branch develop \
+                 "https://x-access-token:${{ secrets.PAT_TOKEN }}@github.com/Neonbee-ai/so360-shell-fe.git" \
+                 _shell-fe 2>/dev/null \
+               || git clone --depth 1 --filter=blob:none --sparse \
+                 "https://x-access-token:${{ secrets.PAT_TOKEN }}@github.com/Neonbee-ai/so360-shell-fe.git" \
+                 _shell-fe 2>/dev/null; then
+              (cd _shell-fe && git sparse-checkout set packages)
+              case "$GITHUB_WORKSPACE/" in
+                "$STALE_PKG"/*) echo "Not relinking: $STALE_PKG contains the live checkout" ;;
+                *) rm -rf "$STALE_PKG"; ln -s "$GITHUB_WORKSPACE/_shell-fe" "$STALE_PKG" ;;
+              esac
+            else
+              rm -rf _shell-fe
+              echo "::warning title=No PAT_TOKEN::could not clone so360-shell-fe — using .ci-stubs for @so360/*. Add a repo-level PAT_TOKEN to build against the real packages."
+            fi
             (cd "$GITHUB_WORKSPACE/_shell-fe" && npm install --legacy-peer-deps --include=dev) \
               || echo "::warning::npm install failed in _shell-fe — package rebuild may fall back to committed dist"
             # The packages' dist/ is committed and drifts from src — e.g.
@@ -371,7 +378,7 @@ jobs:
             return 1
           }
           npm_ci_retry
-          if [ "${{ inputs.needs_shell_packages }}" = "true" ] && [ "${{ inputs.is_shell }}" != "true" ]; then
+          if [ "${{ inputs.needs_shell_packages }}" = "true" ] && [ -d "$GITHUB_WORKSPACE/_shell-fe" ] && [ "${{ inputs.is_shell }}" != "true" ]; then
             # Two resolution styles exist across the MFEs: tsconfig paths that
             # point at ../../so360-shell-fe/packages/* (served by the symlink),
             # and plain node resolution from node_modules/@so360 (help-fe,
@@ -431,17 +438,24 @@ jobs:
           STALE_PKG="$RUNNER_PARENT/so360-shell-fe"
           if [ "${{ inputs.needs_shell_packages }}" = "true" ] && [ "${{ inputs.is_shell }}" != "true" ]; then
             rm -rf _shell-fe
-            git clone --depth 1 --filter=blob:none --sparse --branch develop \
-              "https://x-access-token:${{ secrets.PAT_TOKEN }}@github.com/Neonbee-ai/so360-shell-fe.git" \
-              _shell-fe \
-            || git clone --depth 1 --filter=blob:none --sparse \
-              "https://x-access-token:${{ secrets.PAT_TOKEN }}@github.com/Neonbee-ai/so360-shell-fe.git" \
-              _shell-fe
-            (cd _shell-fe && git sparse-checkout set packages)
-            case "$GITHUB_WORKSPACE/" in
-              "$STALE_PKG"/*) echo "Not relinking: $STALE_PKG contains the live checkout" ;;
-              *) rm -rf "$STALE_PKG"; ln -s "$GITHUB_WORKSPACE/_shell-fe" "$STALE_PKG" ;;
-            esac
+            # PAT_TOKEN is an org secret and org secrets do not reach every
+            # private repo on this plan: 16 callers have none, so this clone
+            # exited 128 ("Authentication failed") and took the deploy with it.
+            if git clone --depth 1 --filter=blob:none --sparse --branch develop \
+                 "https://x-access-token:${{ secrets.PAT_TOKEN }}@github.com/Neonbee-ai/so360-shell-fe.git" \
+                 _shell-fe 2>/dev/null \
+               || git clone --depth 1 --filter=blob:none --sparse \
+                 "https://x-access-token:${{ secrets.PAT_TOKEN }}@github.com/Neonbee-ai/so360-shell-fe.git" \
+                 _shell-fe 2>/dev/null; then
+              (cd _shell-fe && git sparse-checkout set packages)
+              case "$GITHUB_WORKSPACE/" in
+                "$STALE_PKG"/*) echo "Not relinking: $STALE_PKG contains the live checkout" ;;
+                *) rm -rf "$STALE_PKG"; ln -s "$GITHUB_WORKSPACE/_shell-fe" "$STALE_PKG" ;;
+              esac
+            else
+              rm -rf _shell-fe
+              echo "::warning title=No PAT_TOKEN::could not clone so360-shell-fe — using .ci-stubs for @so360/*. Add a repo-level PAT_TOKEN to build against the real packages."
+            fi
             (cd "$GITHUB_WORKSPACE/_shell-fe" && npm install --legacy-peer-deps --include=dev) \
               || echo "::warning::npm install failed in _shell-fe — package rebuild may fall back to committed dist"
             # The packages' dist/ is committed and drifts from src — e.g.
@@ -496,7 +510,7 @@ jobs:
             return 1
           }
           npm_ci_retry
-          if [ "${{ inputs.needs_shell_packages }}" = "true" ] && [ "${{ inputs.is_shell }}" != "true" ]; then
+          if [ "${{ inputs.needs_shell_packages }}" = "true" ] && [ -d "$GITHUB_WORKSPACE/_shell-fe" ] && [ "${{ inputs.is_shell }}" != "true" ]; then
             # Two resolution styles exist across the MFEs: tsconfig paths that
             # point at ../../so360-shell-fe/packages/* (served by the symlink),
             # and plain node resolution from node_modules/@so360 (help-fe,
