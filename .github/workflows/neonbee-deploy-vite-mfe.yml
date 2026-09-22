@@ -611,9 +611,13 @@ jobs:
 
           # Verify remoteEntry.js (MFE guard) + nginx reload on VM
           IS_MFE="${{ inputs.is_mfe }}"
+          IS_SHELL="${{ inputs.is_shell }}"
           ssh root@$SERVER_IP "bash -s" << VERIFY
             set -e
-            if [ "$IS_MFE" = "true" ] && [ ! -f "$NGINX_ROOT/assets/remoteEntry.js" ]; then
+            # The host shell CONSUMES remotes and exposes none, so it never
+            # emits assets/remoteEntry.js — guarding it there rolls a perfectly
+            # good deploy back and fails the job.
+            if [ "$IS_MFE" = "true" ] && [ "$IS_SHELL" != "true" ] && [ ! -f "$NGINX_ROOT/assets/remoteEntry.js" ]; then
               echo "remoteEntry.js missing — restoring backup"
               rsync -a --delete "${NGINX_ROOT}-prev/" "$NGINX_ROOT/"
               exit 1
@@ -653,9 +657,13 @@ jobs:
           rsync -avz --delete dist/ "root@$SERVER_IP:$NGINX_ROOT/"
 
           IS_MFE="${{ inputs.is_mfe }}"
+          IS_SHELL="${{ inputs.is_shell }}"
           ssh root@$SERVER_IP "bash -s" << VERIFY
             set -e
-            if [ "$IS_MFE" = "true" ] && [ ! -f "$NGINX_ROOT/assets/remoteEntry.js" ]; then
+            # The host shell CONSUMES remotes and exposes none, so it never
+            # emits assets/remoteEntry.js — guarding it there rolls a perfectly
+            # good deploy back and fails the job.
+            if [ "$IS_MFE" = "true" ] && [ "$IS_SHELL" != "true" ] && [ ! -f "$NGINX_ROOT/assets/remoteEntry.js" ]; then
               echo "remoteEntry.js missing — restoring backup"
               rsync -a --delete "${NGINX_ROOT}-prev/" "$NGINX_ROOT/"
               exit 1
