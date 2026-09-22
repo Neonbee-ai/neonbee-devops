@@ -372,7 +372,20 @@ jobs:
           }
           npm_ci_retry
           if [ "${{ inputs.needs_shell_packages }}" = "true" ] && [ "${{ inputs.is_shell }}" != "true" ]; then
-            echo "Building against the real @so360 packages in _shell-fe (no stubs)"
+            # Two resolution styles exist across the MFEs: tsconfig paths that
+            # point at ../../so360-shell-fe/packages/* (served by the symlink),
+            # and plain node resolution from node_modules/@so360 (help-fe,
+            # which uses file: deps). Put the REAL packages in node_modules so
+            # both work — the old .ci-stubs are what broke the second group
+            # with TS2307.
+            mkdir -p node_modules/@so360
+            for p in shell-context design-system event-bus formatters cross-link theme; do
+              if [ -d "$GITHUB_WORKSPACE/_shell-fe/packages/$p" ]; then
+                rm -rf "node_modules/@so360/$p"
+                cp -r "$GITHUB_WORKSPACE/_shell-fe/packages/$p" "node_modules/@so360/$p"
+              fi
+            done
+            echo "Using the real @so360 packages from _shell-fe (no stubs)"
           elif [ "${{ inputs.is_shell }}" = "true" ]; then
             # The shell OWNS @so360/*: packages/ is its own workspace. Stubbing
             # them makes tsc fail with TS2307 "Cannot find module
@@ -484,7 +497,20 @@ jobs:
           }
           npm_ci_retry
           if [ "${{ inputs.needs_shell_packages }}" = "true" ] && [ "${{ inputs.is_shell }}" != "true" ]; then
-            echo "Building against the real @so360 packages in _shell-fe (no stubs)"
+            # Two resolution styles exist across the MFEs: tsconfig paths that
+            # point at ../../so360-shell-fe/packages/* (served by the symlink),
+            # and plain node resolution from node_modules/@so360 (help-fe,
+            # which uses file: deps). Put the REAL packages in node_modules so
+            # both work — the old .ci-stubs are what broke the second group
+            # with TS2307.
+            mkdir -p node_modules/@so360
+            for p in shell-context design-system event-bus formatters cross-link theme; do
+              if [ -d "$GITHUB_WORKSPACE/_shell-fe/packages/$p" ]; then
+                rm -rf "node_modules/@so360/$p"
+                cp -r "$GITHUB_WORKSPACE/_shell-fe/packages/$p" "node_modules/@so360/$p"
+              fi
+            done
+            echo "Using the real @so360 packages from _shell-fe (no stubs)"
           elif [ "${{ inputs.is_shell }}" = "true" ]; then
             # The shell OWNS @so360/*: packages/ is its own workspace. Stubbing
             # them makes tsc fail with TS2307 "Cannot find module
