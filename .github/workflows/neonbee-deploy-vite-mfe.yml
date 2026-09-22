@@ -327,12 +327,14 @@ jobs:
             # if a package has no build script.
             for p in shell-context design-system event-bus formatters; do
               if [ -d "$GITHUB_WORKSPACE/_shell-fe/packages/$p" ]; then
-                # PATH: the packages have no node_modules of their own, and
-                # 'npm run build' in a sparse clone did not pick up the root
-                # bin dir — every rebuild died with "sh: 1: tsc: not found" and
-                # silently fell back to the stale committed dist.
+                # shell-fe is NOT an npm workspace root, so installing at the
+                # clone root leaves packages/<p>/node_modules empty and the
+                # build dies with "sh: 1: tsc: not found" — silently falling
+                # back to the stale committed dist. Each package declares its
+                # own typescript, so install inside it first.
                 ( cd "$GITHUB_WORKSPACE/_shell-fe/packages/$p" \
-                  && PATH="$GITHUB_WORKSPACE/_shell-fe/node_modules/.bin:$PATH" npm run build ) \
+                  && npm install --legacy-peer-deps --include=dev --no-audit --no-fund >/dev/null 2>&1 \
+                  && npm run build ) \
                   || echo "::warning::could not rebuild @so360/$p — using its committed dist"
               fi
             done
@@ -432,12 +434,14 @@ jobs:
             # if a package has no build script.
             for p in shell-context design-system event-bus formatters; do
               if [ -d "$GITHUB_WORKSPACE/_shell-fe/packages/$p" ]; then
-                # PATH: the packages have no node_modules of their own, and
-                # 'npm run build' in a sparse clone did not pick up the root
-                # bin dir — every rebuild died with "sh: 1: tsc: not found" and
-                # silently fell back to the stale committed dist.
+                # shell-fe is NOT an npm workspace root, so installing at the
+                # clone root leaves packages/<p>/node_modules empty and the
+                # build dies with "sh: 1: tsc: not found" — silently falling
+                # back to the stale committed dist. Each package declares its
+                # own typescript, so install inside it first.
                 ( cd "$GITHUB_WORKSPACE/_shell-fe/packages/$p" \
-                  && PATH="$GITHUB_WORKSPACE/_shell-fe/node_modules/.bin:$PATH" npm run build ) \
+                  && npm install --legacy-peer-deps --include=dev --no-audit --no-fund >/dev/null 2>&1 \
+                  && npm run build ) \
                   || echo "::warning::could not rebuild @so360/$p — using its committed dist"
               fi
             done
