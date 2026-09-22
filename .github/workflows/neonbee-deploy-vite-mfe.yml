@@ -304,6 +304,13 @@ jobs:
           # exactly as neonbee-deploy-prod.yml does.
           RUNNER_PARENT="$(dirname "$(dirname "$GITHUB_WORKSPACE")")"
           STALE_PKG="$RUNNER_PARENT/so360-shell-fe"
+          # A symlink left here by an earlier MFE job is a hazard, not a cache:
+          # the runner checks so360-shell-fe out at this exact path, so a stale
+          # link makes actions/checkout write shell-fe THROUGH it into the other
+          # repo's clone — shell-fe then built from
+          # _work/so360-sign-fe/so360-sign-fe/_shell-fe/so360-shell-fe and died
+          # on "useShell is not exported". Never inherit one.
+          [ -L "$STALE_PKG" ] && rm -f "$STALE_PKG"
           if [ "${{ inputs.needs_shell_packages }}" = "true" ] && [ "${{ inputs.is_shell }}" != "true" ]; then
             rm -rf _shell-fe
             # PAT_TOKEN is an org secret and org secrets do not reach every
@@ -318,7 +325,10 @@ jobs:
               (cd _shell-fe && git sparse-checkout set packages)
               case "$GITHUB_WORKSPACE/" in
                 "$STALE_PKG"/*) echo "Not relinking: $STALE_PKG contains the live checkout" ;;
-                *) rm -rf "$STALE_PKG"; ln -s "$GITHUB_WORKSPACE/_shell-fe" "$STALE_PKG" ;;
+                *) rm -rf "$STALE_PKG"
+                   ln -s "$GITHUB_WORKSPACE/_shell-fe" "$STALE_PKG"
+                   # and take it away again however this step ends
+                   trap 'rm -f "'"$STALE_PKG"'"' EXIT ;;
               esac
             else
               rm -rf _shell-fe
@@ -436,6 +446,13 @@ jobs:
           # exactly as neonbee-deploy-prod.yml does.
           RUNNER_PARENT="$(dirname "$(dirname "$GITHUB_WORKSPACE")")"
           STALE_PKG="$RUNNER_PARENT/so360-shell-fe"
+          # A symlink left here by an earlier MFE job is a hazard, not a cache:
+          # the runner checks so360-shell-fe out at this exact path, so a stale
+          # link makes actions/checkout write shell-fe THROUGH it into the other
+          # repo's clone — shell-fe then built from
+          # _work/so360-sign-fe/so360-sign-fe/_shell-fe/so360-shell-fe and died
+          # on "useShell is not exported". Never inherit one.
+          [ -L "$STALE_PKG" ] && rm -f "$STALE_PKG"
           if [ "${{ inputs.needs_shell_packages }}" = "true" ] && [ "${{ inputs.is_shell }}" != "true" ]; then
             rm -rf _shell-fe
             # PAT_TOKEN is an org secret and org secrets do not reach every
@@ -450,7 +467,10 @@ jobs:
               (cd _shell-fe && git sparse-checkout set packages)
               case "$GITHUB_WORKSPACE/" in
                 "$STALE_PKG"/*) echo "Not relinking: $STALE_PKG contains the live checkout" ;;
-                *) rm -rf "$STALE_PKG"; ln -s "$GITHUB_WORKSPACE/_shell-fe" "$STALE_PKG" ;;
+                *) rm -rf "$STALE_PKG"
+                   ln -s "$GITHUB_WORKSPACE/_shell-fe" "$STALE_PKG"
+                   # and take it away again however this step ends
+                   trap 'rm -f "'"$STALE_PKG"'"' EXIT ;;
               esac
             else
               rm -rf _shell-fe
