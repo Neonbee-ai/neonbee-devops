@@ -349,10 +349,12 @@ jobs:
                 # build dies with "sh: 1: tsc: not found" — silently falling
                 # back to the stale committed dist. Each package declares its
                 # own typescript, so install inside it first.
-                ( cd "$GITHUB_WORKSPACE/_shell-fe/packages/$p" \
-                  && npm install --legacy-peer-deps --include=dev --no-audit --no-fund >/dev/null 2>&1 \
-                  && npm run build ) \
-                  || echo "::warning::could not rebuild @so360/$p — using its committed dist"
+                if ! ( cd "$GITHUB_WORKSPACE/_shell-fe/packages/$p" \
+                       && npm install --legacy-peer-deps --include=dev --no-audit --no-fund >/dev/null 2>&1 \
+                       && npm run build ); then
+                  echo "::warning::could not rebuild @so360/$p — restoring its committed dist"
+                  ( cd "$GITHUB_WORKSPACE/_shell-fe" && git checkout -- "packages/$p/dist" ) 2>/dev/null || true
+                fi
               fi
             done
           else
@@ -413,8 +415,14 @@ jobs:
               # shell-context sets module=CommonJS but usePeople.ts uses
               # import.meta → TS1343) must not take the whole deploy down: the
               # committed dist is what prod ships too.
-              (cd "packages/$p" && npm run build) \
-                || echo "::warning::could not build @so360/$p — using its committed dist"
+              # tsc emits before it reports errors, so a failed build leaves a
+              # HALF-WRITTEN dist — shell-fe then died with '"useShell" is not
+              # exported by packages/shell-context/dist/index.js' even though
+              # the committed file exports it. Roll the dist back on failure.
+              if ! (cd "packages/$p" && npm run build); then
+                echo "::warning::could not build @so360/$p — restoring its committed dist"
+                git checkout -- "packages/$p/dist" 2>/dev/null || true
+              fi
             done
           else
             mkdir -p node_modules/@so360
@@ -491,10 +499,12 @@ jobs:
                 # build dies with "sh: 1: tsc: not found" — silently falling
                 # back to the stale committed dist. Each package declares its
                 # own typescript, so install inside it first.
-                ( cd "$GITHUB_WORKSPACE/_shell-fe/packages/$p" \
-                  && npm install --legacy-peer-deps --include=dev --no-audit --no-fund >/dev/null 2>&1 \
-                  && npm run build ) \
-                  || echo "::warning::could not rebuild @so360/$p — using its committed dist"
+                if ! ( cd "$GITHUB_WORKSPACE/_shell-fe/packages/$p" \
+                       && npm install --legacy-peer-deps --include=dev --no-audit --no-fund >/dev/null 2>&1 \
+                       && npm run build ); then
+                  echo "::warning::could not rebuild @so360/$p — restoring its committed dist"
+                  ( cd "$GITHUB_WORKSPACE/_shell-fe" && git checkout -- "packages/$p/dist" ) 2>/dev/null || true
+                fi
               fi
             done
           else
