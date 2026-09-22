@@ -59,6 +59,11 @@ on:
         required: false
         type: boolean
         default: false
+      needs_shell_packages:
+        description: 'Remote that imports @so360/*: clone shell-fe and build the real packages (mirrors prod)'
+        required: false
+        type: boolean
+        default: false
       node_version:
         required: false
         type: string
@@ -291,18 +296,36 @@ jobs:
             echo "::warning title=Dev is on the PRODUCTION database::${{ inputs.service_name }} (dev) is built against production Supabase — anything done on dev is real data."
           fi
 
-          # Remove stale so360-shell-fe symlink from previous prod deploys so
-          # vite.config.ts aliases fall back to node_modules/@so360/ stubs.
-          # Guard: never remove a path that CONTAINS the live checkout. The
-          # runner layout is _work/<repo>/<repo>, so for the shell-fe repo the
-          # candidate path (_work/so360-shell-fe) is the PARENT of $GITHUB_WORKSPACE
-          # — removing it deletes the cwd (uv_cwd ENOENT on the next npm command).
+          # ── Where @so360/* comes from ────────────────────────────────────
+          # .ci-stubs are frozen in ~May and no longer match the packages: they
+          # lack CrossLinkChip, FeatureRoute, useCurrentEntity, DocumentData and
+          # @so360/cross-link entirely, so a stubbed build dies with TS2305 /
+          # TS2307 / TS2614. Remotes build against the real packages instead,
+          # exactly as neonbee-deploy-prod.yml does.
           RUNNER_PARENT="$(dirname "$(dirname "$GITHUB_WORKSPACE")")"
           STALE_PKG="$RUNNER_PARENT/so360-shell-fe"
-          case "$GITHUB_WORKSPACE/" in
-            "$STALE_PKG"/*) echo "Skipping stale-pkg removal: $STALE_PKG contains the live checkout" ;;
-            *) rm -rf "$STALE_PKG" 2>/dev/null || true ;;
-          esac
+          if [ "${{ inputs.needs_shell_packages }}" = "true" ] && [ "${{ inputs.is_shell }}" != "true" ]; then
+            rm -rf _shell-fe
+            git clone --depth 1 --filter=blob:none --sparse --branch develop \
+              "https://x-access-token:${{ secrets.PAT_TOKEN }}@github.com/Neonbee-ai/so360-shell-fe.git" \
+              _shell-fe \
+            || git clone --depth 1 --filter=blob:none --sparse \
+              "https://x-access-token:${{ secrets.PAT_TOKEN }}@github.com/Neonbee-ai/so360-shell-fe.git" \
+              _shell-fe
+            (cd _shell-fe && git sparse-checkout set packages)
+            case "$GITHUB_WORKSPACE/" in
+              "$STALE_PKG"/*) echo "Not relinking: $STALE_PKG contains the live checkout" ;;
+              *) rm -rf "$STALE_PKG"; ln -s "$GITHUB_WORKSPACE/_shell-fe" "$STALE_PKG" ;;
+            esac
+            (cd "$GITHUB_WORKSPACE/_shell-fe" && npm install --legacy-peer-deps 2>/dev/null || true)
+          else
+            # Guard: never remove a path that CONTAINS the live checkout — for
+            # the shell-fe repo that path is the PARENT of $GITHUB_WORKSPACE.
+            case "$GITHUB_WORKSPACE/" in
+              "$STALE_PKG"/*) echo "Skipping stale-pkg removal: $STALE_PKG contains the live checkout" ;;
+              *) rm -rf "$STALE_PKG" 2>/dev/null || true ;;
+            esac
+          fi
           # --include=dev: Docker-fleet runners may set NODE_ENV=production, which
           # makes `npm ci` omit devDeps and breaks the vite build (vite: not found).
           npm_ci_retry() {
@@ -328,7 +351,9 @@ jobs:
             return 1
           }
           npm_ci_retry
-          if [ "${{ inputs.is_shell }}" = "true" ]; then
+          if [ "${{ inputs.needs_shell_packages }}" = "true" ] && [ "${{ inputs.is_shell }}" != "true" ]; then
+            echo "Building against the real @so360 packages in _shell-fe (no stubs)"
+          elif [ "${{ inputs.is_shell }}" = "true" ]; then
             # The shell OWNS @so360/*: packages/ is its own workspace. Stubbing
             # them makes tsc fail with TS2307 "Cannot find module
             # '@so360/design-system'" — the dev build has done exactly that
@@ -358,13 +383,36 @@ jobs:
       - name: Install + build (staging)
         if: github.ref == 'refs/heads/qa'
         run: |
-          # Guard: never remove a path that contains the live checkout (see dev step).
+          # ── Where @so360/* comes from ────────────────────────────────────
+          # .ci-stubs are frozen in ~May and no longer match the packages: they
+          # lack CrossLinkChip, FeatureRoute, useCurrentEntity, DocumentData and
+          # @so360/cross-link entirely, so a stubbed build dies with TS2305 /
+          # TS2307 / TS2614. Remotes build against the real packages instead,
+          # exactly as neonbee-deploy-prod.yml does.
           RUNNER_PARENT="$(dirname "$(dirname "$GITHUB_WORKSPACE")")"
           STALE_PKG="$RUNNER_PARENT/so360-shell-fe"
-          case "$GITHUB_WORKSPACE/" in
-            "$STALE_PKG"/*) echo "Skipping stale-pkg removal: $STALE_PKG contains the live checkout" ;;
-            *) rm -rf "$STALE_PKG" 2>/dev/null || true ;;
-          esac
+          if [ "${{ inputs.needs_shell_packages }}" = "true" ] && [ "${{ inputs.is_shell }}" != "true" ]; then
+            rm -rf _shell-fe
+            git clone --depth 1 --filter=blob:none --sparse --branch develop \
+              "https://x-access-token:${{ secrets.PAT_TOKEN }}@github.com/Neonbee-ai/so360-shell-fe.git" \
+              _shell-fe \
+            || git clone --depth 1 --filter=blob:none --sparse \
+              "https://x-access-token:${{ secrets.PAT_TOKEN }}@github.com/Neonbee-ai/so360-shell-fe.git" \
+              _shell-fe
+            (cd _shell-fe && git sparse-checkout set packages)
+            case "$GITHUB_WORKSPACE/" in
+              "$STALE_PKG"/*) echo "Not relinking: $STALE_PKG contains the live checkout" ;;
+              *) rm -rf "$STALE_PKG"; ln -s "$GITHUB_WORKSPACE/_shell-fe" "$STALE_PKG" ;;
+            esac
+            (cd "$GITHUB_WORKSPACE/_shell-fe" && npm install --legacy-peer-deps 2>/dev/null || true)
+          else
+            # Guard: never remove a path that CONTAINS the live checkout — for
+            # the shell-fe repo that path is the PARENT of $GITHUB_WORKSPACE.
+            case "$GITHUB_WORKSPACE/" in
+              "$STALE_PKG"/*) echo "Skipping stale-pkg removal: $STALE_PKG contains the live checkout" ;;
+              *) rm -rf "$STALE_PKG" 2>/dev/null || true ;;
+            esac
+          fi
           # --include=dev: Docker-fleet runners may set NODE_ENV=production, which
           # makes `npm ci` omit devDeps and breaks the vite build (vite: not found).
           npm_ci_retry() {
@@ -390,7 +438,9 @@ jobs:
             return 1
           }
           npm_ci_retry
-          if [ "${{ inputs.is_shell }}" = "true" ]; then
+          if [ "${{ inputs.needs_shell_packages }}" = "true" ] && [ "${{ inputs.is_shell }}" != "true" ]; then
+            echo "Building against the real @so360 packages in _shell-fe (no stubs)"
+          elif [ "${{ inputs.is_shell }}" = "true" ]; then
             # The shell OWNS @so360/*: packages/ is its own workspace. Stubbing
             # them makes tsc fail with TS2307 "Cannot find module
             # '@so360/design-system'" — the dev build has done exactly that
