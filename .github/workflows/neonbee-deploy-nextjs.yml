@@ -258,6 +258,17 @@ jobs:
         run: |
           EXTRA_ENV='${{ inputs.extra_env }}'
           [ -n "$EXTRA_ENV" ] && echo "$EXTRA_ENV" > .env.local
+          # NEXT_PUBLIC_* are inlined at BUILD time, so writing them into the
+          # runtime .env on the VM is too late: partner-portal booted and then
+          # threw "Your project's URL and Key are required to create a Supabase
+          # client!" out of its middleware on every request. Bake them in here.
+          # Dev has no Supabase project of its own, so it uses production's
+          # (user decision, 2026-09-21) until SUPABASE_*_DEV exists.
+          {
+            echo "NEXT_PUBLIC_SUPABASE_URL=${{ secrets.SUPABASE_URL_DEV || secrets.SUPABASE_URL }}"
+            echo "NEXT_PUBLIC_SUPABASE_ANON_KEY=${{ secrets.SUPABASE_ANON_KEY_DEV || secrets.SUPABASE_ANON_KEY }}"
+          } >> .env.local
+          sed -i '/=$/d' .env.local 2>/dev/null || true
           # --include=dev: Docker-fleet runners may set NODE_ENV=production, which
           # makes `npm ci` omit devDeps and breaks the next build (next: not found).
           npm_ci_retry() {
