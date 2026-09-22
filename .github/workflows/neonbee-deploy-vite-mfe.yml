@@ -317,7 +317,8 @@ jobs:
               "$STALE_PKG"/*) echo "Not relinking: $STALE_PKG contains the live checkout" ;;
               *) rm -rf "$STALE_PKG"; ln -s "$GITHUB_WORKSPACE/_shell-fe" "$STALE_PKG" ;;
             esac
-            (cd "$GITHUB_WORKSPACE/_shell-fe" && npm install --legacy-peer-deps 2>/dev/null || true)
+            (cd "$GITHUB_WORKSPACE/_shell-fe" && npm install --legacy-peer-deps --include=dev) \
+              || echo "::warning::npm install failed in _shell-fe — package rebuild may fall back to committed dist"
             # The packages' dist/ is committed and drifts from src — e.g.
             # shell-context's useDepartmentScope.js imports
             # getAccessTokenFromStorage from a dist/utils/authToken.js that does
@@ -326,7 +327,12 @@ jobs:
             # if a package has no build script.
             for p in shell-context design-system event-bus formatters; do
               if [ -d "$GITHUB_WORKSPACE/_shell-fe/packages/$p" ]; then
-                (cd "$GITHUB_WORKSPACE/_shell-fe/packages/$p" && npm run build) \
+                # PATH: the packages have no node_modules of their own, and
+                # 'npm run build' in a sparse clone did not pick up the root
+                # bin dir — every rebuild died with "sh: 1: tsc: not found" and
+                # silently fell back to the stale committed dist.
+                ( cd "$GITHUB_WORKSPACE/_shell-fe/packages/$p" \
+                  && PATH="$GITHUB_WORKSPACE/_shell-fe/node_modules/.bin:$PATH" npm run build ) \
                   || echo "::warning::could not rebuild @so360/$p — using its committed dist"
               fi
             done
@@ -416,7 +422,8 @@ jobs:
               "$STALE_PKG"/*) echo "Not relinking: $STALE_PKG contains the live checkout" ;;
               *) rm -rf "$STALE_PKG"; ln -s "$GITHUB_WORKSPACE/_shell-fe" "$STALE_PKG" ;;
             esac
-            (cd "$GITHUB_WORKSPACE/_shell-fe" && npm install --legacy-peer-deps 2>/dev/null || true)
+            (cd "$GITHUB_WORKSPACE/_shell-fe" && npm install --legacy-peer-deps --include=dev) \
+              || echo "::warning::npm install failed in _shell-fe — package rebuild may fall back to committed dist"
             # The packages' dist/ is committed and drifts from src — e.g.
             # shell-context's useDepartmentScope.js imports
             # getAccessTokenFromStorage from a dist/utils/authToken.js that does
@@ -425,7 +432,12 @@ jobs:
             # if a package has no build script.
             for p in shell-context design-system event-bus formatters; do
               if [ -d "$GITHUB_WORKSPACE/_shell-fe/packages/$p" ]; then
-                (cd "$GITHUB_WORKSPACE/_shell-fe/packages/$p" && npm run build) \
+                # PATH: the packages have no node_modules of their own, and
+                # 'npm run build' in a sparse clone did not pick up the root
+                # bin dir — every rebuild died with "sh: 1: tsc: not found" and
+                # silently fell back to the stale committed dist.
+                ( cd "$GITHUB_WORKSPACE/_shell-fe/packages/$p" \
+                  && PATH="$GITHUB_WORKSPACE/_shell-fe/node_modules/.bin:$PATH" npm run build ) \
                   || echo "::warning::could not rebuild @so360/$p — using its committed dist"
               fi
             done
