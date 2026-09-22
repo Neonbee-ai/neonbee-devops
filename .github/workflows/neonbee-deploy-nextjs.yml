@@ -102,7 +102,7 @@ jobs:
             local attempt rc
             for attempt in 1 2 3; do
               rm -rf node_modules
-              npm ci --legacy-peer-deps && return 0
+              npm ci --legacy-peer-deps --include=dev && return 0
               rc=$?
               if [ $attempt -lt 3 ]; then
                 echo "::warning::npm ci failed (exit $rc) on attempt $attempt — retrying after cache clean"
@@ -139,7 +139,7 @@ jobs:
             local attempt rc
             for attempt in 1 2 3; do
               rm -rf node_modules
-              npm ci --legacy-peer-deps && return 0
+              npm ci --legacy-peer-deps --include=dev && return 0
               rc=$?
               if [ $attempt -lt 3 ]; then
                 echo "::warning::npm ci failed (exit $rc) on attempt $attempt — retrying after cache clean"
