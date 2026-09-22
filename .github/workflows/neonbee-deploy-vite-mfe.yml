@@ -318,6 +318,18 @@ jobs:
               *) rm -rf "$STALE_PKG"; ln -s "$GITHUB_WORKSPACE/_shell-fe" "$STALE_PKG" ;;
             esac
             (cd "$GITHUB_WORKSPACE/_shell-fe" && npm install --legacy-peer-deps 2>/dev/null || true)
+            # The packages' dist/ is committed and drifts from src — e.g.
+            # shell-context's useDepartmentScope.js imports
+            # getAccessTokenFromStorage from a dist/utils/authToken.js that does
+            # not export it, and rollup fails the whole MFE build. Rebuild from
+            # source so dist always matches; fall back to the committed output
+            # if a package has no build script.
+            for p in shell-context design-system event-bus formatters; do
+              if [ -d "$GITHUB_WORKSPACE/_shell-fe/packages/$p" ]; then
+                (cd "$GITHUB_WORKSPACE/_shell-fe/packages/$p" && npm run build) \
+                  || echo "::warning::could not rebuild @so360/$p — using its committed dist"
+              fi
+            done
           else
             # Guard: never remove a path that CONTAINS the live checkout — for
             # the shell-fe repo that path is the PARENT of $GITHUB_WORKSPACE.
@@ -405,6 +417,18 @@ jobs:
               *) rm -rf "$STALE_PKG"; ln -s "$GITHUB_WORKSPACE/_shell-fe" "$STALE_PKG" ;;
             esac
             (cd "$GITHUB_WORKSPACE/_shell-fe" && npm install --legacy-peer-deps 2>/dev/null || true)
+            # The packages' dist/ is committed and drifts from src — e.g.
+            # shell-context's useDepartmentScope.js imports
+            # getAccessTokenFromStorage from a dist/utils/authToken.js that does
+            # not export it, and rollup fails the whole MFE build. Rebuild from
+            # source so dist always matches; fall back to the committed output
+            # if a package has no build script.
+            for p in shell-context design-system event-bus formatters; do
+              if [ -d "$GITHUB_WORKSPACE/_shell-fe/packages/$p" ]; then
+                (cd "$GITHUB_WORKSPACE/_shell-fe/packages/$p" && npm run build) \
+                  || echo "::warning::could not rebuild @so360/$p — using its committed dist"
+              fi
+            done
           else
             # Guard: never remove a path that CONTAINS the live checkout — for
             # the shell-fe repo that path is the PARENT of $GITHUB_WORKSPACE.
