@@ -783,7 +783,9 @@ jobs:
       && needs.gate.result == 'success'
       && needs.contract-tests.result != 'failure'
       && needs.integration-tests.result != 'failure'
-    runs-on: [self-hosted, contabo]
+    # Linux only: the Mac Mini gate runners also carry `contabo` (they run the
+    # gate), but this job builds + rsyncs to the VMs and assumes a Linux host.
+    runs-on: [self-hosted, contabo, Linux]
     timeout-minutes: 20
     concurrency:
       group: neonbee-prod-${{ inputs.service_name }}

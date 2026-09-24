@@ -225,7 +225,9 @@ jobs:
   # ── Build + Deploy (gate must pass) ───────────────────────────────────────
   build-deploy:
     needs: [gate]
-    runs-on: [self-hosted, contabo]
+    # Linux only: the Mac Mini gate runners also carry `contabo` (they run the
+    # gate), but this job builds + rsyncs to the VMs and assumes a Linux host.
+    runs-on: [self-hosted, contabo, Linux]
     concurrency:
       group: neonbee-deploy-${{ inputs.service_name }}-${{ github.ref_name }}
       cancel-in-progress: false
