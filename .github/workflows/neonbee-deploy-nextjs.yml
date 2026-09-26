@@ -395,6 +395,12 @@ jobs:
           rsync -avz --delete --exclude 'node_modules' --exclude '.git' .next/ "root@$SERVER_IP:$SERVICE_DIR/.next/"
           rsync -avz package.json package-lock.json "root@$SERVER_IP:$SERVICE_DIR/"
           rsync -avz public/ "root@$SERVER_IP:$SERVICE_DIR/public/" 2>/dev/null || true
+          # Standalone apps start with `cp .env.local .next/standalone/` and
+          # otherwise read the committed .env.production at runtime — which
+          # points server-side calls at Prod (storefront: 127.0.0.1:8020, the
+          # Prod/HA API). Ship the build's .env.local (extra_env + public keys)
+          # so runtime env matches the Dev build.
+          [ -f .env.local ] && rsync -avz .env.local "root@$SERVER_IP:$SERVICE_DIR/.env.local"
 
           ssh root@$SERVER_IP "SERVICE_DIR='$SERVICE_DIR' SERVICE_NAME='$SERVICE_NAME' PORT='$PORT' NEW_SLOT='$NEW_SLOT' bash -s" << 'DEPLOY_SCRIPT'
             set -e
