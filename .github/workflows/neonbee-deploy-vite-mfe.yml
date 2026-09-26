@@ -443,6 +443,12 @@ jobs:
           EXTRA_VITE='${{ inputs.vite_env_dev }}'
           [ -n "$EXTRA_VITE" ] && printf '%s\n' "$EXTRA_VITE" >> .env
           sed -i '/^$/d' .env
+          # A committed .env.production outranks .env in `vite build`, so its
+          # prod URLs (api/sso/dashboard.neonbee.app) silently beat the values
+          # above — dev logins landed on the live dashboard. Drop its prod-domain
+          # lines and copy ours to .env.production.local (highest precedence).
+          [ -f .env.production ] && sed -i '/neonbee\.app/d' .env.production
+          cp .env .env.production.local
           npm run build
 
       - name: Install + build (staging)
@@ -582,6 +588,12 @@ jobs:
           EXTRA_VITE='${{ inputs.vite_env_staging }}'
           [ -n "$EXTRA_VITE" ] && printf '%s\n' "$EXTRA_VITE" >> .env
           sed -i '/^$/d' .env
+          # A committed .env.production outranks .env in `vite build`, so its
+          # prod URLs (api/sso/dashboard.neonbee.app) silently beat the values
+          # above — dev logins landed on the live dashboard. Drop its prod-domain
+          # lines and copy ours to .env.production.local (highest precedence).
+          [ -f .env.production ] && sed -i '/neonbee\.app/d' .env.production
+          cp .env .env.production.local
           npm run build
 
       # ── Dev ──────────────────────────────────────────────────────────────
