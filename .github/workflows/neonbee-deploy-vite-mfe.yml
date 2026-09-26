@@ -35,7 +35,7 @@ on:
       vite_core_api_dev:
         required: false
         type: string
-        default: 'https://dev.api.skyoffice360.com/core'
+        default: 'https://dev-api.skyoffice360.com/core'
       vite_core_api_staging:
         required: false
         type: string
