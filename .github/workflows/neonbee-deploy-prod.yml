@@ -206,7 +206,7 @@ env:
 jobs:
 
   gate:
-    runs-on: [self-hosted, contabo]
+    runs-on: [self-hosted, contabo, Linux]
     timeout-minutes: 20
     steps:
       # ── Remove stale workspace symlink from cross-repo builds ───────────────
@@ -578,7 +578,7 @@ jobs:
     name: API Contract Tests
     if: inputs.deploy_type == 'backend'
     needs: [gate]
-    runs-on: [self-hosted, contabo]
+    runs-on: [self-hosted, contabo, Linux]
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4.3.1
@@ -673,7 +673,7 @@ jobs:
     name: Integration Tests
     if: inputs.deploy_type == 'backend'
     needs: [gate]
-    runs-on: [self-hosted, contabo]
+    runs-on: [self-hosted, contabo, Linux]
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4.3.1
@@ -1786,7 +1786,7 @@ jobs:
     name: Notify Teams
     needs: [gate, build-deploy]
     if: always()
-    runs-on: [self-hosted, contabo]
+    runs-on: [self-hosted, contabo, Linux]
     steps:
       - name: Post pipeline result to Teams
         env:

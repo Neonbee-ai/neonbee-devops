@@ -8,7 +8,7 @@ on:
 
 jobs:
   lint:
-    runs-on: [self-hosted, contabo]
+    runs-on: [self-hosted, contabo, Linux]
     steps:
       - uses: actions/checkout@v4
       - name: Validate workflow YAML syntax
@@ -30,7 +30,7 @@ jobs:
   # Running them here makes the contract enforceable rather than documentary.
   contract:
     name: Gate trust contract
-    runs-on: [self-hosted, contabo]
+    runs-on: [self-hosted, contabo, Linux]
     steps:
       - uses: actions/checkout@v4
       - name: Run contract tests
@@ -45,7 +45,7 @@ jobs:
     name: Notify Teams
     needs: [lint, contract]
     if: always()
-    runs-on: [self-hosted, contabo]
+    runs-on: [self-hosted, contabo, Linux]
     steps:
       - name: Post result to Teams
         env:

@@ -64,7 +64,7 @@ jobs:
 
   # ── Gate: single merged job ────────────────────────────────────────────────
   gate:
-    runs-on: [self-hosted, contabo]
+    runs-on: [self-hosted, contabo, Linux]
     steps:
       - uses: actions/checkout@v4.3.1
         with:
@@ -528,7 +528,7 @@ jobs:
     name: Notify Teams
     needs: [gate, build-deploy]
     if: always()
-    runs-on: [self-hosted, contabo]
+    runs-on: [self-hosted, contabo, Linux]
     steps:
       - name: Post pipeline result to Teams
         env:
