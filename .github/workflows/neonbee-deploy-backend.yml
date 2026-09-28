@@ -130,7 +130,7 @@ jobs:
 
   # ── Gate: single merged job ────────────────────────────────────────────────
   gate:
-    runs-on: [self-hosted, contabo]
+    runs-on: [self-hosted, contabo, Linux]
     steps:
       - uses: actions/checkout@v4.3.1
         with:
@@ -308,7 +308,7 @@ jobs:
   # ── Parallel (both need gate) ──────────────────────────────────────────────
   contract-tests:
     name: API Contract Tests
-    runs-on: [self-hosted, contabo]
+    runs-on: [self-hosted, contabo, Linux]
     needs: [gate]
     steps:
       - uses: actions/checkout@v4.3.1
@@ -414,7 +414,7 @@ jobs:
 
   integration-tests:
     name: Integration Tests
-    runs-on: [self-hosted, contabo]
+    runs-on: [self-hosted, contabo, Linux]
     needs: [gate]
     steps:
       - uses: actions/checkout@v4.3.1
@@ -968,7 +968,7 @@ jobs:
     name: Notify Teams
     needs: [gate, contract-tests, integration-tests, build-deploy]
     if: always()
-    runs-on: [self-hosted, contabo]
+    runs-on: [self-hosted, contabo, Linux]
     steps:
       - name: Post pipeline result to Teams
         env:

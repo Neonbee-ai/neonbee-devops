@@ -43,7 +43,7 @@ env:
 
 jobs:
   cf-lb-setup:
-    runs-on: [self-hosted, contabo]
+    runs-on: [self-hosted, contabo, Linux]
     timeout-minutes: 10
     steps:
       - name: Resolve CF credentials
@@ -265,7 +265,7 @@ jobs:
     name: Notify Teams
     needs: [cf-lb-setup]
     if: always()
-    runs-on: [self-hosted, contabo]
+    runs-on: [self-hosted, contabo, Linux]
     steps:
       - name: Post result to Teams
         env:
