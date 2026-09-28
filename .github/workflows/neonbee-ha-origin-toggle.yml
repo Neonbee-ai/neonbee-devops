@@ -23,7 +23,7 @@ env:
 
 jobs:
   toggle:
-    runs-on: [self-hosted, contabo]
+    runs-on: [self-hosted, contabo, Linux]
     timeout-minutes: 5
     steps:
       - name: Resolve CF token
@@ -83,7 +83,7 @@ jobs:
     name: Notify Teams
     needs: [toggle]
     if: always()
-    runs-on: [self-hosted, contabo]
+    runs-on: [self-hosted, contabo, Linux]
     steps:
       - name: Post result to Teams
         env:

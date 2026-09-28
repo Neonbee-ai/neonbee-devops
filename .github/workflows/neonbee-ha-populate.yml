@@ -22,7 +22,7 @@ env:
 
 jobs:
   populate:
-    runs-on: [self-hosted, contabo]
+    runs-on: [self-hosted, contabo, Linux]
     timeout-minutes: 30
     steps:
       - uses: webfactory/ssh-agent@v0.9.0
@@ -245,7 +245,7 @@ jobs:
     name: Notify Teams
     needs: [populate]
     if: always()
-    runs-on: [self-hosted, contabo]
+    runs-on: [self-hosted, contabo, Linux]
     steps:
       - name: Post result to Teams
         env:
