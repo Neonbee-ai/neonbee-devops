@@ -1,0 +1,152 @@
+# =============================================================================
+# Preview reconcile — nightly housekeeping for feature-branch previews
+# =============================================================================
+#   1. sync preview-ctl + nginx snippets from this repo to the preview host
+#   2. branch deleted in every component repo → remove preview
+#      no push for 3 days                      → remove preview
+#      no push for 24 hours                    → sleep (stop backends)
+#   3. delete Cloudflare DNS records / Access apps with no preview behind them
+#   4. prune shared deps nobody references
+#
+# Manual run can also wake one preview or remove one.
+# Nothing here deletes git branches.
+# =============================================================================
+
+name: Preview reconcile
+
+on:
+  schedule:
+    - cron: '30 21 * * *'   # 03:00 IST
+  workflow_dispatch:
+    inputs:
+      action:
+        type: choice
+        options: [reconcile, wake, remove]
+        default: reconcile
+      slug:
+        description: 'For wake / remove'
+        required: false
+        default: ''
+      dry_run:
+        description: 'Report only — change nothing'
+        type: boolean
+        default: false
+
+concurrency:
+  group: preview-reconcile
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  PREVIEW_DOMAIN: skyoffice360.com
+  CF_ACCOUNT_ID: 96ba885239b5d682270e57908693b93e
+  SLEEP_AFTER_H: '24'
+  REMOVE_AFTER_H: '72'
+
+jobs:
+  reconcile:
+    runs-on: [self-hosted, contabo, Linux]
+    timeout-minutes: 30
+    env:
+      HOST: ${{ secrets.PREVIEW_HOST }}
+      CFT: ${{ secrets.CF_PREVIEW_API_TOKEN }}
+      GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+      DRY: ${{ inputs.dry_run && 'true' || 'false' }}
+    steps:
+      - uses: actions/checkout@v4.3.1
+
+      - name: Preconditions
+        id: pre
+        run: |
+          if [ -z "$HOST" ]; then
+            echo "::notice::PREVIEW_HOST not set — previews not provisioned, nothing to do"
+            echo "go=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "go=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Setup SSH
+        if: steps.pre.outputs.go == 'true'
+        env:
+          KEY: ${{ secrets.PREVIEW_SSH_KEY }}
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          eval "$(ssh-agent -s)"
+          echo "$KEY" | ssh-add -
+          echo "SSH_AUTH_SOCK=$SSH_AUTH_SOCK" >> "$GITHUB_ENV"
+          echo "SSH_AGENT_PID=$SSH_AGENT_PID" >> "$GITHUB_ENV"
+          ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Sync preview-ctl + nginx snippets
+        if: steps.pre.outputs.go == 'true' && env.DRY != 'true'
+        run: |
+          set -euo pipefail
+          bash -n preview/bin/preview-ctl
+          rsync -a preview/bin/preview-ctl "root@$HOST:/usr/local/bin/preview-ctl.new"
+          rsync -a preview/nginx/ "root@$HOST:/etc/nginx/snippets/"
+          ssh "root@$HOST" 'chmod 755 /usr/local/bin/preview-ctl.new && mv /usr/local/bin/preview-ctl.new /usr/local/bin/preview-ctl && preview-ctl render'
+
+      - name: Manual wake / remove
+        if: steps.pre.outputs.go == 'true' && github.event_name == 'workflow_dispatch' && inputs.action != 'reconcile'
+        env:
+          ACTION: ${{ inputs.action }}
+          SLUG: ${{ inputs.slug }}
+        run: |
+          set -euo pipefail
+          [[ "$SLUG" =~ ^[a-z0-9-]{1,50}$ ]] || { echo "::error::slug required"; exit 1; }
+          [ "$DRY" = true ] && { echo "dry run: would $ACTION $SLUG"; exit 0; }
+          ssh "root@$HOST" "preview-ctl $ACTION --slug '$SLUG'"
+
+      - name: Sleep / remove previews
+        if: steps.pre.outputs.go == 'true' && (github.event_name == 'schedule' || inputs.action == 'reconcile')
+        run: |
+          set -euo pipefail
+          REG=$(ssh "root@$HOST" preview-ctl list)
+          NOW=$(date -u +%s)
+          act() { if [ "$DRY" = true ]; then echo "dry run: $*"; else ssh "root@$HOST" "preview-ctl $*"; fi; }
+          jq -r '.previews | to_entries[] | [.key, .value.branch, .value.last_push, .value.asleep, (.value.components | keys | join(","))] | @tsv' <<<"$REG" |
+          while IFS=$'\t' read -r slug branch last asleep repos; do
+            age_h=$(( (NOW - last) / 3600 ))
+            alive=0
+            for repo in ${repos//,/ }; do
+              code=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $GH_TOKEN" \
+                "https://api.github.com/repos/Neonbee-ai/$repo/branches/$(jq -rn --arg b "$branch" '$b|@uri')")
+              # Anything but a clean 404 counts as alive — never remove on an API hiccup.
+              [ "$code" = 404 ] || alive=1
+            done
+            if [ $alive = 0 ]; then
+              echo "$slug: branch $branch deleted everywhere → remove"; act remove --slug "$slug"
+            elif [ $age_h -ge "$REMOVE_AFTER_H" ]; then
+              echo "$slug: idle ${age_h}h → remove"; act remove --slug "$slug"
+            elif [ $age_h -ge "$SLEEP_AFTER_H" ] && [ "$asleep" != true ]; then
+              echo "$slug: idle ${age_h}h → sleep"; act sleep --slug "$slug"
+            else
+              echo "$slug: idle ${age_h}h, keep"
+            fi
+          done
+
+      - name: Delete orphan Cloudflare records
+        if: steps.pre.outputs.go == 'true'
+        run: |
+          set -euo pipefail
+          [ -n "$CFT" ] || { echo "::warning::CF_PREVIEW_API_TOKEN not set — skipping"; exit 0; }
+          LIVE=$(ssh "root@$HOST" preview-ctl list | jq -r '.previews | keys[]' | sed "s/^/pr-/; s/\$/.$PREVIEW_DOMAIN/")
+          cf() { curl -fsS -H "Authorization: Bearer $CFT" -H "Content-Type: application/json" "$@"; }
+          API=https://api.cloudflare.com/client/v4
+          ZONE=$(cf "$API/zones?name=$PREVIEW_DOMAIN" | jq -r '.result[0].id')
+          cf "$API/zones/$ZONE/dns_records?per_page=500" | jq -r '.result[] | select((.comment // "") | startswith("so360-preview")) | [.id, .name] | @tsv' |
+          while IFS=$'\t' read -r id name; do
+            grep -qxF "$name" <<<"$LIVE" && continue
+            if [ "$DRY" = true ]; then echo "dry run: delete DNS $name"; else cf -X DELETE "$API/zones/$ZONE/dns_records/$id" >/dev/null && echo "deleted DNS $name"; fi
+          done
+          cf "$API/accounts/$CF_ACCOUNT_ID/access/apps?per_page=500" | jq -r '.result[] | select(.name | startswith("SO360 Preview")) | [.id, .domain] | @tsv' |
+          while IFS=$'\t' read -r id dom; do
+            grep -qxF "$dom" <<<"$LIVE" && continue
+            if [ "$DRY" = true ]; then echo "dry run: delete Access $dom"; else cf -X DELETE "$API/accounts/$CF_ACCOUNT_ID/access/apps/$id" >/dev/null && echo "deleted Access $dom"; fi
+          done
+
+      - name: Prune shared deps
+        if: steps.pre.outputs.go == 'true' && env.DRY != 'true'
+        run: ssh "root@$HOST" preview-ctl prune-deps
