@@ -21,7 +21,11 @@ if [ "$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -cxF "$DEV_ORIGIN")" != 0 ]
 fi
 
 command -v apt-get >/dev/null && apt-get install -y -q jq nginx rsync curl util-linux >/dev/null
-command -v node >/dev/null || { echo "install Node 22 first (nvm or nodesource)" >&2; exit 1; }
+# nvm installs are not on the PATH of a non-interactive ssh session; record
+# the node bin dir in preview.env so preview-ctl always finds node + pm2.
+NODE_BIN=${NODE_BIN:-$(dirname "$(command -v node 2>/dev/null || ls -d /root/.nvm/versions/node/*/bin/node 2>/dev/null | tail -1)")}
+[ -x "$NODE_BIN/node" ] || { echo "install Node 22 first (nvm or nodesource), or set NODE_BIN" >&2; exit 1; }
+export PATH="$NODE_BIN:$PATH"
 command -v pm2  >/dev/null || npm install -g pm2
 pm2 startup systemd -u root --hp /root >/dev/null 2>&1 || true
 
@@ -31,6 +35,7 @@ install -m 644 "$HERE"/nginx/*.conf /etc/nginx/snippets/
 
 if [ ! -f /etc/so360-preview/preview.env ]; then
   cat > /etc/so360-preview/preview.env <<EOF
+PATH=$NODE_BIN:\$PATH
 DEV_ORIGIN=$DEV_ORIGIN
 PROD_SUPABASE_HOST=$PROD_SUPABASE_HOST
 # PREVIEW_ROOT=/srv/previews
@@ -52,5 +57,6 @@ if [ ! -s "$CRT" ] || [ ! -s "$KEY" ]; then
   exit 1
 fi
 
+systemctl enable nginx >/dev/null 2>&1 || true
 preview-ctl render
 echo "preview host ready — add its IP as the PREVIEW_HOST org secret"

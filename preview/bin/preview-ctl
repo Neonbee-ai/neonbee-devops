@@ -339,7 +339,7 @@ EOF
   mv "$tmp" "$NGINX_OUT"
   chmod 644 "$NGINX_OUT"
   if nginx -t >/dev/null 2>&1; then
-    nginx -s reload
+    if systemctl is-active --quiet nginx; then systemctl reload nginx; else systemctl start nginx; fi
     [ -n "$backup" ] && rm -f "$backup"
   else
     nginx -t || true
