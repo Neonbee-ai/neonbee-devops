@@ -34,6 +34,7 @@ on:
     secrets:
       PREVIEW_HOST:         { required: false }
       PREVIEW_SSH_KEY:      { required: false }
+      CONTABO_SSH_KEY:      { required: false }
       CF_PREVIEW_API_TOKEN: { required: false }
       PREVIEW_DEV_ORIGIN:   { required: false }
       SUPABASE_URL:         { required: false }
@@ -66,7 +67,7 @@ jobs:
         id: rm
         if: steps.s.outputs.run == 'true'
         env:
-          KEY: ${{ secrets.PREVIEW_SSH_KEY }}
+          KEY: ${{ secrets.PREVIEW_SSH_KEY || secrets.CONTABO_SSH_KEY }}
           HOST: ${{ secrets.PREVIEW_HOST }}
           SLUG: ${{ steps.s.outputs.slug }}
           REPO: ${{ github.event.repository.name }}
