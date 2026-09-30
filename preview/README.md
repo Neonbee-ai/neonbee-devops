@@ -57,10 +57,14 @@ browser ─► Cloudflare (Access app per preview) ─► preview host nginx
 
 ## Backends (phase 2)
 
-Backend previews need a **non-production database**. They are refused unless:
+Backend previews use `SUPABASE_*_PREVIEW` when set, otherwise `SUPABASE_*_DEV`,
+otherwise the **production database** — the same as dev today (user decision,
+2026-09-30; there is no preview database yet). Every such run warns
+"Preview backend is on the PRODUCTION database".
 
-- `SUPABASE_URL_PREVIEW`, `SUPABASE_ANON_KEY_PREVIEW` and `SUPABASE_SERVICE_KEY_PREVIEW` are set. There is no fallback to the dev/prod DB.
-- `preview-ctl` also rejects any `.env` containing `PROD_SUPABASE_HOST`.
+- The workflows write `PROD_SUPABASE_HOST=` (empty) to the host's `ci.env`,
+  which disarms `preview-ctl`'s prod-DB refusal. Setting it again re-arms it.
+- The `.env` also carries the dev deploy's service/internal keys, so backends boot.
 - The `.env` gets `SO360_PREVIEW=true`, `EVENT_WORKERS_DISABLED=true`, `SIGNAL_EVENT_CONSUMER_DISABLED=true` and `SIGNAL_RULES_SWEEP=off`. Each backend skips `ScheduleModule` when `SO360_PREVIEW=true` (per-repo PRs).
 - No mail/SES keys are written, so email fails closed.
 
@@ -83,7 +87,7 @@ on a port from 7100–7999.
    - Private repos get no org secrets on the free plan, so each preview repo
      needs `PREVIEW_HOST`, `PREVIEW_SSH_KEY` and `PREVIEW_DEV_ORIGIN` as repo
      secrets (the Cloudflare token is not needed).
-3. Phase 2 only: the `*_PREVIEW` database secrets above.
+3. Optional: the `*_PREVIEW` database secrets above, to move previews off prod.
 4. Add to each repo's `deploy.yml`:
 
 ```yaml
