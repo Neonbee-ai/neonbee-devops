@@ -293,6 +293,20 @@ jobs:
           sed -i '/^$/d' .env
           [ -f .env.production ] && sed -i '/neonbee\.app/d' .env.production
           cp .env .env.production.local
+          # Some MFEs @import the shell theme by relative path
+          # (../../../so360-shell-fe/packages/theme). Link the sibling for this
+          # step only, exactly as neonbee-deploy-vite-mfe.yml does.
+          RUNNER_PARENT="$(dirname "$(dirname "$GITHUB_WORKSPACE")")"
+          STALE_PKG="$RUNNER_PARENT/so360-shell-fe"
+          [ -L "$STALE_PKG" ] && rm -f "$STALE_PKG"
+          if [ -d _shell-fe ] && [ "${{ inputs.is_shell }}" != "true" ]; then
+            case "$GITHUB_WORKSPACE/" in
+              "$STALE_PKG"/*) echo "Not relinking: $STALE_PKG contains the live checkout" ;;
+              *) rm -rf "$STALE_PKG"
+                 ln -s "$GITHUB_WORKSPACE/_shell-fe" "$STALE_PKG"
+                 trap 'rm -f "'"$STALE_PKG"'"' EXIT ;;
+            esac
+          fi
           npm run build
           if [ "$KIND" = fe ] && [ ! -f dist/assets/remoteEntry.js ]; then
             echo "::error::dist/assets/remoteEntry.js missing — not an MFE build"
