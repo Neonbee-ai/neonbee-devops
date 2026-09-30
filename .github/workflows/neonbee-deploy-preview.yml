@@ -363,7 +363,7 @@ jobs:
           APP=$(cf "$API/accounts/$CF_ACCOUNT_ID/access/apps?domain=$FQDN" | jq -r --arg d "$FQDN" '[.result[] | select(.domain == $d)][0].id // empty')
           if [ -z "$APP" ]; then
             cf -X POST "$API/accounts/$CF_ACCOUNT_ID/access/apps" --data "$(jq -n --arg d "$FQDN" --arg n "SO360 Preview – $SLUG" --arg p "$CF_ACCESS_POLICY_ID" \
-              '{name: $n, domain: $d, type: "self_hosted", session_duration: "24h", app_launcher_visible: false,
+              '{name: $n, domain: $d, type: "self_hosted", session_duration: "720h", app_launcher_visible: false,
                 policies: [{id: $p, precedence: 1}]}')" >/dev/null
             echo "Created Access app for $FQDN"
           fi
