@@ -37,6 +37,41 @@ class PreviewTargets(unittest.TestCase):
             self.assertIn("PREVIEW_HOST", text)
 
 
+def host_config_block(text):
+    m = re.search(r"# ── host config from secrets \(keep identical.*?\n(.*?)# ── end host config ──", text, re.S)
+    assert m, "host config block not found"
+    return "\n".join(line.strip() for line in m.group(1).splitlines())
+
+
+class HostConfigFromSecrets(unittest.TestCase):
+    def test_every_preview_workflow_writes_ci_env_from_secrets_with_the_same_block(self):
+        blocks = {}
+        for path in (DEPLOY, TEARDOWN, RECONCILE):
+            text = read(path)
+            self.assertIn("secrets.PREVIEW_DEV_ORIGIN", text, os.path.basename(path))
+            self.assertIn("secrets.SUPABASE_URL }}", text, os.path.basename(path))
+            blocks[path] = host_config_block(text)
+        self.assertEqual(len(set(blocks.values())), 1, "host config blocks differ between workflows")
+
+    def test_the_block_validates_values_and_writes_ci_env_atomically_and_privately(self):
+        block = host_config_block(read(DEPLOY))
+        self.assertIn("grep -qvxE '[A-Za-z0-9.-]+'", block)
+        self.assertIn("umask 077", block)
+        self.assertIn("mv /etc/so360-preview/ci.env.tmp /etc/so360-preview/ci.env", block)
+
+    def test_the_workflows_declare_the_new_secrets(self):
+        self.assertRegex(read(DEPLOY), r"\n\s+PREVIEW_DEV_ORIGIN:\s+\{ required: false \}")
+        teardown = read(TEARDOWN)
+        self.assertRegex(teardown, r"\n\s+PREVIEW_DEV_ORIGIN:\s+\{ required: false \}")
+        self.assertRegex(teardown, r"\n\s+SUPABASE_URL:\s+\{ required: false \}")
+
+    def test_preview_ctl_reads_ci_env_after_preview_env_so_secrets_win(self):
+        text = read(CTL)
+        self.assertIn("PREVIEW_ENV_FILE=${PREVIEW_ENV_FILE:-/etc/so360-preview/preview.env}", text)
+        self.assertIn("PREVIEW_CI_ENV_FILE=${PREVIEW_CI_ENV_FILE:-/etc/so360-preview/ci.env}", text)
+        self.assertLess(text.index('. "$PREVIEW_ENV_FILE"'), text.index('. "$PREVIEW_CI_ENV_FILE"'))
+
+
 class BackendDatabase(unittest.TestCase):
     def test_backend_requires_a_preview_database_with_no_fallback(self):
         text = read(DEPLOY)

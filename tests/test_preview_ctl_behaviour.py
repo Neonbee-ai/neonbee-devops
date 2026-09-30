@@ -125,6 +125,7 @@ class PreviewCtlCase(unittest.TestCase):
             "PREVIEW_PORT_MAX": "7105",
             "DEV_ORIGIN": "10.0.0.1",
             "PREVIEW_ENV_FILE": os.path.join(self.tmp, "etc", "preview.env"),
+            "PREVIEW_CI_ENV_FILE": os.path.join(self.tmp, "etc", "ci.env"),
         })
         self.env = env
 
@@ -476,6 +477,16 @@ class GivenABackendEnv(PreviewCtlCase):
                    env={"PROD_SUPABASE_HOST": "prodref.supabase.co"})
         self.assertFalse(any(c.startswith("pm2 start") for c in self.calls()))
 
+    def test_when_ci_env_carries_the_production_database_host_then_deploy_is_refused(self):
+        path = self.env["PREVIEW_CI_ENV_FILE"]
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write("PROD_SUPABASE_HOST=prodref.supabase.co\n")
+        self.upload_be("so360-crm-be", env_text="SUPABASE_URL=https://prodref.supabase.co\n")
+        self.fails(*self.deploy("so360-crm-be", "be", "crm", extra=("--lockhash", HASH)),
+                   message="references the production database")
+        self.assertFalse(any(c.startswith("pm2 start") for c in self.calls()))
+
 
 # ── Sleep / wake ─────────────────────────────────────────────────────────────
 class GivenARunningPreview(PreviewCtlCase):
@@ -645,18 +656,31 @@ class GivenRender(PreviewCtlCase):
         self.fails("render", message="DEV_ORIGIN is not set", env={"DEV_ORIGIN": None})
         self.assertFalse(os.path.exists(self.nginx_out))
 
-    def test_when_the_env_file_is_missing_then_the_refusal_names_the_configured_file(self):
+    def write_host_env(self, key, body):
+        path = self.env[key]
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write(body)
+
+    def test_when_the_env_files_are_missing_then_the_refusal_names_both_configured_files(self):
         r = self.fails("render", message="DEV_ORIGIN is not set", env={"DEV_ORIGIN": None})
+        self.assertIn(self.env["PREVIEW_CI_ENV_FILE"], r.stderr)
         self.assertIn(self.env["PREVIEW_ENV_FILE"], r.stderr)
+        self.assertIn("PREVIEW_DEV_ORIGIN secret", r.stderr)
         self.assertNotIn("/etc/so360-preview", r.stderr)
 
-    def test_when_the_env_file_sets_dev_origin_then_render_uses_it(self):
-        env_file = self.env["PREVIEW_ENV_FILE"]
-        os.makedirs(os.path.dirname(env_file))
-        with open(env_file, "w") as f:
-            f.write("DEV_ORIGIN=10.9.9.9\n")
+    def test_when_only_the_host_env_file_sets_dev_origin_then_render_uses_it(self):
+        self.write_host_env("PREVIEW_ENV_FILE", "DEV_ORIGIN=10.9.9.9\n")
         self.ok("render", env={"DEV_ORIGIN": None})
         self.assertIn("upstream so360_dev_origin { server 10.9.9.9:443; keepalive 16; }", self.nginx())
+
+    def test_when_the_ci_env_file_sets_dev_origin_then_it_wins_over_the_host_env_file(self):
+        self.write_host_env("PREVIEW_ENV_FILE", "DEV_ORIGIN=10.9.9.9\n")
+        self.write_host_env("PREVIEW_CI_ENV_FILE", "DEV_ORIGIN=10.8.8.8\n")
+        self.ok("render", env={"DEV_ORIGIN": None})
+        conf = self.nginx()
+        self.assertIn("server 10.8.8.8:443;", conf)
+        self.assertNotIn("10.9.9.9", conf)
 
     def test_when_rendered_empty_then_http_redirects_and_unknown_previews_get_a_noindex_404(self):
         self.ok("render")

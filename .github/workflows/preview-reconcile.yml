@@ -79,6 +79,22 @@ jobs:
           echo "SSH_AGENT_PID=$SSH_AGENT_PID" >> "$GITHUB_ENV"
           ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts 2>/dev/null
 
+      - name: Sync preview host config from secrets
+        if: steps.pre.outputs.go == 'true' && env.DRY != 'true'
+        env:
+          DEVO: ${{ secrets.PREVIEW_DEV_ORIGIN }}
+          SBURL: ${{ secrets.SUPABASE_URL }}
+        run: |
+          set -euo pipefail
+          # ── host config from secrets (keep identical in all preview workflows) ──
+          PSH=$(printf '%s' "$SBURL" | sed -E 's#^[a-z]+://##; s#[/:].*$##')
+          if printf '%s\n%s\n' "$DEVO" "$PSH" | grep -qvxE '[A-Za-z0-9.-]+'; then
+            echo "::warning title=Preview host config::PREVIEW_DEV_ORIGIN or SUPABASE_URL secret missing/invalid - host keeps its current config"
+          else
+            printf 'DEV_ORIGIN=%s\nPROD_SUPABASE_HOST=%s\n' "$DEVO" "$PSH" | ssh "root@$HOST" 'install -d -m 700 /etc/so360-preview && umask 077 && cat > /etc/so360-preview/ci.env.tmp && mv /etc/so360-preview/ci.env.tmp /etc/so360-preview/ci.env'
+          fi
+          # ── end host config ──
+
       - name: Sync preview-ctl + nginx snippets
         if: steps.pre.outputs.go == 'true' && env.DRY != 'true'
         run: |
