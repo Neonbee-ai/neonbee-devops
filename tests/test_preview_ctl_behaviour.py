@@ -65,7 +65,7 @@ esac
 exit 0
 ''',
     "curl": r'''
-echo "curl $*" >> "$STUB_STATE/calls.log"
+a="curl $*"; echo "${a//$'\n'/ }" >> "$STUB_STATE/calls.log"
 [ -e "$STUB_STATE/curl_fail" ] && exit 22
 # Cloudflare API fake (PREVIEW_CF_API=https://cf.test): -K - carries the token.
 case " $* " in *" -K - "*) cat >> "$STUB_STATE/curl_config" ;; esac
