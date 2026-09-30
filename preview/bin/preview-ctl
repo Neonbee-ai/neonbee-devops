@@ -26,7 +26,9 @@
 # =============================================================================
 set -euo pipefail
 
-[ -f /etc/so360-preview/preview.env ] && . /etc/so360-preview/preview.env
+# Host config; PREVIEW_ENV_FILE only exists so the specs can sandbox it.
+PREVIEW_ENV_FILE=${PREVIEW_ENV_FILE:-/etc/so360-preview/preview.env}
+[ -f "$PREVIEW_ENV_FILE" ] && . "$PREVIEW_ENV_FILE"
 
 ROOT=${PREVIEW_ROOT:-/srv/previews}
 REG="$ROOT/registry.json"
@@ -304,7 +306,7 @@ cmd_prune_deps() {
 # host by the shared snippet, so an unchanged develop shell loads the
 # preview's MFEs and APIs without being rebuilt.
 render_nginx() {
-  [ -n "${DEV_ORIGIN:-}" ] || die "DEV_ORIGIN is not set in /etc/so360-preview/preview.env"
+  [ -n "${DEV_ORIGIN:-}" ] || die "DEV_ORIGIN is not set in $PREVIEW_ENV_FILE"
   local tmp slug DOMAIN_RE
   DOMAIN_RE=$(sed 's/\./\\./g' <<<"$DOMAIN")
   install -d -m 700 -o www-data /var/cache/nginx/so360-preview 2>/dev/null || install -d -m 700 /var/cache/nginx/so360-preview

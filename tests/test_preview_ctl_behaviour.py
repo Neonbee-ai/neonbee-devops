@@ -8,8 +8,9 @@ replaced by logging stubs, so every branch of the script is exercised without
 touching a real host.
 
 Needs Linux (GNU sed -i, bash 4+) and jq — exactly what the self-hosted runner
-has. Skipped elsewhere, and skipped on a real preview host (a present
-/etc/so360-preview/preview.env would override the sandbox paths).
+has. Skipped elsewhere. The host config is redirected via PREVIEW_ENV_FILE to a
+sandbox path, so the specs also run on the runner that doubles as the preview
+host without reading /etc/so360-preview/preview.env.
 Run: python3 -m unittest discover -s tests -p 'test_*.py' -v
 """
 
@@ -25,7 +26,6 @@ import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CTL = os.path.join(ROOT, "preview", "bin", "preview-ctl")
-HOST_ENV = "/etc/so360-preview/preview.env"
 
 HASH = "0123456789abcdef"
 SLUG = "feat-crm-owner"
@@ -44,8 +44,6 @@ if platform.system() != "Linux":
     SKIP_REASON = "preview-ctl targets Linux (GNU sed -i)"
 elif not shutil.which("jq") or not shutil.which("bash") or not _gnu_sed():
     SKIP_REASON = "needs bash, jq and GNU sed"
-elif os.path.exists(HOST_ENV):
-    SKIP_REASON = f"{HOST_ENV} exists — refusing to run on a real preview host"
 
 
 # Stubs log every call to $STUB_STATE/calls.log. Behaviour is switched by
@@ -126,6 +124,7 @@ class PreviewCtlCase(unittest.TestCase):
             "PREVIEW_PORT_MIN": "7100",
             "PREVIEW_PORT_MAX": "7105",
             "DEV_ORIGIN": "10.0.0.1",
+            "PREVIEW_ENV_FILE": os.path.join(self.tmp, "etc", "preview.env"),
         })
         self.env = env
 
@@ -645,6 +644,19 @@ class GivenRender(PreviewCtlCase):
     def test_when_dev_origin_is_unset_then_render_is_refused(self):
         self.fails("render", message="DEV_ORIGIN is not set", env={"DEV_ORIGIN": None})
         self.assertFalse(os.path.exists(self.nginx_out))
+
+    def test_when_the_env_file_is_missing_then_the_refusal_names_the_configured_file(self):
+        r = self.fails("render", message="DEV_ORIGIN is not set", env={"DEV_ORIGIN": None})
+        self.assertIn(self.env["PREVIEW_ENV_FILE"], r.stderr)
+        self.assertNotIn("/etc/so360-preview", r.stderr)
+
+    def test_when_the_env_file_sets_dev_origin_then_render_uses_it(self):
+        env_file = self.env["PREVIEW_ENV_FILE"]
+        os.makedirs(os.path.dirname(env_file))
+        with open(env_file, "w") as f:
+            f.write("DEV_ORIGIN=10.9.9.9\n")
+        self.ok("render", env={"DEV_ORIGIN": None})
+        self.assertIn("upstream so360_dev_origin { server 10.9.9.9:443; keepalive 16; }", self.nginx())
 
     def test_when_rendered_empty_then_http_redirects_and_unknown_previews_get_a_noindex_404(self):
         self.ok("render")
