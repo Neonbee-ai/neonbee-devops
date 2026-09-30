@@ -106,6 +106,7 @@ on:
     secrets:
       PREVIEW_HOST:            { required: false }
       PREVIEW_SSH_KEY:         { required: false }
+      CONTABO_SSH_KEY:         { required: false }
       CF_PREVIEW_API_TOKEN:    { required: false }
       PAT_TOKEN:               { required: false }
       SUPABASE_URL_DEV:        { required: false }
@@ -487,7 +488,7 @@ jobs:
 
       - name: Setup SSH
         env:
-          KEY: ${{ secrets.PREVIEW_SSH_KEY }}
+          KEY: ${{ secrets.PREVIEW_SSH_KEY || secrets.CONTABO_SSH_KEY }}
           HOST: ${{ secrets.PREVIEW_HOST }}
         run: |
           mkdir -p ~/.ssh && chmod 700 ~/.ssh
