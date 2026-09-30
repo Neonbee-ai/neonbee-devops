@@ -93,6 +93,9 @@ jobs:
           else
             printf 'DEV_ORIGIN=%s\nPROD_SUPABASE_HOST=%s\n' "$DEVO" "$PSH" | ssh "root@$HOST" 'install -d -m 700 /etc/so360-preview && umask 077 && cat > /etc/so360-preview/ci.env.tmp && mv /etc/so360-preview/ci.env.tmp /etc/so360-preview/ci.env'
           fi
+          if [ -n "${CFT:-}" ]; then
+            printf 'CF_API_TOKEN=%s\n' "$CFT" | ssh "root@$HOST" 'install -d -m 700 /etc/so360-preview && umask 077 && cat > /etc/so360-preview/cf.env.tmp && mv /etc/so360-preview/cf.env.tmp /etc/so360-preview/cf.env'
+          fi
           # ── end host config ──
 
       - name: Sync preview-ctl + nginx snippets
