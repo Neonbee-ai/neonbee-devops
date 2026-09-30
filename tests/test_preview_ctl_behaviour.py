@@ -218,6 +218,45 @@ class PreviewCtlCase(unittest.TestCase):
         self.upload_be(repo, slug=slug, lockhash=lockhash)
         return self.ok(*self.deploy(repo, "be", name, slug=slug, extra=("--lockhash", lockhash)))
 
+    def upload_site(self, repo, slug=SLUG):
+        d = self.p("_incoming", slug, repo)
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "index.html"), "w") as f:
+            f.write("<html></html>")
+
+    def upload_next(self, repo, slug=SLUG, standalone=False, env_text="NEXT_PUBLIC_API_URL=https://dev-api.skyoffice360.com\n",
+                    deps="upload", lockhash=HASH):
+        d = self.p("_incoming", slug, repo)
+        os.makedirs(os.path.join(d, ".next", "static"), exist_ok=True)
+        os.makedirs(os.path.join(d, "public"), exist_ok=True)
+        if env_text is not None:
+            with open(os.path.join(d, ".env.local"), "w") as f:
+                f.write(env_text)
+        if standalone:
+            os.makedirs(os.path.join(d, ".next", "standalone"), exist_ok=True)
+            with open(os.path.join(d, ".next", "standalone", "server.js"), "w") as f:
+                f.write("// server\n")
+        elif deps == "upload":
+            nb = self.p("_incoming", "_deps", repo, lockhash, "node_modules", "next", "dist", "bin")
+            os.makedirs(nb, exist_ok=True)
+            with open(os.path.join(nb, "next"), "w") as f:
+                f.write("// next\n")
+
+    def site_host(self, name, slug=SLUG):
+        return f"pr-{slug}--{name}.skyoffice360.com"
+
+    def deploy_site(self, repo="so360-sso-fe", name="sso", slug=SLUG, dev_host="dev-sso.skyoffice360.com"):
+        self.upload_site(repo, slug=slug)
+        extra = ("--host", self.site_host(name, slug)) + (("--dev-host", dev_host) if dev_host else ())
+        return self.ok(*self.deploy(repo, "site", name, slug=slug, extra=extra))
+
+    def deploy_next(self, repo="so360-command", name="command", slug=SLUG, standalone=False, **kw):
+        self.upload_next(repo, slug=slug, standalone=standalone, **kw)
+        extra = ("--host", self.site_host(name, slug), "--dev-host", f"dev-{name}.skyoffice360.com")
+        if not standalone:
+            extra += ("--lockhash", HASH)
+        return self.ok(*self.deploy(repo, "next", name, slug=slug, extra=extra))
+
 
 # ── Dispatch & validation ────────────────────────────────────────────────────
 class GivenAnyInvocation(PreviewCtlCase):
@@ -274,7 +313,7 @@ class GivenInvalidDeployArguments(PreviewCtlCase):
 
     def test_when_the_kind_is_unknown_then_deploy_is_refused(self):
         self.upload_fe("so360-crm-fe")
-        self.fails(*self.deploy("so360-crm-fe", "db", "crm"), message="--kind must be fe, shell or be")
+        self.fails(*self.deploy("so360-crm-fe", "db", "crm"), message="--kind must be fe, shell, be, site or next")
 
     def test_when_nothing_was_uploaded_then_deploy_is_refused(self):
         self.fails(*self.deploy("so360-crm-fe", "fe", "crm"), message="nothing uploaded at")
@@ -540,6 +579,181 @@ class GivenAnUnknownPreview(PreviewCtlCase):
     def test_when_woken_then_no_registry_entry_is_invented(self):
         self.ok("wake", "--slug", "feat-nothing")
         self.assertEqual(self.registry(), {"previews": {}})
+
+
+# ── Standalone apps: SPA fe, site, next ──────────────────────────────────────
+class GivenAStandaloneSpaUnderCdn(PreviewCtlCase):
+    def test_when_deployed_with_spa_then_deep_links_fall_back_to_its_index(self):
+        self.upload_fe("so360-help-fe")
+        self.ok(*self.deploy("so360-help-fe", "fe", "contact-support", extra=("--spa",)))
+        comp = self.registry()["previews"][SLUG]["components"]["so360-help-fe"]
+        self.assertTrue(comp["spa"])
+        self.assertIn("try_files $uri /cdn/contact-support/index.html;", self.nginx())
+
+    def test_when_deployed_without_spa_then_the_mfe_has_no_fallback_and_no_spa_flag(self):
+        self.deploy_fe()
+        self.assertNotIn("spa", self.registry()["previews"][SLUG]["components"]["so360-crm-fe"])
+        self.assertIn("try_files $uri =404;", self.nginx())
+
+    def test_when_spa_is_passed_for_another_kind_then_deploy_is_refused(self):
+        self.upload_be("so360-crm-be")
+        self.fails(*self.deploy("so360-crm-be", "be", "crm", extra=("--lockhash", HASH, "--spa")),
+                   message="--spa only applies to --kind fe")
+
+
+class GivenAStaticSite(PreviewCtlCase):
+    def test_when_deployed_then_it_gets_its_own_host_with_the_overlay(self):
+        r = self.deploy_site()
+        host = self.site_host("sso")
+        comp = self.registry()["previews"][SLUG]["components"]["so360-sso-fe"]
+        self.assertEqual((comp["kind"], comp["host"], comp["dev_host"]), ("site", host, "dev-sso.skyoffice360.com"))
+        self.assertTrue(os.path.isfile(self.p(SLUG, "site", "sso", "index.html")))
+        conf = self.nginx()
+        self.assertIn(f"server_name {host};", conf)
+        self.assertIn(f"root {self.p(SLUG, 'site', 'sso')};", conf)
+        self.assertIn(f"set $pv_api_base {host}/api;", conf)
+        # Both hosts rewrite the app's dev hostname, so the shell links to it.
+        self.assertEqual(conf.count(f"sub_filter 'https://dev-sso.skyoffice360.com' 'https://{host}';"), 2)
+        self.assertEqual(conf.count("include /etc/nginx/snippets/so360-preview-overlay.conf;"), 2)
+        self.assertIn(f"PREVIEW_HOST_URL=https://{host}", r.stdout)
+
+    def test_when_the_host_is_missing_or_malformed_then_deploy_is_refused(self):
+        for host in ("", "sso.skyoffice360.com", "pr-x.example.com", "pr-x-.skyoffice360.com",
+                     "pr-" + "a" * 61 + ".skyoffice360.com"):
+            with self.subTest(host=host):
+                self.upload_site("so360-sso-fe")
+                self.fails(*self.deploy("so360-sso-fe", "site", "sso", extra=("--host", host)),
+                           message="invalid host")
+
+    def test_when_the_host_is_the_main_preview_host_then_deploy_is_refused(self):
+        self.upload_site("so360-sso-fe")
+        self.fails(*self.deploy("so360-sso-fe", "site", "sso", extra=("--host", f"pr-{SLUG}.skyoffice360.com")),
+                   message="--host must differ")
+
+    def test_when_the_host_belongs_to_another_component_then_deploy_is_refused(self):
+        self.deploy_site()
+        self.upload_site("so360-portal")
+        self.fails(*self.deploy("so360-portal", "site", "portal", extra=("--host", self.site_host("sso"))),
+                   message="already belongs to")
+
+    def test_when_the_dev_host_is_one_the_overlay_rewrites_then_deploy_is_refused(self):
+        self.upload_site("so360-sso-fe")
+        self.fails(*self.deploy("so360-sso-fe", "site", "sso",
+                                extra=("--host", self.site_host("sso"), "--dev-host", "dev-api.skyoffice360.com")),
+                   message="already rewritten by the overlay")
+
+    def test_when_a_host_is_passed_for_an_mfe_then_deploy_is_refused(self):
+        self.upload_fe("so360-crm-fe")
+        self.fails(*self.deploy("so360-crm-fe", "fe", "crm", extra=("--host", self.site_host("crm"))),
+                   message="--host/--dev-host only apply to --kind site or next")
+
+    def test_when_no_next_app_exists_then_no_loopback_listeners_are_rendered(self):
+        self.deploy_site()
+        self.assertNotIn("listen 127.0.0.1:", self.nginx())
+
+
+class GivenANextApp(PreviewCtlCase):
+    def test_when_deployed_then_it_runs_under_pm2_with_shared_deps_and_is_probed_at_root(self):
+        r = self.deploy_next()
+        comp = self.registry()["previews"][SLUG]["components"]["so360-command"]
+        self.assertEqual((comp["kind"], comp["port"], comp["health"], comp["lockhash"]), ("next", 7100, "/", HASH))
+        self.assertTrue(os.path.islink(self.p(SLUG, "next", "command", "node_modules")))
+        starts = [c for c in self.calls() if c.startswith("pm2 start ")]
+        self.assertEqual(len(starts), 1)
+        self.assertIn("node_modules/next/dist/bin/next --name pv-feat-crm-owner-command", starts[0])
+        self.assertIn("-- start -p 7100 -H 127.0.0.1", starts[0])
+        self.assertIn("curl -fsS -o /dev/null http://127.0.0.1:7100/", self.calls())
+        self.assertIn("health ok: pv-feat-crm-owner-command on :7100", r.stdout)
+
+    def test_when_deployed_then_nginx_proxies_its_host_and_reaches_develop_via_so360api(self):
+        self.deploy_next()
+        host = self.site_host("command")
+        conf = self.nginx()
+        self.assertIn(f"server_name {host};", conf)
+        self.assertIn("proxy_pass http://127.0.0.1:7100;", conf)
+        self.assertIn("location ^~ /__so360api/ {", conf)
+        self.assertIn(f"set $pv_api_base {host}/__so360api;", conf)
+        self.assertIn(f"set $pv_cdn_base pr-{SLUG}.skyoffice360.com/cdn;", conf)
+        # Server-side calls to develop's service ports land on loopback.
+        self.assertIn("listen 127.0.0.1:6003;", conf)
+        self.assertIn("proxy_pass https://so360_dev_origin/crm/;", conf)
+
+    def test_when_deployed_then_service_keys_are_stripped_and_the_preview_flag_set(self):
+        self.deploy_next(env_text="SUPABASE_SERVICE_ROLE_KEY=secret\nNEXT_SUPABASE_SERVICE_KEY=secret\n"
+                                  "PORT=3000\nHOSTNAME=0.0.0.0\nSO360_PREVIEW=false\nNEXT_PUBLIC_X=1\n")
+        path = self.p(SLUG, "next", "command", ".env.local")
+        with open(path) as f:
+            env = f.read()
+        self.assertNotIn("SERVICE", env)
+        self.assertNotIn("PORT=", env)
+        self.assertNotIn("HOSTNAME=", env)
+        self.assertIn("NEXT_PUBLIC_X=1", env)
+        self.assertEqual(env.count("SO360_PREVIEW="), 1)
+        self.assertIn("SO360_PREVIEW=true", env)
+        self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
+
+    def test_when_the_upload_has_no_env_local_then_deploy_is_refused(self):
+        self.upload_next("so360-command", env_text=None)
+        self.fails(*self.deploy("so360-command", "next", "command",
+                                extra=("--host", self.site_host("command"), "--lockhash", HASH)),
+                   message="next upload has no .env.local")
+
+    def test_when_the_build_is_standalone_then_its_server_runs_with_static_beside_it(self):
+        self.deploy_next(standalone=True)
+        comp = self.registry()["previews"][SLUG]["components"]["so360-command"]
+        self.assertIsNone(comp["lockhash"])
+        sa = self.p(SLUG, "next", "command", ".next", "standalone")
+        self.assertTrue(os.path.isdir(os.path.join(sa, ".next", "static")))
+        self.assertTrue(os.path.isdir(os.path.join(sa, "public")))
+        self.assertTrue(os.path.isfile(os.path.join(sa, ".env.local")))
+        starts = [c for c in self.calls() if c.startswith("pm2 start ")]
+        self.assertIn(".next/standalone/server.js --name pv-feat-crm-owner-command", starts[0])
+        self.assertIn("PORT=7100", starts[0])
+
+    def test_when_slept_and_woken_then_the_next_app_stops_and_restarts(self):
+        self.deploy_next()
+        self.clear_calls()
+        self.ok("sleep", "--slug", SLUG)
+        self.assertIn("pm2 stop pv-feat-crm-owner-command PORT=", self.calls())
+        self.clear_calls()
+        self.ok("wake", "--slug", SLUG)
+        self.assertTrue(any(c.startswith("pm2 start ") and "pv-feat-crm-owner-command" in c for c in self.calls()))
+
+
+class GivenAPreviewWithExtraHosts(PreviewCtlCase):
+    def setUp(self):
+        super().setUp()
+        self.deploy_fe()
+        self.deploy_site()
+        self.deploy_next()
+        self.clear_calls()
+
+    def test_when_the_site_is_removed_then_its_host_is_reported_and_the_preview_stays(self):
+        r = self.ok("remove", "--slug", SLUG, "--repo", "so360-sso-fe")
+        lines = r.stdout.strip().splitlines()
+        self.assertIn(f"REMOVED_HOST={self.site_host('sso')}", lines)
+        self.assertEqual(lines[-1], "REMOVED_PREVIEW=0")
+        self.assertFalse(os.path.exists(self.p(SLUG, "site", "sso")))
+        self.assertNotIn(f"server_name {self.site_host('sso')};", self.nginx())
+
+    def test_when_the_next_app_is_removed_then_its_process_goes_and_loopback_is_dropped(self):
+        r = self.ok("remove", "--slug", SLUG, "--repo", "so360-command")
+        self.assertIn(f"REMOVED_HOST={self.site_host('command')}", r.stdout)
+        self.assertIn("pm2 delete pv-feat-crm-owner-command PORT=", self.calls())
+        self.assertFalse(os.path.exists(self.p(SLUG, "next", "command")))
+        self.assertNotIn("listen 127.0.0.1:", self.nginx())
+
+    def test_when_an_mfe_is_removed_then_no_host_is_reported(self):
+        r = self.ok("remove", "--slug", SLUG, "--repo", "so360-crm-fe")
+        self.assertNotIn("REMOVED_HOST=", r.stdout)
+
+    def test_when_the_whole_preview_is_removed_then_every_extra_host_is_reported(self):
+        r = self.ok("remove", "--slug", SLUG)
+        lines = r.stdout.strip().splitlines()
+        self.assertIn(f"REMOVED_HOST={self.site_host('sso')}", lines)
+        self.assertIn(f"REMOVED_HOST={self.site_host('command')}", lines)
+        self.assertEqual(lines[-1], "REMOVED_PREVIEW=1")
+        self.assertIn("pm2 delete pv-feat-crm-owner-command PORT=", self.calls())
 
 
 # ── Remove ───────────────────────────────────────────────────────────────────

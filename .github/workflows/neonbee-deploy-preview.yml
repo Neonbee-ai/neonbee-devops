@@ -6,7 +6,8 @@
 # Only the repos a branch touches are deployed; everything else in the preview
 # is develop's (nginx fallback on the preview host — see preview/README.md).
 #
-#   check  → skip [no-preview] commits, compute the slug
+#   check  → skip [no-preview] commits, compute the slug (and, for site/next,
+#            the app's own host pr-<slug>--<name>)
 #   build  → build only (tests run in the pre-push gate and the PR gate)
 #   deploy → Access app, then DNS (never the other way round), rsync to the
 #            preview host, `preview-ctl deploy`, PR comment with the URL
@@ -25,11 +26,18 @@
 #       permissions: { contents: read, pull-requests: write }
 #       uses: Neonbee-ai/neonbee-devops/.github/workflows/neonbee-deploy-preview.yml@main
 #       with:
-#         kind: fe                 # fe | shell | be
+#         kind: fe                 # fe | shell | be | site | next
 #         name: crm                # /cdn/<name>/ or /api/<name>/ path segment
 #         vite_base_url: https://dev-cdn.skyoffice360.com/crm/
 #         vite_env: ${{ ... same block as vite_env_dev ... }}
 #       secrets: inherit
+#
+# Standalone apps that live on their own dev hostname:
+#   kind: site  — a static SPA (sso, client portal), served on its own host
+#   kind: next  — a Next.js app run under pm2, on its own host
+#   dev_host: dev-sso.skyoffice360.com   # rewritten to the preview host
+# A non-MFE Vite app under /cdn/<name>/ (help, public signing) is kind fe
+# with is_mfe: false.
 # =============================================================================
 
 name: Deploy preview (reusable)
@@ -38,7 +46,7 @@ on:
   workflow_call:
     inputs:
       kind:
-        description: 'fe (an MFE served under /cdn/<name>/), shell (the host shell), be (a NestJS backend under /api/<name>/)'
+        description: 'fe (a Vite app under /cdn/<name>/), shell (the host shell), be (a NestJS backend under /api/<name>/), site (a static app on its own host), next (a Next.js app on its own host)'
         required: true
         type: string
       name:
@@ -72,13 +80,25 @@ on:
         required: false
         type: boolean
         default: false
-      # ── be ──
-      health_path:
+      is_mfe:
+        description: 'fe only — false for a standalone SPA under /cdn/<name>/ (no remoteEntry.js; deep links fall back to its index.html)'
+        required: false
+        type: boolean
+        default: true
+      # ── site / next ──
+      dev_host:
+        description: 'The dev hostname the app is published on (e.g. dev-sso.skyoffice360.com); rewritten to the preview host'
         required: false
         type: string
-        default: '/health'
+        default: ''
+      # ── be / next ──
+      health_path:
+        description: 'Health path (default /health for be, / for next)'
+        required: false
+        type: string
+        default: ''
       extra_env:
-        description: 'Extra KEY=value lines for a preview backend .env'
+        description: 'Extra KEY=value lines for a preview backend .env, or a Next.js .env.local (pass the dev block)'
         required: false
         type: string
         default: ''
@@ -116,6 +136,7 @@ jobs:
     outputs:
       run:  ${{ steps.c.outputs.run }}
       slug: ${{ steps.c.outputs.slug }}
+      host: ${{ steps.c.outputs.host }}
     steps:
       - id: c
         env:
@@ -133,7 +154,7 @@ jobs:
             echo "::notice::[no-preview] in the commit message — skipping"
             echo "run=false" >> "$GITHUB_OUTPUT"; exit 0
           fi
-          case "$KIND" in fe|shell|be) ;; *) echo "::error::kind must be fe, shell or be"; exit 1 ;; esac
+          case "$KIND" in fe|shell|be|site|next) ;; *) echo "::error::kind must be fe, shell, be, site or next"; exit 1 ;; esac
           [[ "$NAME" =~ ^[a-z0-9][a-z0-9-]{0,40}$ ]] || { echo "::error::invalid name '$NAME'"; exit 1; }
 
           # ── slug (keep identical to neonbee-preview-teardown.yml) ──
@@ -145,6 +166,17 @@ jobs:
           echo "slug=$slug" >> "$GITHUB_OUTPUT"
           echo "run=true"   >> "$GITHUB_OUTPUT"
           echo "Preview: https://pr-$slug.$PREVIEW_DOMAIN"
+
+          # site/next apps get their own host: one DNS label (max 63 chars).
+          if [ "$KIND" = site ] || [ "$KIND" = next ]; then
+            label="pr-$slug--$NAME"
+            if [ ${#label} -gt 63 ]; then
+              h=$(printf '%s' "$label" | sha1sum | cut -c1-6)
+              label="$(printf '%s' "$label" | cut -c1-56 | sed -E 's/-+$//')-$h"
+            fi
+            echo "host=$label.$PREVIEW_DOMAIN" >> "$GITHUB_OUTPUT"
+            echo "App: https://$label.$PREVIEW_DOMAIN"
+          fi
 
   build-deploy:
     needs: [check]
@@ -160,6 +192,7 @@ jobs:
       KIND: ${{ inputs.kind }}
       NAME: ${{ inputs.name }}
       REPO: ${{ github.event.repository.name }}
+      APP_HOST: ${{ needs.check.outputs.host }}
     steps:
       - name: Preconditions
         env:
@@ -205,7 +238,7 @@ jobs:
           RUNNER_PARENT="$(dirname "$(dirname "$GITHUB_WORKSPACE")")"
           STALE_PKG="$RUNNER_PARENT/so360-shell-fe"
           [ -L "$STALE_PKG" ] && rm -f "$STALE_PKG"
-          if [ "$KIND" != be ] && [ "${{ inputs.needs_shell_packages }}" = "true" ] && [ "${{ inputs.is_shell }}" != "true" ]; then
+          if { [ "$KIND" = fe ] || [ "$KIND" = shell ] || [ "$KIND" = site ]; } && [ "${{ inputs.needs_shell_packages }}" = "true" ] && [ "${{ inputs.is_shell }}" != "true" ]; then
             rm -rf _shell-fe
             if git clone --depth 1 --filter=blob:none --sparse --branch develop \
                  "https://x-access-token:${{ secrets.PAT_TOKEN }}@github.com/Neonbee-ai/so360-shell-fe.git" \
@@ -242,7 +275,7 @@ jobs:
             return 1
           }
           npm_ci_retry
-          if [ "$KIND" != be ]; then
+          if [ "$KIND" = fe ] || [ "$KIND" = shell ] || [ "$KIND" = site ]; then
             if [ -d _shell-fe ] && [ "${{ inputs.is_shell }}" != "true" ]; then
               mkdir -p node_modules/@so360
               for p in shell-context design-system event-bus formatters cross-link theme; do
@@ -268,6 +301,20 @@ jobs:
         run: |
           set -euo pipefail
           if [ "$KIND" = be ]; then
+            npm run build
+            exit 0
+          fi
+          if [ "$KIND" = next ]; then
+            # Same .env.local as the dev build: NEXT_PUBLIC_* are inlined at
+            # build time. The preview host strips any service key from it.
+            EXTRA_ENV='${{ inputs.extra_env }}'
+            : > .env.local
+            [ -n "$EXTRA_ENV" ] && printf '%s\n' "$EXTRA_ENV" > .env.local
+            {
+              echo "NEXT_PUBLIC_SUPABASE_URL=${{ secrets.SUPABASE_URL_DEV || secrets.SUPABASE_URL }}"
+              echo "NEXT_PUBLIC_SUPABASE_ANON_KEY=${{ secrets.SUPABASE_ANON_KEY_DEV || secrets.SUPABASE_ANON_KEY }}"
+            } >> .env.local
+            sed -i '/=$/d; /^$/d' .env.local
             npm run build
             exit 0
           fi
@@ -300,7 +347,7 @@ jobs:
             esac
           fi
           npm run build
-          if [ "$KIND" = fe ] && [ ! -f dist/assets/remoteEntry.js ]; then
+          if [ "$KIND" = fe ] && [ "${{ inputs.is_mfe }}" = "true" ] && [ ! -f dist/assets/remoteEntry.js ]; then
             echo "::error::dist/assets/remoteEntry.js missing — not an MFE build"
             exit 1
           fi
@@ -334,6 +381,20 @@ jobs:
             EXTRA='${{ inputs.extra_env }}'
             [ -n "$EXTRA" ] && printf '%s\n' "$EXTRA" >> "$OUT/app/.env"
             sed -i '/=$/d' "$OUT/app/.env"
+          elif [ "$KIND" = next ]; then
+            cp -r .next "$OUT/app/.next"
+            rm -rf "$OUT/app/.next/cache"
+            [ -d public ] && cp -r public "$OUT/app/public"
+            cp .env.local package.json package-lock.json "$OUT/app/"
+            for f in next.config.js next.config.mjs next.config.ts; do
+              if [ -f "$f" ]; then cp "$f" "$OUT/app/"; fi
+            done
+            # A standalone build carries its own node_modules; otherwise the
+            # host links shared prod deps by lockfile, as for backends.
+            if [ ! -f .next/standalone/server.js ]; then
+              LOCKHASH=$( { cat package-lock.json; node -p 'process.versions.node.split(".")[0]'; } | sha256sum | cut -c1-16)
+              echo "lockhash=$LOCKHASH" >> "$GITHUB_OUTPUT"
+            fi
           else
             cp -r dist/. "$OUT/app/"
           fi
@@ -374,30 +435,31 @@ jobs:
           HOST: ${{ secrets.PREVIEW_HOST }}
         run: |
           set -euo pipefail
-          FQDN="pr-$SLUG.$PREVIEW_DOMAIN"
           cf() { curl -fsS -H "Authorization: Bearer $CFT" -H "Content-Type: application/json" "$@"; }
           API=https://api.cloudflare.com/client/v4
-
-          APP=$(cf "$API/accounts/$CF_ACCOUNT_ID/access/apps?domain=$FQDN" | jq -r --arg d "$FQDN" '[.result[] | select(.domain == $d)][0].id // empty')
-          if [ -z "$APP" ]; then
-            cf -X POST "$API/accounts/$CF_ACCOUNT_ID/access/apps" --data "$(jq -n --arg d "$FQDN" --arg n "SO360 Preview – $SLUG" --arg p "$CF_ACCESS_POLICY_ID" \
-              '{name: $n, domain: $d, type: "self_hosted", session_duration: "720h", app_launcher_visible: false,
-                policies: [{id: $p, precedence: 1}]}')" >/dev/null
-            echo "Created Access app for $FQDN"
-          fi
-
           ZONE=$(cf "$API/zones?name=$PREVIEW_DOMAIN" | jq -r '.result[0].id')
           [ -n "$ZONE" ] && [ "$ZONE" != null ] || { echo "::error::zone $PREVIEW_DOMAIN not found"; exit 1; }
-          REC=$(cf "$API/zones/$ZONE/dns_records?type=A&name=$FQDN" | jq -r '.result[0].id // empty')
           IP=$(getent ahostsv4 "$HOST" | awk 'NR==1{print $1}')
           [ -n "$IP" ] || IP=$HOST
-          BODY=$(jq -n --arg n "$FQDN" --arg ip "$IP" --arg s "$SLUG" '{type: "A", name: $n, content: $ip, proxied: true, ttl: 1, comment: ("so360-preview " + $s)}')
-          if [ -z "$REC" ]; then
-            cf -X POST "$API/zones/$ZONE/dns_records" --data "$BODY" >/dev/null
-            echo "Created DNS $FQDN → $IP (proxied)"
-          else
-            cf -X PUT "$API/zones/$ZONE/dns_records/$REC" --data "$BODY" >/dev/null
-          fi
+
+          for FQDN in "pr-$SLUG.$PREVIEW_DOMAIN" ${APP_HOST:+"$APP_HOST"}; do
+            APP=$(cf "$API/accounts/$CF_ACCOUNT_ID/access/apps?domain=$FQDN" | jq -r --arg d "$FQDN" '[.result[] | select(.domain == $d)][0].id // empty')
+            if [ -z "$APP" ]; then
+              cf -X POST "$API/accounts/$CF_ACCOUNT_ID/access/apps" --data "$(jq -n --arg d "$FQDN" --arg n "SO360 Preview – $SLUG" --arg p "$CF_ACCESS_POLICY_ID" \
+                '{name: $n, domain: $d, type: "self_hosted", session_duration: "720h", app_launcher_visible: false,
+                  policies: [{id: $p, precedence: 1}]}')" >/dev/null
+              echo "Created Access app for $FQDN"
+            fi
+
+            REC=$(cf "$API/zones/$ZONE/dns_records?type=A&name=$FQDN" | jq -r '.result[0].id // empty')
+            BODY=$(jq -n --arg n "$FQDN" --arg ip "$IP" --arg s "$SLUG" '{type: "A", name: $n, content: $ip, proxied: true, ttl: 1, comment: ("so360-preview " + $s)}')
+            if [ -z "$REC" ]; then
+              cf -X POST "$API/zones/$ZONE/dns_records" --data "$BODY" >/dev/null
+              echo "Created DNS $FQDN → $IP (proxied)"
+            else
+              cf -X PUT "$API/zones/$ZONE/dns_records/$REC" --data "$BODY" >/dev/null
+            fi
+          done
 
       - name: Upload + activate
         env:
@@ -412,8 +474,14 @@ jobs:
           rsync -az --delete "$OUT/app/" "root@$HOST:$INC/$SLUG/$REPO/"
 
           EXTRA_ARGS=""
-          if [ "$KIND" = be ]; then
-            EXTRA_ARGS="--lockhash $LOCKHASH --health ${{ inputs.health_path }}"
+          HEALTH='${{ inputs.health_path }}'
+          [ -n "$HEALTH" ] && EXTRA_ARGS="--health '$HEALTH'"
+          [ "$KIND" = fe ] && [ "${{ inputs.is_mfe }}" != "true" ] && EXTRA_ARGS="$EXTRA_ARGS --spa"
+          [ -n "$APP_HOST" ] && EXTRA_ARGS="$EXTRA_ARGS --host '$APP_HOST'"
+          DEV_HOST='${{ inputs.dev_host }}'
+          [ -n "$DEV_HOST" ] && EXTRA_ARGS="$EXTRA_ARGS --dev-host '$DEV_HOST'"
+          if [ -n "$LOCKHASH" ] && { [ "$KIND" = be ] || [ "$KIND" = next ]; }; then
+            EXTRA_ARGS="$EXTRA_ARGS --lockhash $LOCKHASH"
             # Shared prod deps, uploaded once per lockfile.
             if ! ssh "root@$HOST" "preview-ctl deps-present --repo '$REPO' --lockhash '$LOCKHASH'"; then
               DEPS="$RUNNER_TEMP/preview-deps"
@@ -429,10 +497,12 @@ jobs:
             --kind '$KIND' --name '$NAME' --sha '${{ github.sha }}' $EXTRA_ARGS" | tee "$RUNNER_TEMP/preview-ctl.log"
 
           URL="https://pr-$SLUG.$PREVIEW_DOMAIN"
+          [ -n "$APP_HOST" ] && URL="https://$APP_HOST"
           {
             echo "### 🔍 Preview deployed"
             echo ""
             echo "**$URL** — \`$REPO\` @ \`${GITHUB_SHA:0:8}\` ($KIND \`$NAME\`)"
+            [ -n "$APP_HOST" ] && echo "" && echo "Shell/modules preview: https://pr-$SLUG.$PREVIEW_DOMAIN"
             echo ""
             echo "Everything this branch does not change is served from develop."
           } >> "$GITHUB_STEP_SUMMARY"
@@ -443,15 +513,19 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           BRANCH: ${{ github.ref_name }}
+          APP_HOST: ${{ needs.check.outputs.host }}
         run: |
           set -euo pipefail
           API="https://api.github.com/repos/${{ github.repository }}"
           H=(-H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json")
           PR=$(curl -fsS "${H[@]}" "$API/pulls?state=open&head=${{ github.repository_owner }}:$BRANCH" | jq -r '.[0].number // empty')
           [ -n "$PR" ] || { echo "No open PR for $BRANCH yet"; exit 0; }
-          MARK="<!-- so360-preview -->"
+          # One comment per host: an app host keeps its own comment.
+          MARK="<!-- so360-preview${APP_HOST:+ $APP_HOST} -->"
+          URL="https://pr-$SLUG.$PREVIEW_DOMAIN"
+          [ -n "$APP_HOST" ] && URL="https://$APP_HOST"
           BODY="$MARK
-          🔍 **Preview:** https://pr-$SLUG.$PREVIEW_DOMAIN
+          🔍 **Preview:** $URL
           Latest: \`${GITHUB_SHA:0:8}\` ($KIND \`$NAME\`). Unchanged modules come from develop. Behind Cloudflare Access."
           BODY=$(printf '%s' "$BODY" | sed 's/^ *//')
           CID=$(curl -fsS "${H[@]}" "$API/issues/$PR/comments?per_page=100" | jq -r --arg m "$MARK" '[.[] | select(.body | startswith($m))][0].id // empty')
