@@ -3,7 +3,7 @@ BDD specs — preview-ctl behaviour, executed for real against a throw-away root
 
 test_preview_contract.py pins the text of the guard rails; these specs run
 preview/bin/preview-ctl end to end (deploy / remove / sleep / wake / deps /
-prune / render) with pm2, curl, ss, nginx, systemctl, flock, install and sleep
+prune / render / cf-ensure / cf-remove) with pm2, curl, ss, nginx, systemctl, flock, install and sleep
 replaced by logging stubs, so every branch of the script is exercised without
 touching a real host.
 
@@ -65,8 +65,17 @@ esac
 exit 0
 ''',
     "curl": r'''
-echo "curl $*" >> "$STUB_STATE/calls.log"
+a="curl $*"; echo "${a//$'\n'/ }" >> "$STUB_STATE/calls.log"
 [ -e "$STUB_STATE/curl_fail" ] && exit 22
+# Cloudflare API fake (PREVIEW_CF_API=https://cf.test): -K - carries the token.
+case " $* " in *" -K - "*) cat >> "$STUB_STATE/curl_config" ;; esac
+url=""; for a in "$@"; do case "$a" in https://cf.test/*) url=$a ;; esac; done
+case " $* " in *" -X "*) exit 0 ;; esac
+case "$url" in
+  *"/zones?name="*)       echo '{"result":[{"id":"Z1"}]}' ;;
+  *"/access/apps?"*)      cat "$STUB_STATE/cf_apps" 2>/dev/null || echo '{"result":[]}' ;;
+  *"/dns_records?"*)      cat "$STUB_STATE/cf_dns" 2>/dev/null || echo '{"result":[]}' ;;
+esac
 exit 0
 ''',
     "ss": r'''
@@ -126,6 +135,8 @@ class PreviewCtlCase(unittest.TestCase):
             "DEV_ORIGIN": "10.0.0.1",
             "PREVIEW_ENV_FILE": os.path.join(self.tmp, "etc", "preview.env"),
             "PREVIEW_CI_ENV_FILE": os.path.join(self.tmp, "etc", "ci.env"),
+            "PREVIEW_CF_ENV_FILE": os.path.join(self.tmp, "etc", "cf.env"),
+            "PREVIEW_CF_API": "https://cf.test",
         })
         self.env = env
 
@@ -964,6 +975,84 @@ class GivenACorruptRegistry(PreviewCtlCase):
         self.write_registry("")
         self.deploy_fe()
         self.assertEqual(list(self.registry()["previews"]), [SLUG])
+
+
+# ── Cloudflare DNS + Access (token only on the host) ─────────────────────────
+MAIN_HOST = f"pr-{SLUG}.skyoffice360.com"
+APP_HOST = f"pr-{SLUG}--sso.skyoffice360.com"
+TOKEN = "stub-cf-token-123"
+
+
+class GivenCloudflareOnTheHost(PreviewCtlCase):
+    def setUp(self):
+        super().setUp()
+        path = self.env["PREVIEW_CF_ENV_FILE"]
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write(f"CF_API_TOKEN={TOKEN}\n")
+
+    def cf_calls(self):
+        return [c for c in self.calls() if "https://cf.test/" in c]
+
+    def ensure(self, *fqdns, ip="207.180.217.124"):
+        args = ["cf-ensure", "--slug", SLUG, "--ip", ip]
+        for f in fqdns:
+            args += ["--fqdn", f]
+        return self.ok(*args)
+
+    def test_when_the_host_has_no_token_file_then_it_refuses_and_calls_nothing(self):
+        os.remove(self.env["PREVIEW_CF_ENV_FILE"])
+        self.fails("cf-ensure", "--slug", SLUG, "--ip", "1.2.3.4", "--fqdn", MAIN_HOST, message="run preview-reconcile once")
+        self.assertEqual(self.cf_calls(), [])
+
+    def test_when_ensured_then_the_access_app_is_created_before_the_dns_record(self):
+        r = self.ensure(MAIN_HOST, APP_HOST)
+        writes = [c for c in self.cf_calls() if " -X " in c]
+        self.assertEqual(len(writes), 4)
+        for i, host in ((0, MAIN_HOST), (2, APP_HOST)):
+            self.assertIn("-X POST https://cf.test/accounts/", writes[i])
+            self.assertIn(f'"domain":"{host}"', writes[i].replace(" ", ""))
+            self.assertIn("-X POST https://cf.test/zones/Z1/dns_records", writes[i + 1])
+            self.assertIn(f'"so360-preview {SLUG}"', writes[i + 1])
+        self.assertIn(f"Created Access app for {APP_HOST}", r.stdout)
+
+    def test_when_ensured_then_the_token_goes_on_stdin_never_on_a_command_line(self):
+        self.ensure(MAIN_HOST)
+        self.assertFalse(any(TOKEN in c for c in self.calls()))
+        with open(os.path.join(self.state, "curl_config")) as f:
+            self.assertIn(f'header = "Authorization: Bearer {TOKEN}"', f.read())
+
+    def test_when_the_app_and_record_exist_then_only_the_record_is_updated(self):
+        self.mark("cf_apps", json.dumps({"result": [{"id": "A1", "domain": MAIN_HOST, "name": f"SO360 Preview – {SLUG}"}]}))
+        self.mark("cf_dns", json.dumps({"result": [{"id": "D1", "name": MAIN_HOST, "comment": f"so360-preview {SLUG}"}]}))
+        self.ensure(MAIN_HOST)
+        writes = [c for c in self.cf_calls() if " -X " in c]
+        self.assertEqual(len(writes), 1)
+        self.assertIn("-X PUT https://cf.test/zones/Z1/dns_records/D1", writes[0])
+
+    def test_when_a_host_is_not_a_preview_host_then_nothing_is_touched(self):
+        for bad in ("dev-api.skyoffice360.com", "pr-x.neonbee.app", "skyoffice360.com"):
+            self.fails("cf-ensure", "--slug", SLUG, "--ip", "1.2.3.4", "--fqdn", bad, message="invalid host")
+            self.fails("cf-remove", "--fqdn", bad, message="invalid host")
+        self.assertEqual(self.cf_calls(), [])
+
+    def test_when_the_ip_is_not_an_ipv4_address_then_it_refuses(self):
+        self.fails("cf-ensure", "--slug", SLUG, "--ip", "evil;rm", "--fqdn", MAIN_HOST, message="invalid --ip")
+        self.assertEqual(self.cf_calls(), [])
+
+    def test_when_removed_then_only_preview_records_go_dns_before_access(self):
+        self.mark("cf_dns", json.dumps({"result": [
+            {"id": "D1", "name": MAIN_HOST, "comment": f"so360-preview {SLUG}"},
+            {"id": "D2", "name": MAIN_HOST, "comment": "hand-made"}]}))
+        self.mark("cf_apps", json.dumps({"result": [
+            {"id": "A1", "domain": MAIN_HOST, "name": f"SO360 Preview – {SLUG}"},
+            {"id": "A2", "domain": MAIN_HOST, "name": "Someone else"}]}))
+        r = self.ok("cf-remove", "--fqdn", MAIN_HOST)
+        deletes = [c for c in self.cf_calls() if "-X DELETE" in c]
+        self.assertEqual(len(deletes), 2)
+        self.assertTrue(deletes[0].endswith("/zones/Z1/dns_records/D1"))
+        self.assertTrue(deletes[1].endswith("/access/apps/A1"))
+        self.assertIn(f"Deleted DNS {MAIN_HOST}", r.stdout)
 
 
 if __name__ == "__main__":

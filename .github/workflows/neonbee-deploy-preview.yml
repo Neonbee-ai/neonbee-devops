@@ -126,9 +126,6 @@ env:
   NPM_CONFIG_FETCH_RETRY_MINTIMEOUT: '2000'
   NPM_CONFIG_FETCH_RETRY_MAXTIMEOUT: '30000'
   PREVIEW_DOMAIN: skyoffice360.com
-  CF_ACCOUNT_ID: 96ba885239b5d682270e57908693b93e
-  # "Moonhive / NeonBee team" reusable Access policy.
-  CF_ACCESS_POLICY_ID: ef40640b-ee71-4b45-9202-cff5f7de4e39
 
 jobs:
   check:
@@ -197,11 +194,9 @@ jobs:
       - name: Preconditions
         env:
           HOST: ${{ secrets.PREVIEW_HOST }}
-          CFT: ${{ secrets.CF_PREVIEW_API_TOKEN }}
           DBURL: ${{ secrets.SUPABASE_URL_PREVIEW }}
         run: |
           [ -n "$HOST" ] || { echo "::error::PREVIEW_HOST secret is not set — previews are not provisioned yet"; exit 1; }
-          [ -n "$CFT" ]  || { echo "::error::CF_PREVIEW_API_TOKEN secret is not set"; exit 1; }
           if [ "$KIND" = be ] && [ -z "$DBURL" ]; then
             echo "::error title=No preview database::Backend previews need SUPABASE_URL_PREVIEW (a non-production database). They never fall back to the dev/prod database."
             exit 1
@@ -417,6 +412,7 @@ jobs:
           HOST: ${{ secrets.PREVIEW_HOST }}
           DEVO: ${{ secrets.PREVIEW_DEV_ORIGIN }}
           SBURL: ${{ secrets.SUPABASE_URL }}
+          CFT: ${{ secrets.CF_PREVIEW_API_TOKEN }}
         run: |
           set -euo pipefail
           # ── host config from secrets (keep identical in all preview workflows) ──
@@ -426,40 +422,23 @@ jobs:
           else
             printf 'DEV_ORIGIN=%s\nPROD_SUPABASE_HOST=%s\n' "$DEVO" "$PSH" | ssh "root@$HOST" 'install -d -m 700 /etc/so360-preview && umask 077 && cat > /etc/so360-preview/ci.env.tmp && mv /etc/so360-preview/ci.env.tmp /etc/so360-preview/ci.env'
           fi
+          if [ -n "${CFT:-}" ]; then
+            printf 'CF_API_TOKEN=%s\n' "$CFT" | ssh "root@$HOST" 'install -d -m 700 /etc/so360-preview && umask 077 && cat > /etc/so360-preview/cf.env.tmp && mv /etc/so360-preview/cf.env.tmp /etc/so360-preview/cf.env'
+          fi
           # ── end host config ──
 
-      # Access first, DNS second: the hostname never resolves ungated.
+      # Access first, DNS second (preview-ctl cf-ensure): the hostname never
+      # resolves ungated. The Cloudflare token stays on the preview host.
       - name: Ensure Cloudflare Access app + DNS
         env:
-          CFT: ${{ secrets.CF_PREVIEW_API_TOKEN }}
           HOST: ${{ secrets.PREVIEW_HOST }}
         run: |
           set -euo pipefail
-          cf() { curl -fsS -H "Authorization: Bearer $CFT" -H "Content-Type: application/json" "$@"; }
-          API=https://api.cloudflare.com/client/v4
-          ZONE=$(cf "$API/zones?name=$PREVIEW_DOMAIN" | jq -r '.result[0].id')
-          [ -n "$ZONE" ] && [ "$ZONE" != null ] || { echo "::error::zone $PREVIEW_DOMAIN not found"; exit 1; }
           IP=$(getent ahostsv4 "$HOST" | awk 'NR==1{print $1}')
           [ -n "$IP" ] || IP=$HOST
-
-          for FQDN in "pr-$SLUG.$PREVIEW_DOMAIN" ${APP_HOST:+"$APP_HOST"}; do
-            APP=$(cf "$API/accounts/$CF_ACCOUNT_ID/access/apps?domain=$FQDN" | jq -r --arg d "$FQDN" '[.result[] | select(.domain == $d)][0].id // empty')
-            if [ -z "$APP" ]; then
-              cf -X POST "$API/accounts/$CF_ACCOUNT_ID/access/apps" --data "$(jq -n --arg d "$FQDN" --arg n "SO360 Preview – $SLUG" --arg p "$CF_ACCESS_POLICY_ID" \
-                '{name: $n, domain: $d, type: "self_hosted", session_duration: "720h", app_launcher_visible: false,
-                  policies: [{id: $p, precedence: 1}]}')" >/dev/null
-              echo "Created Access app for $FQDN"
-            fi
-
-            REC=$(cf "$API/zones/$ZONE/dns_records?type=A&name=$FQDN" | jq -r '.result[0].id // empty')
-            BODY=$(jq -n --arg n "$FQDN" --arg ip "$IP" --arg s "$SLUG" '{type: "A", name: $n, content: $ip, proxied: true, ttl: 1, comment: ("so360-preview " + $s)}')
-            if [ -z "$REC" ]; then
-              cf -X POST "$API/zones/$ZONE/dns_records" --data "$BODY" >/dev/null
-              echo "Created DNS $FQDN → $IP (proxied)"
-            else
-              cf -X PUT "$API/zones/$ZONE/dns_records/$REC" --data "$BODY" >/dev/null
-            fi
-          done
+          FQDNS="--fqdn 'pr-$SLUG.$PREVIEW_DOMAIN'"
+          [ -n "$APP_HOST" ] && FQDNS="$FQDNS --fqdn '$APP_HOST'"
+          ssh "root@$HOST" "preview-ctl cf-ensure --slug '$SLUG' --ip '$IP' $FQDNS"
 
       - name: Upload + activate
         env:
