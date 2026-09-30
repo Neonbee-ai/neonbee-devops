@@ -7,7 +7,7 @@
 # is develop's (nginx fallback on the preview host — see preview/README.md).
 #
 #   check  → skip [no-preview] commits, compute the slug
-#   build  → unit tests + build only (the full gate stays on the PR)
+#   build  → build only (tests run in the pre-push gate and the PR gate)
 #   deploy → Access app, then DNS (never the other way round), rsync to the
 #            preview host, `preview-ctl deploy`, PR comment with the URL
 #
@@ -260,16 +260,6 @@ jobs:
               mkdir -p node_modules/@so360
               rm -rf node_modules/@so360/* && cp -r .ci-stubs/@so360/* node_modules/@so360/
             fi
-          fi
-
-      - name: Unit tests
-        env:
-          CI: 'true'
-        run: |
-          if jq -e '.scripts.test' package.json >/dev/null; then
-            npm test
-          else
-            echo "::warning::no test script — preview built without unit tests"
           fi
 
       - name: Build
