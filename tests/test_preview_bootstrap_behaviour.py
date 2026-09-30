@@ -11,6 +11,7 @@ Run: python3 -m unittest discover -s tests -p 'test_*.py' -v
 
 import os
 import platform
+import re
 import shutil
 import stat
 import subprocess
@@ -98,6 +99,8 @@ class BootstrapCase(unittest.TestCase):
         self.node_bin = self.p("node/bin")
         for d in (self.state, self.bin, self.node_bin):
             os.makedirs(d)
+        # Exists on every real host; the script installs into it, never creates it.
+        os.makedirs(self.p("usr/local/bin"))
         for name, body in STUBS.items():
             self.stub(self.bin, name, body)
         self.stub(self.node_bin, "node", "exit 0")
@@ -113,7 +116,9 @@ class BootstrapCase(unittest.TestCase):
             self.assertIn(host, text)
             text = text.replace(host, "@SANDBOX@/" + sub)
         for host in HOST_PATHS:
-            self.assertNotIn(host, text, "host path survived the sandbox rewrite")
+            # Every rewrite leaves "@SANDBOX@/<host path>", so look for a bare one.
+            self.assertNotRegex(text, r"(?<!@SANDBOX@)" + re.escape(host),
+                                "host path survived the sandbox rewrite")
         text = text.replace("@SANDBOX@", self.tmp)
         self.script = os.path.join(box, "bootstrap-host.sh")
         with open(self.script, "w", encoding="utf-8") as f:
