@@ -1,0 +1,97 @@
+# =============================================================================
+# Neonbee — Reusable feature-branch PREVIEW teardown
+# =============================================================================
+# Called from a repo's `on: delete` trigger. Removes that repo's component from
+# the branch preview; when it was the last component the whole preview goes,
+# and so do its Cloudflare DNS record and Access app (DNS first, then Access —
+# the reverse of creation, so the hostname never resolves ungated).
+#
+# Caller:
+#   on:
+#     delete:
+#   jobs:
+#     preview-teardown:
+#       if: github.event.ref_type == 'branch' && (startsWith(github.event.ref, 'feat/') || startsWith(github.event.ref, 'fix/'))
+#       uses: Neonbee-ai/neonbee-devops/.github/workflows/neonbee-preview-teardown.yml@main
+#       secrets: inherit
+#
+# The nightly preview-reconcile.yml catches anything a missed delete leaves.
+# =============================================================================
+
+name: Preview teardown (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      branch:
+        description: 'Deleted branch (defaults to github.event.ref)'
+        required: false
+        type: string
+        default: ''
+    secrets:
+      PREVIEW_HOST:         { required: false }
+      PREVIEW_SSH_KEY:      { required: false }
+      CF_PREVIEW_API_TOKEN: { required: false }
+
+env:
+  PREVIEW_DOMAIN: skyoffice360.com
+  CF_ACCOUNT_ID: 96ba885239b5d682270e57908693b93e
+
+jobs:
+  teardown:
+    runs-on: [self-hosted, contabo, Linux]
+    timeout-minutes: 10
+    steps:
+      - name: Slug
+        id: s
+        env:
+          BRANCH: ${{ inputs.branch || github.event.ref }}
+        run: |
+          set -euo pipefail
+          case "$BRANCH" in feat/*|fix/*) ;; *) echo "run=false" >> "$GITHUB_OUTPUT"; exit 0 ;; esac
+          # ── slug (keep identical to neonbee-deploy-preview.yml) ──
+          slug=$(printf '%s' "$BRANCH" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//')
+          if [ ${#slug} -gt 50 ]; then
+            h=$(printf '%s' "$BRANCH" | sha1sum | cut -c1-6)
+            slug="$(printf '%s' "$slug" | cut -c1-43 | sed -E 's/-+$//')-$h"
+          fi
+          echo "slug=$slug" >> "$GITHUB_OUTPUT"
+          echo "run=true" >> "$GITHUB_OUTPUT"
+
+      - name: Remove from preview host
+        id: rm
+        if: steps.s.outputs.run == 'true'
+        env:
+          KEY: ${{ secrets.PREVIEW_SSH_KEY }}
+          HOST: ${{ secrets.PREVIEW_HOST }}
+          SLUG: ${{ steps.s.outputs.slug }}
+          REPO: ${{ github.event.repository.name }}
+        run: |
+          set -euo pipefail
+          [ -n "$HOST" ] || { echo "::notice::PREVIEW_HOST not set — nothing to tear down"; echo "removed=0" >> "$GITHUB_OUTPUT"; exit 0; }
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          eval "$(ssh-agent -s)"
+          echo "$KEY" | ssh-add -
+          ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts 2>/dev/null
+          OUT=$(ssh "root@$HOST" "preview-ctl remove --slug '$SLUG' --repo '$REPO'")
+          echo "$OUT"
+          ssh-agent -k >/dev/null
+          if grep -qx 'REMOVED_PREVIEW=1' <<<"$OUT"; then echo "removed=1" >> "$GITHUB_OUTPUT"; else echo "removed=0" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Remove Cloudflare DNS + Access app
+        if: steps.rm.outputs.removed == '1'
+        env:
+          CFT: ${{ secrets.CF_PREVIEW_API_TOKEN }}
+          SLUG: ${{ steps.s.outputs.slug }}
+        run: |
+          set -euo pipefail
+          FQDN="pr-$SLUG.$PREVIEW_DOMAIN"
+          cf() { curl -fsS -H "Authorization: Bearer $CFT" -H "Content-Type: application/json" "$@"; }
+          API=https://api.cloudflare.com/client/v4
+          ZONE=$(cf "$API/zones?name=$PREVIEW_DOMAIN" | jq -r '.result[0].id')
+          for id in $(cf "$API/zones/$ZONE/dns_records?name=$FQDN" | jq -r '.result[] | select((.comment // "") | startswith("so360-preview")) | .id'); do
+            cf -X DELETE "$API/zones/$ZONE/dns_records/$id" >/dev/null && echo "Deleted DNS $FQDN"
+          done
+          for id in $(cf "$API/accounts/$CF_ACCOUNT_ID/access/apps?domain=$FQDN" | jq -r --arg d "$FQDN" '.result[] | select(.domain == $d and (.name | startswith("SO360 Preview"))) | .id'); do
+            cf -X DELETE "$API/accounts/$CF_ACCOUNT_ID/access/apps/$id" >/dev/null && echo "Deleted Access app $FQDN"
+          done

@@ -1,0 +1,440 @@
+# =============================================================================
+# Neonbee — Reusable feature-branch PREVIEW deploy
+# =============================================================================
+# A push to feat/** or fix/** builds the repo exactly like the dev build and
+# drops it into the branch's preview at https://pr-<slug>.skyoffice360.com.
+# Only the repos a branch touches are deployed; everything else in the preview
+# is develop's (nginx fallback on the preview host — see preview/README.md).
+#
+#   check  → skip [no-preview] commits, compute the slug
+#   build  → unit tests + build only (the full gate stays on the PR)
+#   deploy → Access app, then DNS (never the other way round), rsync to the
+#            preview host, `preview-ctl deploy`, PR comment with the URL
+#
+# Never touches the Dev VM or any prod host: the only deploy target is
+# the PREVIEW_HOST secret, and preview backends refuse the production DB.
+#
+# Caller (in the repo's deploy.yml, alongside the develop/qa deploy job):
+#
+#   on:
+#     push:
+#       branches: [develop, qa, 'feat/**', 'fix/**']
+#   jobs:
+#     preview:
+#       if: startsWith(github.ref, 'refs/heads/feat/') || startsWith(github.ref, 'refs/heads/fix/')
+#       permissions: { contents: read, pull-requests: write }
+#       uses: Neonbee-ai/neonbee-devops/.github/workflows/neonbee-deploy-preview.yml@main
+#       with:
+#         kind: fe                 # fe | shell | be
+#         name: crm                # /cdn/<name>/ or /api/<name>/ path segment
+#         vite_base_url: https://dev-cdn.skyoffice360.com/crm/
+#         vite_env: ${{ ... same block as vite_env_dev ... }}
+#       secrets: inherit
+# =============================================================================
+
+name: Deploy preview (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      kind:
+        description: 'fe (an MFE served under /cdn/<name>/), shell (the host shell), be (a NestJS backend under /api/<name>/)'
+        required: true
+        type: string
+      name:
+        description: 'Path segment: the dev-cdn folder for fe, the dev-api prefix for be, "shell" for the shell'
+        required: true
+        type: string
+      node_version:
+        required: false
+        type: string
+        default: '22'
+      # ── fe / shell ──
+      vite_base_url:
+        description: 'The DEV base URL (the preview host rewrites dev hostnames at serve time)'
+        required: false
+        type: string
+        default: ''
+      vite_core_api:
+        required: false
+        type: string
+        default: 'https://dev-api.skyoffice360.com/core'
+      vite_env:
+        description: 'Extra VITE_* lines — pass the same block as vite_env_dev'
+        required: false
+        type: string
+        default: ''
+      is_shell:
+        required: false
+        type: boolean
+        default: false
+      needs_shell_packages:
+        required: false
+        type: boolean
+        default: false
+      # ── be ──
+      health_path:
+        required: false
+        type: string
+        default: '/health'
+      extra_env:
+        description: 'Extra KEY=value lines for a preview backend .env'
+        required: false
+        type: string
+        default: ''
+    secrets:
+      PREVIEW_HOST:            { required: false }
+      PREVIEW_SSH_KEY:         { required: false }
+      CF_PREVIEW_API_TOKEN:    { required: false }
+      PAT_TOKEN:               { required: false }
+      SUPABASE_URL_DEV:        { required: false }
+      SUPABASE_ANON_KEY_DEV:   { required: false }
+      SUPABASE_URL:            { required: false }
+      SUPABASE_ANON_KEY:       { required: false }
+      # Backend previews only — deliberately NO fallback to the prod/dev DB.
+      SUPABASE_URL_PREVIEW:         { required: false }
+      SUPABASE_ANON_KEY_PREVIEW:    { required: false }
+      SUPABASE_SERVICE_KEY_PREVIEW: { required: false }
+      JWT_SECRET_DEV:          { required: false }
+      JWT_SECRET:              { required: false }
+
+env:
+  ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: true
+  NPM_CONFIG_FETCH_RETRIES: '5'
+  NPM_CONFIG_FETCH_RETRY_MINTIMEOUT: '2000'
+  NPM_CONFIG_FETCH_RETRY_MAXTIMEOUT: '30000'
+  PREVIEW_DOMAIN: skyoffice360.com
+  CF_ACCOUNT_ID: 96ba885239b5d682270e57908693b93e
+  # "Moonhive / NeonBee team" reusable Access policy.
+  CF_ACCESS_POLICY_ID: ef40640b-ee71-4b45-9202-cff5f7de4e39
+
+jobs:
+  check:
+    runs-on: [self-hosted, contabo, Linux]
+    outputs:
+      run:  ${{ steps.c.outputs.run }}
+      slug: ${{ steps.c.outputs.slug }}
+    steps:
+      - id: c
+        env:
+          BRANCH: ${{ github.ref_name }}
+          MSG: ${{ github.event.head_commit.message }}
+          KIND: ${{ inputs.kind }}
+          NAME: ${{ inputs.name }}
+        run: |
+          set -euo pipefail
+          case "$BRANCH" in
+            feat/*|fix/*) ;;
+            *) echo "::notice::$BRANCH is not a feat/ or fix/ branch — no preview"; echo "run=false" >> "$GITHUB_OUTPUT"; exit 0 ;;
+          esac
+          if printf '%s' "$MSG" | grep -qiF '[no-preview]'; then
+            echo "::notice::[no-preview] in the commit message — skipping"
+            echo "run=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          case "$KIND" in fe|shell|be) ;; *) echo "::error::kind must be fe, shell or be"; exit 1 ;; esac
+          [[ "$NAME" =~ ^[a-z0-9][a-z0-9-]{0,40}$ ]] || { echo "::error::invalid name '$NAME'"; exit 1; }
+
+          # ── slug (keep identical to neonbee-preview-teardown.yml) ──
+          slug=$(printf '%s' "$BRANCH" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//')
+          if [ ${#slug} -gt 50 ]; then
+            h=$(printf '%s' "$BRANCH" | sha1sum | cut -c1-6)
+            slug="$(printf '%s' "$slug" | cut -c1-43 | sed -E 's/-+$//')-$h"
+          fi
+          echo "slug=$slug" >> "$GITHUB_OUTPUT"
+          echo "run=true"   >> "$GITHUB_OUTPUT"
+          echo "Preview: https://pr-$slug.$PREVIEW_DOMAIN"
+
+  build-deploy:
+    needs: [check]
+    if: needs.check.outputs.run == 'true'
+    runs-on: [self-hosted, contabo, Linux]
+    timeout-minutes: 25
+    # Latest push wins: a newer push to the same branch cancels this one.
+    concurrency:
+      group: neonbee-preview-${{ github.repository }}-${{ github.ref_name }}
+      cancel-in-progress: true
+    env:
+      SLUG: ${{ needs.check.outputs.slug }}
+      KIND: ${{ inputs.kind }}
+      NAME: ${{ inputs.name }}
+      REPO: ${{ github.event.repository.name }}
+    steps:
+      - name: Preconditions
+        env:
+          HOST: ${{ secrets.PREVIEW_HOST }}
+          CFT: ${{ secrets.CF_PREVIEW_API_TOKEN }}
+          DBURL: ${{ secrets.SUPABASE_URL_PREVIEW }}
+        run: |
+          [ -n "$HOST" ] || { echo "::error::PREVIEW_HOST secret is not set — previews are not provisioned yet"; exit 1; }
+          [ -n "$CFT" ]  || { echo "::error::CF_PREVIEW_API_TOKEN secret is not set"; exit 1; }
+          if [ "$KIND" = be ] && [ -z "$DBURL" ]; then
+            echo "::error title=No preview database::Backend previews need SUPABASE_URL_PREVIEW (a non-production database). They never fall back to the dev/prod database."
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4.3.1
+
+      - uses: actions/setup-node@v4.4.0
+        with:
+          node-version: ${{ inputs.node_version }}
+
+      - name: Isolate npm cache per job
+        shell: bash
+        run: echo "NPM_CONFIG_CACHE=$RUNNER_TEMP/npm-cache" >> "$GITHUB_ENV"
+
+      - uses: actions/cache@v4.3.0
+        with:
+          path: ${{ runner.temp }}/npm-cache
+          key: npm-v2-${{ runner.os }}-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: npm-v2-${{ runner.os }}-
+
+      - name: Configure private package registry
+        run: |
+          npm config set @so360:registry https://npm.pkg.github.com --global
+          npm config set //npm.pkg.github.com/:_authToken "${PAT_TOKEN}" --global
+        env:
+          PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
+
+      # Same install as the dev build, including the real @so360 packages for
+      # remotes (see neonbee-deploy-vite-mfe.yml for why stubs are not enough).
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          RUNNER_PARENT="$(dirname "$(dirname "$GITHUB_WORKSPACE")")"
+          STALE_PKG="$RUNNER_PARENT/so360-shell-fe"
+          [ -L "$STALE_PKG" ] && rm -f "$STALE_PKG"
+          if [ "$KIND" != be ] && [ "${{ inputs.needs_shell_packages }}" = "true" ] && [ "${{ inputs.is_shell }}" != "true" ]; then
+            rm -rf _shell-fe
+            if git clone --depth 1 --filter=blob:none --sparse --branch develop \
+                 "https://x-access-token:${{ secrets.PAT_TOKEN }}@github.com/Neonbee-ai/so360-shell-fe.git" \
+                 _shell-fe 2>/dev/null; then
+              (cd _shell-fe && git sparse-checkout set packages)
+              for p in shell-context design-system event-bus formatters; do
+                if [ -d "_shell-fe/packages/$p" ]; then
+                  if ! ( cd "_shell-fe/packages/$p" \
+                         && npm install --legacy-peer-deps --include=dev --no-audit --no-fund >/dev/null 2>&1 \
+                         && npm run build ); then
+                    echo "::warning::could not rebuild @so360/$p — restoring its committed dist"
+                    ( cd _shell-fe && git checkout -- "packages/$p/dist" ) 2>/dev/null || true
+                  fi
+                fi
+              done
+            else
+              rm -rf _shell-fe
+              echo "::warning title=No PAT_TOKEN::could not clone so360-shell-fe — using .ci-stubs for @so360/*"
+            fi
+          fi
+          npm_ci_retry() {
+            local attempt rc
+            for attempt in 1 2 3; do
+              rm -rf node_modules
+              npm ci --legacy-peer-deps --include=dev && return 0
+              rc=$?
+              if [ $attempt -lt 3 ]; then
+                echo "::warning::npm ci failed (exit $rc) on attempt $attempt — retrying after cache clean"
+                npm cache clean --force >/dev/null 2>&1 || true
+                sleep $((attempt * 15))
+              fi
+            done
+            echo "::error::npm ci failed on every attempt"
+            return 1
+          }
+          npm_ci_retry
+          if [ "$KIND" != be ]; then
+            if [ -d _shell-fe ] && [ "${{ inputs.is_shell }}" != "true" ]; then
+              mkdir -p node_modules/@so360
+              for p in shell-context design-system event-bus formatters cross-link theme; do
+                if [ -d "_shell-fe/packages/$p" ]; then
+                  rm -rf "node_modules/@so360/$p"
+                  cp -r "_shell-fe/packages/$p" "node_modules/@so360/$p"
+                fi
+              done
+            elif [ "${{ inputs.is_shell }}" = "true" ]; then
+              for p in shell-context design-system event-bus formatters; do
+                if ! (cd "packages/$p" && npm run build); then
+                  echo "::warning::could not build @so360/$p — restoring its committed dist"
+                  git checkout -- "packages/$p/dist" 2>/dev/null || true
+                fi
+              done
+            elif [ -d .ci-stubs/@so360 ]; then
+              mkdir -p node_modules/@so360
+              rm -rf node_modules/@so360/* && cp -r .ci-stubs/@so360/* node_modules/@so360/
+            fi
+          fi
+
+      - name: Unit tests
+        env:
+          CI: 'true'
+        run: |
+          if jq -e '.scripts.test' package.json >/dev/null; then
+            npm test
+          else
+            echo "::warning::no test script — preview built without unit tests"
+          fi
+
+      - name: Build
+        run: |
+          set -euo pipefail
+          if [ "$KIND" = be ]; then
+            npm run build
+            exit 0
+          fi
+          # Identical to the dev build: dev hostnames are baked in and the
+          # preview host rewrites them to pr-<slug> at serve time.
+          printf '%s\n' \
+            "VITE_BASE_URL=${{ inputs.vite_base_url }}" \
+            "VITE_SO360_CORE_API=${{ inputs.vite_core_api }}" \
+            "VITE_SUPABASE_URL=${{ secrets.SUPABASE_URL_DEV || secrets.SUPABASE_URL }}" \
+            "VITE_SUPABASE_ANON_KEY=${{ secrets.SUPABASE_ANON_KEY_DEV || secrets.SUPABASE_ANON_KEY }}" \
+            "VITE_ENVIRONMENT=cloud" \
+            > .env
+          EXTRA_VITE='${{ inputs.vite_env }}'
+          [ -n "$EXTRA_VITE" ] && printf '%s\n' "$EXTRA_VITE" >> .env
+          sed -i '/^$/d' .env
+          [ -f .env.production ] && sed -i '/neonbee\.app/d' .env.production
+          cp .env .env.production.local
+          npm run build
+          if [ "$KIND" = fe ] && [ ! -f dist/assets/remoteEntry.js ]; then
+            echo "::error::dist/assets/remoteEntry.js missing — not an MFE build"
+            exit 1
+          fi
+
+      - name: Package
+        id: pkg
+        run: |
+          set -euo pipefail
+          OUT="$RUNNER_TEMP/preview-out"
+          rm -rf "$OUT" && mkdir -p "$OUT/app"
+          if [ "$KIND" = be ]; then
+            cp -r dist "$OUT/app/dist"
+            cp package.json package-lock.json "$OUT/app/"
+            LOCKHASH=$( { cat package-lock.json; node -p 'process.versions.node.split(".")[0]'; } | sha256sum | cut -c1-16)
+            echo "lockhash=$LOCKHASH" >> "$GITHUB_OUTPUT"
+            {
+              echo "NODE_ENV=development"
+              echo "RELEASE_SHA=${{ github.sha }}"
+              echo "SUPABASE_URL=${{ secrets.SUPABASE_URL_PREVIEW }}"
+              echo "SUPABASE_KEY=${{ secrets.SUPABASE_ANON_KEY_PREVIEW }}"
+              echo "SUPABASE_ANON_KEY=${{ secrets.SUPABASE_ANON_KEY_PREVIEW }}"
+              echo "SUPABASE_SERVICE_KEY=${{ secrets.SUPABASE_SERVICE_KEY_PREVIEW }}"
+              echo "SUPABASE_SERVICE_ROLE_KEY=${{ secrets.SUPABASE_SERVICE_KEY_PREVIEW }}"
+              # Must match dev core, which issues the tokens the preview receives.
+              echo "JWT_SECRET=${{ secrets.JWT_SECRET_DEV || secrets.JWT_SECRET }}"
+              echo "CORS_ORIGINS=https://pr-$SLUG.$PREVIEW_DOMAIN"
+              # No SES / notification / email keys are passed on purpose:
+              # outbound mail from a preview fails closed instead of reaching
+              # real inboxes.
+            } > "$OUT/app/.env"
+            EXTRA='${{ inputs.extra_env }}'
+            [ -n "$EXTRA" ] && printf '%s\n' "$EXTRA" >> "$OUT/app/.env"
+            sed -i '/=$/d' "$OUT/app/.env"
+          else
+            cp -r dist/. "$OUT/app/"
+          fi
+          echo "out=$OUT" >> "$GITHUB_OUTPUT"
+
+      - name: Setup SSH
+        env:
+          KEY: ${{ secrets.PREVIEW_SSH_KEY }}
+          HOST: ${{ secrets.PREVIEW_HOST }}
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          eval "$(ssh-agent -s)"
+          echo "$KEY" | ssh-add -
+          echo "SSH_AUTH_SOCK=$SSH_AUTH_SOCK" >> "$GITHUB_ENV"
+          echo "SSH_AGENT_PID=$SSH_AGENT_PID" >> "$GITHUB_ENV"
+          ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts 2>/dev/null
+
+      # Access first, DNS second: the hostname never resolves ungated.
+      - name: Ensure Cloudflare Access app + DNS
+        env:
+          CFT: ${{ secrets.CF_PREVIEW_API_TOKEN }}
+          HOST: ${{ secrets.PREVIEW_HOST }}
+        run: |
+          set -euo pipefail
+          FQDN="pr-$SLUG.$PREVIEW_DOMAIN"
+          cf() { curl -fsS -H "Authorization: Bearer $CFT" -H "Content-Type: application/json" "$@"; }
+          API=https://api.cloudflare.com/client/v4
+
+          APP=$(cf "$API/accounts/$CF_ACCOUNT_ID/access/apps?domain=$FQDN" | jq -r --arg d "$FQDN" '[.result[] | select(.domain == $d)][0].id // empty')
+          if [ -z "$APP" ]; then
+            cf -X POST "$API/accounts/$CF_ACCOUNT_ID/access/apps" --data "$(jq -n --arg d "$FQDN" --arg n "SO360 Preview – $SLUG" --arg p "$CF_ACCESS_POLICY_ID" \
+              '{name: $n, domain: $d, type: "self_hosted", session_duration: "24h", app_launcher_visible: false,
+                policies: [{id: $p, precedence: 1}]}')" >/dev/null
+            echo "Created Access app for $FQDN"
+          fi
+
+          ZONE=$(cf "$API/zones?name=$PREVIEW_DOMAIN" | jq -r '.result[0].id')
+          [ -n "$ZONE" ] && [ "$ZONE" != null ] || { echo "::error::zone $PREVIEW_DOMAIN not found"; exit 1; }
+          REC=$(cf "$API/zones/$ZONE/dns_records?type=A&name=$FQDN" | jq -r '.result[0].id // empty')
+          IP=$(getent ahostsv4 "$HOST" | awk 'NR==1{print $1}')
+          [ -n "$IP" ] || IP=$HOST
+          BODY=$(jq -n --arg n "$FQDN" --arg ip "$IP" --arg s "$SLUG" '{type: "A", name: $n, content: $ip, proxied: true, ttl: 1, comment: ("so360-preview " + $s)}')
+          if [ -z "$REC" ]; then
+            cf -X POST "$API/zones/$ZONE/dns_records" --data "$BODY" >/dev/null
+            echo "Created DNS $FQDN → $IP (proxied)"
+          else
+            cf -X PUT "$API/zones/$ZONE/dns_records/$REC" --data "$BODY" >/dev/null
+          fi
+
+      - name: Upload + activate
+        env:
+          HOST: ${{ secrets.PREVIEW_HOST }}
+          OUT: ${{ steps.pkg.outputs.out }}
+          LOCKHASH: ${{ steps.pkg.outputs.lockhash }}
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          INC="/srv/previews/_incoming"
+          ssh "root@$HOST" "rm -rf '$INC/$SLUG/$REPO' && mkdir -p '$INC/$SLUG/$REPO'"
+          rsync -az --delete "$OUT/app/" "root@$HOST:$INC/$SLUG/$REPO/"
+
+          EXTRA_ARGS=""
+          if [ "$KIND" = be ]; then
+            EXTRA_ARGS="--lockhash $LOCKHASH --health ${{ inputs.health_path }}"
+            # Shared prod deps, uploaded once per lockfile.
+            if ! ssh "root@$HOST" "preview-ctl deps-present --repo '$REPO' --lockhash '$LOCKHASH'"; then
+              DEPS="$RUNNER_TEMP/preview-deps"
+              rm -rf "$DEPS" && mkdir -p "$DEPS"
+              cp package.json package-lock.json "$DEPS/"
+              (cd "$DEPS" && npm ci --omit=dev --legacy-peer-deps)
+              ssh "root@$HOST" "mkdir -p '$INC/_deps/$REPO/$LOCKHASH'"
+              rsync -az --delete "$DEPS/node_modules" "root@$HOST:$INC/_deps/$REPO/$LOCKHASH/"
+            fi
+          fi
+
+          ssh "root@$HOST" "preview-ctl deploy --slug '$SLUG' --branch '$BRANCH' --repo '$REPO' \
+            --kind '$KIND' --name '$NAME' --sha '${{ github.sha }}' $EXTRA_ARGS" | tee "$RUNNER_TEMP/preview-ctl.log"
+
+          URL="https://pr-$SLUG.$PREVIEW_DOMAIN"
+          {
+            echo "### 🔍 Preview deployed"
+            echo ""
+            echo "**$URL** — \`$REPO\` @ \`${GITHUB_SHA:0:8}\` ($KIND \`$NAME\`)"
+            echo ""
+            echo "Everything this branch does not change is served from develop."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Comment on the PR
+        if: success()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          API="https://api.github.com/repos/${{ github.repository }}"
+          H=(-H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json")
+          PR=$(curl -fsS "${H[@]}" "$API/pulls?state=open&head=${{ github.repository_owner }}:$BRANCH" | jq -r '.[0].number // empty')
+          [ -n "$PR" ] || { echo "No open PR for $BRANCH yet"; exit 0; }
+          MARK="<!-- so360-preview -->"
+          BODY="$MARK
+          🔍 **Preview:** https://pr-$SLUG.$PREVIEW_DOMAIN
+          Latest: \`${GITHUB_SHA:0:8}\` ($KIND \`$NAME\`). Unchanged modules come from develop. Behind Cloudflare Access."
+          BODY=$(printf '%s' "$BODY" | sed 's/^ *//')
+          CID=$(curl -fsS "${H[@]}" "$API/issues/$PR/comments?per_page=100" | jq -r --arg m "$MARK" '[.[] | select(.body | startswith($m))][0].id // empty')
+          if [ -n "$CID" ]; then
+            curl -fsS -X PATCH "${H[@]}" "$API/issues/comments/$CID" -d "$(jq -n --arg b "$BODY" '{body: $b}')" >/dev/null
+          else
+            curl -fsS -X POST "${H[@]}" "$API/issues/$PR/comments" -d "$(jq -n --arg b "$BODY" '{body: $b}')" >/dev/null
+          fi

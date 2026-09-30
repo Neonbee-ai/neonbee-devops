@@ -1,0 +1,421 @@
+#!/usr/bin/env bash
+# =============================================================================
+# preview-ctl — the ONLY thing that changes feature-branch preview state on the
+# preview host. Every command is idempotent and runs under one flock, so a
+# deploy, a teardown and the nightly reconciler can never interleave.
+#
+#   registry.json   single source of truth (what exists, ports, last push)
+#   <slug>/shell/   the preview's host-shell build      (if the branch has one)
+#   <slug>/cdn/<n>/ the preview's MFE builds            (per changed MFE)
+#   <slug>/be/<n>/  the preview's backend dist + .env   (per changed backend)
+#   _deps/<repo>/<lockhash>/node_modules   shared prod deps, symlinked in
+#
+# Anything a preview does NOT contain falls back to develop (dev-cdn / dev-api /
+# dev-dashboard) through the generated nginx config — see render_nginx.
+#
+# Commands:
+#   deploy   --slug S --branch B --repo R --kind fe|shell|be --name N --sha SHA
+#            [--health /path] [--lockhash H]
+#   remove   --slug S [--repo R]        (prints REMOVED_PREVIEW=0|1 last)
+#   sleep    --slug S                   (stop backends, keep files)
+#   wake     --slug S
+#   list                                (registry JSON)
+#   deps-present --repo R --lockhash H  (exit 0 if shared deps exist)
+#   prune-deps                          (drop unreferenced _deps)
+#   render                              (regenerate nginx + reload)
+# =============================================================================
+set -euo pipefail
+
+[ -f /etc/so360-preview/preview.env ] && . /etc/so360-preview/preview.env
+
+ROOT=${PREVIEW_ROOT:-/srv/previews}
+REG="$ROOT/registry.json"
+INCOMING="$ROOT/_incoming"
+DEPS="$ROOT/_deps"
+DOMAIN=${PREVIEW_DOMAIN:-skyoffice360.com}
+NGINX_OUT=${PREVIEW_NGINX_OUT:-/etc/nginx/conf.d/so360-previews.conf}
+SSL_CERT=${PREVIEW_SSL_CERT:-/etc/ssl/cloudflare/skyoffice360.com.crt}
+SSL_KEY=${PREVIEW_SSL_KEY:-/etc/ssl/cloudflare/skyoffice360.com.key}
+PORT_MIN=${PREVIEW_PORT_MIN:-7100}
+PORT_MAX=${PREVIEW_PORT_MAX:-7999}
+PM2_MEM=${PREVIEW_PM2_MEM:-300M}
+
+die() { echo "preview-ctl: $*" >&2; exit 1; }
+now() { date -u +%s; }
+
+valid_slug() { [[ "$1" =~ ^[a-z0-9]([a-z0-9-]{0,48}[a-z0-9])?$ ]] || die "invalid slug '$1'"; }
+valid_name() { [[ "$1" =~ ^[a-z0-9][a-z0-9-]{0,40}$ ]] || die "invalid name '$1'"; }
+valid_repo() { [[ "$1" =~ ^[A-Za-z0-9._-]{1,100}$ ]] || die "invalid repo '$1'"; }
+valid_hash() { [[ "$1" =~ ^[a-f0-9]{8,64}$ ]] || die "invalid lockhash '$1'"; }
+
+lock() {
+  mkdir -p "$ROOT" "$INCOMING" "$DEPS"
+  exec 9>"$ROOT/.lock"
+  flock -w 600 9 || die "could not take the preview lock within 10 minutes"
+}
+
+reg_read() { if [ -s "$REG" ]; then cat "$REG"; else echo '{"previews":{}}'; fi; }
+
+# Validate before replacing: a truncated registry would orphan every preview.
+reg_write() {
+  local tmp; tmp=$(mktemp "$ROOT/.registry.XXXXXX")
+  cat >"$tmp"
+  jq -e '.previews | type == "object"' "$tmp" >/dev/null || { rm -f "$tmp"; die "refusing to write a malformed registry"; }
+  mv "$tmp" "$REG"
+}
+
+# jq filter applied to the registry in place.
+reg_apply() { reg_read | jq "$@" | reg_write; }
+
+pm2_name() { echo "pv-$1-$2"; }
+
+port_in_use() { ss -Hltn "sport = :$1" 2>/dev/null | grep -q .; }
+
+alloc_port() {
+  local slug=$1 repo=$2 existing used p
+  existing=$(reg_read | jq -r --arg s "$slug" --arg r "$repo" '.previews[$s].components[$r].port // empty')
+  if [ -n "$existing" ]; then echo "$existing"; return; fi
+  used=$(reg_read | jq -r '[.previews[].components[] | .port // empty] | .[]')
+  for ((p = PORT_MIN; p <= PORT_MAX; p++)); do
+    grep -qx "$p" <<<"$used" && continue
+    port_in_use "$p" && continue
+    echo "$p"; return
+  done
+  die "no free preview port in $PORT_MIN-$PORT_MAX"
+}
+
+# Swap a freshly rsynced directory into place so nginx never serves half a build.
+swap_in() {
+  local src=$1 dst=$2
+  [ -d "$src" ] || die "nothing uploaded at $src"
+  mkdir -p "$(dirname "$dst")"
+  rm -rf "$dst.old"
+  [ -e "$dst" ] && mv "$dst" "$dst.old"
+  mv "$src" "$dst"
+  rm -rf "$dst.old"
+}
+
+# ── Backend guard rails ──────────────────────────────────────────────────────
+# A preview backend runs branch code nobody has reviewed yet. It must never
+# point at the production database and must never run schedulers or queue
+# consumers that would compete with dev/prod for the same jobs.
+harden_env() {
+  local env=$1 port=$2
+  [ -f "$env" ] || die "backend upload has no .env"
+  if [ -n "${PROD_SUPABASE_HOST:-}" ] && grep -qF "$PROD_SUPABASE_HOST" "$env"; then
+    die "backend .env references the production database ($PROD_SUPABASE_HOST) — previews need a non-prod database"
+  fi
+  sed -i -E '/^(PORT|SO360_PREVIEW|EVENT_WORKERS_DISABLED|SIGNAL_EVENT_CONSUMER_DISABLED|SIGNAL_RULES_SWEEP)=/d' "$env"
+  {
+    echo "PORT=$port"
+    echo "SO360_PREVIEW=true"
+    echo "EVENT_WORKERS_DISABLED=true"
+    echo "SIGNAL_EVENT_CONSUMER_DISABLED=true"
+    echo "SIGNAL_RULES_SWEEP=off"
+  } >>"$env"
+  chmod 600 "$env"
+}
+
+start_backend() {
+  local slug=$1 name=$2 dir=$3 port=$4 health=$5 pname main
+  pname=$(pm2_name "$slug" "$name")
+  main=$(find "$dir/dist" -name main.js -not -path '*/node_modules/*' | head -1)
+  [ -n "$main" ] || die "no dist/**/main.js in $dir"
+  pm2 delete "$pname" >/dev/null 2>&1 || true
+  PORT=$port pm2 start "$main" --name "$pname" --cwd "$dir" --instances 1 \
+    --max-memory-restart "$PM2_MEM" --time --update-env >/dev/null
+  local i
+  for i in $(seq 1 30); do
+    if curl -fsS -o /dev/null "http://127.0.0.1:$port$health"; then
+      echo "health ok: $pname on :$port"
+      return 0
+    fi
+    sleep 2
+  done
+  pm2 logs "$pname" --lines 60 --nostream || true
+  pm2 stop "$pname" >/dev/null 2>&1 || true
+  return 1
+}
+
+# ── Commands ─────────────────────────────────────────────────────────────────
+cmd_deploy() {
+  local slug="" branch="" repo="" kind="" name="" sha="" health="/health" lockhash=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --slug) slug=$2; shift 2 ;; --branch) branch=$2; shift 2 ;;
+      --repo) repo=$2; shift 2 ;; --kind) kind=$2; shift 2 ;;
+      --name) name=$2; shift 2 ;; --sha) sha=$2; shift 2 ;;
+      --health) health=$2; shift 2 ;; --lockhash) lockhash=$2; shift 2 ;;
+      *) die "deploy: unknown flag $1" ;;
+    esac
+  done
+  valid_slug "$slug"; valid_repo "$repo"; valid_name "$name"
+  [ -n "$branch" ] && [ -n "$sha" ] || die "deploy: --branch and --sha are required"
+  [[ "$health" =~ ^/[A-Za-z0-9/_.-]*$ ]] || die "invalid health path"
+
+  local src="$INCOMING/$slug/$repo" base="$ROOT/$slug" port="null" ts
+  ts=$(now)
+  case "$kind" in
+    fe)    swap_in "$src" "$base/cdn/$name" ;;
+    shell) swap_in "$src" "$base/shell" ;;
+    be)
+      valid_hash "$lockhash"
+      local dep="$DEPS/$repo/$lockhash"
+      if [ ! -d "$dep/node_modules" ]; then
+        [ -d "$INCOMING/_deps/$repo/$lockhash/node_modules" ] || die "deps $repo@$lockhash neither present nor uploaded"
+        mkdir -p "$DEPS/$repo"
+        rm -rf "$dep"
+        mv "$INCOMING/_deps/$repo/$lockhash" "$dep"
+      fi
+      rm -rf "$INCOMING/_deps/$repo/$lockhash"
+      touch "$dep"
+      swap_in "$src" "$base/be/$name"
+      ln -sfn "$dep/node_modules" "$base/be/$name/node_modules"
+      port=$(alloc_port "$slug" "$repo")
+      harden_env "$base/be/$name/.env" "$port"
+      ;;
+    *) die "deploy: --kind must be fe, shell or be" ;;
+  esac
+
+  reg_apply --arg s "$slug" --arg b "$branch" --arg r "$repo" --arg k "$kind" \
+    --arg n "$name" --arg sha "$sha" --arg h "$health" --arg lh "$lockhash" \
+    --argjson p "$port" --argjson ts "$ts" '
+    .previews[$s] = ((.previews[$s] // {created: $ts, components: {}})
+      | .branch = $b | .last_push = $ts | .asleep = false
+      | .components[$r] = {kind: $k, name: $n, sha: $sha, deployed: $ts,
+                           port: $p, health: $h, lockhash: (if $lh == "" then null else $lh end)})'
+
+  if [ "$kind" = be ]; then
+    start_backend "$slug" "$name" "$base/be/$name" "$port" "$health" \
+      || die "$repo did not become healthy on :$port"
+    pm2 save >/dev/null
+  fi
+  # A push wakes the whole preview, not only the component that changed.
+  wake_backends "$slug"
+  render_nginx
+  echo "PREVIEW_URL=https://pr-$slug.$DOMAIN"
+}
+
+stop_backends() {
+  local slug=$1 name
+  for name in $(reg_read | jq -r --arg s "$slug" '.previews[$s].components // {} | .[] | select(.kind == "be") | .name'); do
+    pm2 stop "$(pm2_name "$slug" "$name")" >/dev/null 2>&1 || true
+  done
+}
+
+wake_backends() {
+  local slug=$1 name port health
+  while IFS=$'\t' read -r name port health; do
+    [ -n "$name" ] || continue
+    local pname; pname=$(pm2_name "$slug" "$name")
+    if ! pm2 describe "$pname" 2>/dev/null | grep -q "status.*online"; then
+      start_backend "$slug" "$name" "$ROOT/$slug/be/$name" "$port" "$health" \
+        || echo "::warning::$pname failed to wake"
+    fi
+  done < <(reg_read | jq -r --arg s "$slug" '.previews[$s].components // {} | .[] | select(.kind == "be") | [.name, .port, .health] | @tsv')
+  reg_apply --arg s "$slug" 'if .previews[$s] then .previews[$s].asleep = false else . end'
+  pm2 save >/dev/null 2>&1 || true
+}
+
+cmd_remove() {
+  local slug="" repo=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --slug) slug=$2; shift 2 ;; --repo) repo=$2; shift 2 ;;
+      *) die "remove: unknown flag $1" ;;
+    esac
+  done
+  valid_slug "$slug"
+  local base="$ROOT/$slug"
+  if [ -n "$repo" ]; then
+    valid_repo "$repo"
+    local comp kind name
+    comp=$(reg_read | jq -c --arg s "$slug" --arg r "$repo" '.previews[$s].components[$r] // empty')
+    if [ -n "$comp" ]; then
+      kind=$(jq -r .kind <<<"$comp"); name=$(jq -r .name <<<"$comp")
+      case "$kind" in
+        fe)    rm -rf "$base/cdn/$name" ;;
+        shell) rm -rf "$base/shell" ;;
+        be)    pm2 delete "$(pm2_name "$slug" "$name")" >/dev/null 2>&1 || true
+               rm -rf "$base/be/$name" ;;
+      esac
+      reg_apply --arg s "$slug" --arg r "$repo" 'del(.previews[$s].components[$r])'
+    fi
+    # Last component gone → the preview itself goes.
+    if [ "$(reg_read | jq --arg s "$slug" '.previews[$s].components // {} | length')" != 0 ]; then
+      render_nginx
+      echo "REMOVED_PREVIEW=0"
+      return
+    fi
+  fi
+  local name
+  for name in $(reg_read | jq -r --arg s "$slug" '.previews[$s].components // {} | .[] | select(.kind == "be") | .name'); do
+    pm2 delete "$(pm2_name "$slug" "$name")" >/dev/null 2>&1 || true
+  done
+  pm2 save >/dev/null 2>&1 || true
+  rm -rf "$base" "$INCOMING/$slug"
+  reg_apply --arg s "$slug" 'del(.previews[$s])'
+  render_nginx
+  echo "REMOVED_PREVIEW=1"
+}
+
+cmd_sleep() {
+  [ "${1:-}" = --slug ] || die "usage: sleep --slug S"
+  valid_slug "$2"
+  stop_backends "$2"
+  pm2 save >/dev/null 2>&1 || true
+  reg_apply --arg s "$2" 'if .previews[$s] then .previews[$s].asleep = true else . end'
+}
+
+cmd_wake() {
+  [ "${1:-}" = --slug ] || die "usage: wake --slug S"
+  valid_slug "$2"
+  wake_backends "$2"
+}
+
+cmd_deps_present() {
+  local repo="" hash=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --repo) repo=$2; shift 2 ;; --lockhash) hash=$2; shift 2 ;;
+      *) die "deps-present: unknown flag $1" ;;
+    esac
+  done
+  valid_repo "$repo"; valid_hash "$hash"
+  [ -d "$DEPS/$repo/$hash/node_modules" ]
+}
+
+cmd_prune_deps() {
+  local keep dir
+  keep=$(reg_read | jq -r '.previews | to_entries[] | .value.components | to_entries[] | select(.value.lockhash) | "\(.key)/\(.value.lockhash)"')
+  for dir in "$DEPS"/*/*; do
+    [ -d "$dir" ] || continue
+    grep -qx "${dir#"$DEPS"/}" <<<"$keep" && continue
+    # Leave anything touched in the last day: a deploy may be mid-flight.
+    [ -n "$(find "$dir" -maxdepth 0 -mtime +0)" ] || continue
+    echo "pruning $dir"; rm -rf "$dir"
+  done
+}
+
+# ── nginx ────────────────────────────────────────────────────────────────────
+# One generated file. Everything a preview lacks is proxied to the Dev VM
+# origin directly (not through Cloudflare — dev-dashboard sits behind Access),
+# and every dev hostname inside HTML/JS/CSS/JSON is rewritten to this preview's
+# host by the shared snippet, so an unchanged develop shell loads the
+# preview's MFEs and APIs without being rebuilt.
+render_nginx() {
+  [ -n "${DEV_ORIGIN:-}" ] || die "DEV_ORIGIN is not set in /etc/so360-preview/preview.env"
+  local tmp slug DOMAIN_RE
+  DOMAIN_RE=$(sed 's/\./\\./g' <<<"$DOMAIN")
+  install -d -m 700 -o www-data /var/cache/nginx/so360-preview 2>/dev/null || install -d -m 700 /var/cache/nginx/so360-preview
+  tmp=$(mktemp)
+  {
+    echo "# GENERATED by preview-ctl at $(date -u +%FT%TZ) — do not edit; run 'preview-ctl render'."
+    echo "proxy_cache_path /var/cache/nginx/so360-preview levels=1:2 keys_zone=so360pv:20m max_size=2g inactive=7d use_temp_path=off;"
+    echo "upstream so360_dev_origin { server $DEV_ORIGIN:443; keepalive 16; }"
+    echo "map \$http_upgrade \$pv_connection_upgrade { default upgrade; '' ''; }"
+    cat <<EOF
+server {
+    listen 80;
+    server_name ~^pr-[a-z0-9-]+\\.$DOMAIN_RE\$;
+    return 301 https://\$host\$request_uri;
+}
+server {
+    listen 443 ssl http2;
+    server_name ~^pr-[a-z0-9-]+\\.$DOMAIN_RE\$;
+    ssl_certificate     $SSL_CERT;
+    ssl_certificate_key $SSL_KEY;
+    default_type text/plain;
+    add_header X-Robots-Tag "noindex, nofollow" always;
+    return 404 "No preview is deployed for this branch (yet).\\n";
+}
+EOF
+    for slug in $(reg_read | jq -r '.previews | keys[]'); do
+      render_server "$slug"
+    done
+  } >"$tmp"
+
+  local backup=""
+  if [ -f "$NGINX_OUT" ]; then backup=$(mktemp); cp "$NGINX_OUT" "$backup"; fi
+  mv "$tmp" "$NGINX_OUT"
+  chmod 644 "$NGINX_OUT"
+  if nginx -t >/dev/null 2>&1; then
+    if systemctl is-active --quiet nginx; then systemctl reload nginx; else systemctl start nginx; fi
+    [ -n "$backup" ] && rm -f "$backup"
+  else
+    nginx -t || true
+    if [ -n "$backup" ]; then mv "$backup" "$NGINX_OUT"; else rm -f "$NGINX_OUT"; fi
+    die "generated nginx config failed 'nginx -t' — previous config restored"
+  fi
+}
+
+render_server() {
+  local slug=$1 host="pr-$1.$DOMAIN" base="$ROOT/$1" comps name port
+  comps=$(reg_read | jq -c --arg s "$slug" '.previews[$s].components')
+  cat <<EOF
+
+# ── $slug ($(reg_read | jq -r --arg s "$slug" '.previews[$s].branch')) ──
+server {
+    listen 443 ssl http2;
+    server_name $host;
+    ssl_certificate     $SSL_CERT;
+    ssl_certificate_key $SSL_KEY;
+    set \$pv_slug $slug;
+    include /etc/nginx/snippets/so360-preview-common.conf;
+EOF
+  # Preview MFEs, served from disk.
+  for name in $(jq -r '.[] | select(.kind == "fe") | .name' <<<"$comps"); do
+    cat <<EOF
+    location ^~ /cdn/$name/ {
+        alias $base/cdn/$name/;
+        try_files \$uri =404;  # MFE bundles are fetched by path; no SPA fallback
+        include /etc/nginx/snippets/so360-preview-static.conf;
+    }
+EOF
+  done
+  # Preview backends, on their pm2 port.
+  while IFS=$'\t' read -r name port; do
+    [ -n "$name" ] || continue
+    cat <<EOF
+    location ^~ /api/$name/ {
+        rewrite ^/api/$name/(.*)\$ /\$1 break;
+        proxy_pass http://127.0.0.1:$port;
+        include /etc/nginx/snippets/so360-preview-api.conf;
+        error_page 502 503 504 = @asleep;
+    }
+EOF
+  done < <(jq -r '.[] | select(.kind == "be") | [.name, .port] | @tsv' <<<"$comps")
+  # Host shell: the preview's own build, else develop's.
+  if [ -n "$(jq -r '.[] | select(.kind == "shell") | .name' <<<"$comps")" ]; then
+    cat <<EOF
+    location / {
+        root $base/shell;
+        try_files \$uri \$uri/ /index.html =404;
+        include /etc/nginx/snippets/so360-preview-static.conf;
+    }
+}
+EOF
+  else
+    cat <<EOF
+    location / {
+        set \$pv_upstream_host dev-dashboard.skyoffice360.com;
+        include /etc/nginx/snippets/so360-preview-fallback.conf;
+    }
+}
+EOF
+  fi
+}
+
+# ── Dispatch ─────────────────────────────────────────────────────────────────
+cmd=${1:-}; shift || true
+case "$cmd" in
+  deploy)       lock; cmd_deploy "$@" ;;
+  remove)       lock; cmd_remove "$@" ;;
+  sleep)        lock; cmd_sleep "$@" ;;
+  wake)         lock; cmd_wake "$@" ;;
+  prune-deps)   lock; cmd_prune_deps ;;
+  render)       lock; render_nginx ;;
+  list)         reg_read ;;
+  deps-present) cmd_deps_present "$@" ;;
+  *) echo "usage: preview-ctl deploy|remove|sleep|wake|list|deps-present|prune-deps|render (see header)" >&2; exit 2 ;;
+esac
