@@ -87,11 +87,12 @@ jobs:
         run: |
           set -euo pipefail
           # ── host config from secrets (keep identical in all preview workflows) ──
-          PSH=$(printf '%s' "$SBURL" | sed -E 's#^[a-z]+://##; s#[/:].*$##')
-          if printf '%s\n%s\n' "$DEVO" "$PSH" | grep -qvxE '[A-Za-z0-9.-]+'; then
-            echo "::warning title=Preview host config::PREVIEW_DEV_ORIGIN or SUPABASE_URL secret missing/invalid - host keeps its current config"
+          # PROD_SUPABASE_HOST is written empty: backend previews may use the
+          # prod DB until a preview database exists (user decision 2026-09-30).
+          if ! printf '%s\n' "$DEVO" | grep -qxE '[A-Za-z0-9.-]+'; then
+            echo "::warning title=Preview host config::PREVIEW_DEV_ORIGIN secret missing/invalid - host keeps its current config"
           else
-            printf 'DEV_ORIGIN=%s\nPROD_SUPABASE_HOST=%s\n' "$DEVO" "$PSH" | ssh "root@$HOST" 'install -d -m 700 /etc/so360-preview && umask 077 && cat > /etc/so360-preview/ci.env.tmp && mv /etc/so360-preview/ci.env.tmp /etc/so360-preview/ci.env'
+            printf 'DEV_ORIGIN=%s\nPROD_SUPABASE_HOST=\n' "$DEVO" | ssh "root@$HOST" 'install -d -m 700 /etc/so360-preview && umask 077 && cat > /etc/so360-preview/ci.env.tmp && mv /etc/so360-preview/ci.env.tmp /etc/so360-preview/ci.env'
           fi
           if [ -n "${CFT:-}" ]; then
             printf 'CF_API_TOKEN=%s\n' "$CFT" | ssh "root@$HOST" 'install -d -m 700 /etc/so360-preview && umask 077 && cat > /etc/so360-preview/cf.env.tmp && mv /etc/so360-preview/cf.env.tmp /etc/so360-preview/cf.env'

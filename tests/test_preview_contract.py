@@ -55,7 +55,7 @@ class HostConfigFromSecrets(unittest.TestCase):
 
     def test_the_block_validates_values_and_writes_ci_env_atomically_and_privately(self):
         block = host_config_block(read(DEPLOY))
-        self.assertIn("grep -qvxE '[A-Za-z0-9.-]+'", block)
+        self.assertIn("grep -qxE '[A-Za-z0-9.-]+'", block)
         self.assertIn("umask 077", block)
         self.assertIn("mv /etc/so360-preview/ci.env.tmp /etc/so360-preview/ci.env", block)
 
@@ -73,13 +73,26 @@ class HostConfigFromSecrets(unittest.TestCase):
 
 
 class BackendDatabase(unittest.TestCase):
-    def test_backend_requires_a_preview_database_with_no_fallback(self):
+    def test_backend_uses_the_preview_database_first_then_dev_then_prod(self):
+        # User decision 2026-09-30: no preview database exists yet, so backend
+        # previews fall back to the dev/prod database exactly like dev does.
         text = read(DEPLOY)
-        self.assertIn("SUPABASE_URL_PREVIEW", text)
-        self.assertRegex(text, r'KIND" = be \] && \[ -z "\$DBURL" \]')
-        # The backend .env must never be written from the dev/prod DB secrets.
         env_block = text.split('> "$OUT/app/.env"')[0].rsplit("if [ \"$KIND\" = be ]", 1)[1]
-        self.assertNotRegex(env_block, r"secrets\.SUPABASE_(URL|ANON_KEY|SERVICE_KEY)(_DEV)?\s*[}|]")
+        for var, secret in (("SUPABASE_URL", "SUPABASE_URL"),
+                            ("SUPABASE_ANON_KEY", "SUPABASE_ANON_KEY"),
+                            ("SUPABASE_SERVICE_KEY", "SUPABASE_SERVICE_KEY")):
+            self.assertIn(
+                f'echo "{var}=${{{{ secrets.{secret}_PREVIEW || secrets.{secret}_DEV || secrets.{secret} }}}}"',
+                env_block)
+
+    def test_backend_on_the_production_database_warns_on_every_run(self):
+        text = read(DEPLOY)
+        self.assertIn("Preview backend is on the PRODUCTION database", text)
+        self.assertRegex(text, r'\[ -z "\$PVURL" \]')
+
+    def test_the_host_guard_is_disarmed_by_an_empty_prod_supabase_host(self):
+        for path in (DEPLOY, TEARDOWN, RECONCILE):
+            self.assertIn("PROD_SUPABASE_HOST=\\n", read(path), os.path.basename(path))
 
     def test_no_mail_keys_reach_a_preview_backend(self):
         text = read(DEPLOY)

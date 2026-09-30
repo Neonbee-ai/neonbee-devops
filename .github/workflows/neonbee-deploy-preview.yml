@@ -13,7 +13,8 @@
 #            preview host, `preview-ctl deploy`, PR comment with the URL
 #
 # Never touches the Dev VM or any prod host: the only deploy target is
-# the PREVIEW_HOST secret, and preview backends refuse the production DB.
+# the PREVIEW_HOST secret. Backend previews use SUPABASE_*_PREVIEW when set,
+# otherwise the dev/prod database (user decision, 2026-09-30 — same as dev).
 #
 # Caller (in the repo's deploy.yml, alongside the develop/qa deploy job):
 #
@@ -113,12 +114,50 @@ on:
       SUPABASE_ANON_KEY:       { required: false }
       # Preview host config (DEV_ORIGIN) — written to /etc/so360-preview/ci.env each run.
       PREVIEW_DEV_ORIGIN:      { required: false }
-      # Backend previews only — deliberately NO fallback to the prod/dev DB.
+      # Backend previews: *_PREVIEW when set, else *_DEV, else the prod DB
+      # (user decision 2026-09-30 — there is no separate preview database yet).
       SUPABASE_URL_PREVIEW:         { required: false }
       SUPABASE_ANON_KEY_PREVIEW:    { required: false }
       SUPABASE_SERVICE_KEY_PREVIEW: { required: false }
+      SUPABASE_SERVICE_KEY_DEV:     { required: false }
+      SUPABASE_SERVICE_KEY:         { required: false }
       JWT_SECRET_DEV:          { required: false }
       JWT_SECRET:              { required: false }
+      ENCRYPTION_KEY:              { required: false }
+      PAYROLL_ENCRYPTION_KEY:      { required: false }
+      STOREFRONT_JWT_SECRET:       { required: false }
+      INTERNAL_SERVICE_KEY:        { required: false }
+      NOTIFICATION_INTERNAL_KEY:   { required: false }
+      INBOX_SERVICE_KEY:           { required: false }
+      GEMINI_API_KEY:              { required: false }
+      OPENAI_API_KEY:              { required: false }
+      ANTHROPIC_API_KEY:           { required: false }
+      STOREFRONT_INTERNAL_OPS_KEY: { required: false }
+      MOBILITY_INTERNAL_KEY:       { required: false }
+      CHAT_INTERNAL_KEY:           { required: false }
+      DOCS_INTERNAL_SERVICE_KEY:   { required: false }
+      CRM_SYNC_INTERNAL_KEY:       { required: false }
+      CHANNEL_DELEGATION_SECRET:   { required: false }
+      COMPENSATION_ENCRYPTION_KEY: { required: false }
+      PLATFORM_OPS_INTERNAL_KEY:   { required: false }
+      PROJECTS_INTERNAL_KEY:       { required: false }
+      MANUFACTURING_INTERNAL_KEY:  { required: false }
+      ACCOUNTING_INTERNAL_KEY:     { required: false }
+      ACCOUNTING_INTERNAL_KEY_2:   { required: false }
+      PEOPLE_INTERNAL_KEY:         { required: false }
+      PEOPLE_INTERNAL_KEY_2:       { required: false }
+      SUBSCRIPTION_INTERNAL_KEY:   { required: false }
+      BUNNY_STORAGE_HOSTNAME:      { required: false }
+      BUNNY_STORAGE_ZONE:          { required: false }
+      BUNNY_ACCESS_KEY:            { required: false }
+      BUNNY_PULL_ZONE_URL:         { required: false }
+      BUNNY_PREFIX:                { required: false }
+      CF_R2_ACCOUNT_ID:            { required: false }
+      CF_R2_ACCESS_KEY_ID:         { required: false }
+      CF_R2_SECRET_ACCESS_KEY:     { required: false }
+      CF_R2_BUCKET:                { required: false }
+      CF_R2_PUBLIC_URL:            { required: false }
+      CF_R2_PREFIX:                { required: false }
 
 env:
   ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: true
@@ -194,12 +233,15 @@ jobs:
       - name: Preconditions
         env:
           HOST: ${{ secrets.PREVIEW_HOST }}
-          DBURL: ${{ secrets.SUPABASE_URL_PREVIEW }}
+          DBURL: ${{ secrets.SUPABASE_URL_PREVIEW || secrets.SUPABASE_URL_DEV || secrets.SUPABASE_URL }}
+          PVURL: ${{ secrets.SUPABASE_URL_PREVIEW }}
         run: |
           [ -n "$HOST" ] || { echo "::error::PREVIEW_HOST secret is not set — previews are not provisioned yet"; exit 1; }
-          if [ "$KIND" = be ] && [ -z "$DBURL" ]; then
-            echo "::error title=No preview database::Backend previews need SUPABASE_URL_PREVIEW (a non-production database). They never fall back to the dev/prod database."
-            exit 1
+          if [ "$KIND" = be ]; then
+            [ -n "$DBURL" ] || { echo "::error::no SUPABASE_URL secret reaches this repo — a backend preview cannot start"; exit 1; }
+            if [ -z "$PVURL" ]; then
+              echo "::warning title=Preview backend is on the PRODUCTION database::No SUPABASE_URL_PREVIEW secret — this preview reads and writes production data (same as dev). Schedulers, event workers and outbound mail stay off."
+            fi
           fi
 
       - uses: actions/checkout@v4.3.1
@@ -361,17 +403,54 @@ jobs:
             {
               echo "NODE_ENV=development"
               echo "RELEASE_SHA=${{ github.sha }}"
-              echo "SUPABASE_URL=${{ secrets.SUPABASE_URL_PREVIEW }}"
-              echo "SUPABASE_KEY=${{ secrets.SUPABASE_ANON_KEY_PREVIEW }}"
-              echo "SUPABASE_ANON_KEY=${{ secrets.SUPABASE_ANON_KEY_PREVIEW }}"
-              echo "SUPABASE_SERVICE_KEY=${{ secrets.SUPABASE_SERVICE_KEY_PREVIEW }}"
-              echo "SUPABASE_SERVICE_ROLE_KEY=${{ secrets.SUPABASE_SERVICE_KEY_PREVIEW }}"
+              echo "SUPABASE_URL=${{ secrets.SUPABASE_URL_PREVIEW || secrets.SUPABASE_URL_DEV || secrets.SUPABASE_URL }}"
+              echo "SUPABASE_KEY=${{ secrets.SUPABASE_ANON_KEY_PREVIEW || secrets.SUPABASE_ANON_KEY_DEV || secrets.SUPABASE_ANON_KEY }}"
+              echo "SUPABASE_ANON_KEY=${{ secrets.SUPABASE_ANON_KEY_PREVIEW || secrets.SUPABASE_ANON_KEY_DEV || secrets.SUPABASE_ANON_KEY }}"
+              echo "SUPABASE_SERVICE_KEY=${{ secrets.SUPABASE_SERVICE_KEY_PREVIEW || secrets.SUPABASE_SERVICE_KEY_DEV || secrets.SUPABASE_SERVICE_KEY }}"
+              echo "SUPABASE_SERVICE_ROLE_KEY=${{ secrets.SUPABASE_SERVICE_KEY_PREVIEW || secrets.SUPABASE_SERVICE_KEY_DEV || secrets.SUPABASE_SERVICE_KEY }}"
               # Must match dev core, which issues the tokens the preview receives.
               echo "JWT_SECRET=${{ secrets.JWT_SECRET_DEV || secrets.JWT_SECRET }}"
               echo "CORS_ORIGINS=https://pr-$SLUG.$PREVIEW_DOMAIN"
-              # No SES / notification / email keys are passed on purpose:
+              # Same service keys as the dev deploy so backends boot and can call
+              # each other. Unset secrets become empty lines, stripped below.
+              echo "ENCRYPTION_KEY=${{ secrets.ENCRYPTION_KEY }}"
+              echo "PAYROLL_ENCRYPTION_KEY=${{ secrets.PAYROLL_ENCRYPTION_KEY }}"
+              echo "STOREFRONT_JWT_SECRET=${{ secrets.STOREFRONT_JWT_SECRET }}"
+              echo "INTERNAL_SERVICE_KEY=${{ secrets.INTERNAL_SERVICE_KEY }}"
+              echo "NOTIFICATION_INTERNAL_KEY=${{ secrets.NOTIFICATION_INTERNAL_KEY }}"
+              echo "INBOX_SERVICE_KEY=${{ secrets.INBOX_SERVICE_KEY }}"
+              echo "GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}"
+              echo "OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}"
+              echo "ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}"
+              echo "STOREFRONT_INTERNAL_OPS_KEY=${{ secrets.STOREFRONT_INTERNAL_OPS_KEY }}"
+              echo "MOBILITY_INTERNAL_KEY=${{ secrets.MOBILITY_INTERNAL_KEY }}"
+              echo "CHAT_INTERNAL_KEY=${{ secrets.CHAT_INTERNAL_KEY }}"
+              echo "DOCS_INTERNAL_SERVICE_KEY=${{ secrets.DOCS_INTERNAL_SERVICE_KEY }}"
+              echo "CRM_SYNC_INTERNAL_KEY=${{ secrets.CRM_SYNC_INTERNAL_KEY }}"
+              echo "CHANNEL_DELEGATION_SECRET=${{ secrets.CHANNEL_DELEGATION_SECRET }}"
+              echo "COMPENSATION_ENCRYPTION_KEY=${{ secrets.COMPENSATION_ENCRYPTION_KEY }}"
+              echo "PLATFORM_OPS_INTERNAL_KEY=${{ secrets.PLATFORM_OPS_INTERNAL_KEY }}"
+              echo "PROJECTS_INTERNAL_KEY=${{ secrets.PROJECTS_INTERNAL_KEY }}"
+              echo "MANUFACTURING_INTERNAL_KEY=${{ secrets.MANUFACTURING_INTERNAL_KEY }}"
+              echo "ACCOUNTING_INTERNAL_KEY=${{ secrets.ACCOUNTING_INTERNAL_KEY }}"
+              echo "ACCOUNTING_INTERNAL_KEY_2=${{ secrets.ACCOUNTING_INTERNAL_KEY_2 }}"
+              echo "PEOPLE_INTERNAL_KEY=${{ secrets.PEOPLE_INTERNAL_KEY }}"
+              echo "PEOPLE_INTERNAL_KEY_2=${{ secrets.PEOPLE_INTERNAL_KEY_2 }}"
+              echo "SUBSCRIPTION_INTERNAL_KEY=${{ secrets.SUBSCRIPTION_INTERNAL_KEY }}"
+              echo "BUNNY_STORAGE_HOSTNAME=${{ secrets.BUNNY_STORAGE_HOSTNAME }}"
+              echo "BUNNY_STORAGE_ZONE=${{ secrets.BUNNY_STORAGE_ZONE }}"
+              echo "BUNNY_ACCESS_KEY=${{ secrets.BUNNY_ACCESS_KEY }}"
+              echo "BUNNY_PULL_ZONE_URL=${{ secrets.BUNNY_PULL_ZONE_URL }}"
+              echo "BUNNY_PREFIX=${{ secrets.BUNNY_PREFIX }}"
+              echo "CF_R2_ACCOUNT_ID=${{ secrets.CF_R2_ACCOUNT_ID }}"
+              echo "CF_R2_ACCESS_KEY_ID=${{ secrets.CF_R2_ACCESS_KEY_ID }}"
+              echo "CF_R2_SECRET_ACCESS_KEY=${{ secrets.CF_R2_SECRET_ACCESS_KEY }}"
+              echo "CF_R2_BUCKET=${{ secrets.CF_R2_BUCKET }}"
+              echo "CF_R2_PUBLIC_URL=${{ secrets.CF_R2_PUBLIC_URL }}"
+              echo "CF_R2_PREFIX=${{ secrets.CF_R2_PREFIX }}"
+              # No outbound-mail, push or Slack keys are passed on purpose:
               # outbound mail from a preview fails closed instead of reaching
-              # real inboxes.
+              # real inboxes (it shares the production database).
             } > "$OUT/app/.env"
             EXTRA='${{ inputs.extra_env }}'
             [ -n "$EXTRA" ] && printf '%s\n' "$EXTRA" >> "$OUT/app/.env"
@@ -416,11 +495,12 @@ jobs:
         run: |
           set -euo pipefail
           # ── host config from secrets (keep identical in all preview workflows) ──
-          PSH=$(printf '%s' "$SBURL" | sed -E 's#^[a-z]+://##; s#[/:].*$##')
-          if printf '%s\n%s\n' "$DEVO" "$PSH" | grep -qvxE '[A-Za-z0-9.-]+'; then
-            echo "::warning title=Preview host config::PREVIEW_DEV_ORIGIN or SUPABASE_URL secret missing/invalid - host keeps its current config"
+          # PROD_SUPABASE_HOST is written empty: backend previews may use the
+          # prod DB until a preview database exists (user decision 2026-09-30).
+          if ! printf '%s\n' "$DEVO" | grep -qxE '[A-Za-z0-9.-]+'; then
+            echo "::warning title=Preview host config::PREVIEW_DEV_ORIGIN secret missing/invalid - host keeps its current config"
           else
-            printf 'DEV_ORIGIN=%s\nPROD_SUPABASE_HOST=%s\n' "$DEVO" "$PSH" | ssh "root@$HOST" 'install -d -m 700 /etc/so360-preview && umask 077 && cat > /etc/so360-preview/ci.env.tmp && mv /etc/so360-preview/ci.env.tmp /etc/so360-preview/ci.env'
+            printf 'DEV_ORIGIN=%s\nPROD_SUPABASE_HOST=\n' "$DEVO" | ssh "root@$HOST" 'install -d -m 700 /etc/so360-preview && umask 077 && cat > /etc/so360-preview/ci.env.tmp && mv /etc/so360-preview/ci.env.tmp /etc/so360-preview/ci.env'
           fi
           if [ -n "${CFT:-}" ]; then
             printf 'CF_API_TOKEN=%s\n' "$CFT" | ssh "root@$HOST" 'install -d -m 700 /etc/so360-preview && umask 077 && cat > /etc/so360-preview/cf.env.tmp && mv /etc/so360-preview/cf.env.tmp /etc/so360-preview/cf.env'
