@@ -341,7 +341,7 @@ EOF
   chmod 644 "$NGINX_OUT"
   if nginx -t >/dev/null 2>&1; then
     if systemctl is-active --quiet nginx; then systemctl reload nginx; else systemctl start nginx; fi
-    [ -n "$backup" ] && rm -f "$backup"
+    if [ -n "$backup" ]; then rm -f "$backup"; fi
   else
     nginx -t || true
     if [ -n "$backup" ]; then mv "$backup" "$NGINX_OUT"; else rm -f "$NGINX_OUT"; fi
