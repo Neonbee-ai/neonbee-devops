@@ -148,7 +148,10 @@ jobs:
         run: |
           set -euo pipefail
           [ -n "$CFT" ] || { echo "::warning::CF_PREVIEW_API_TOKEN not set — skipping"; exit 0; }
-          LIVE=$(ssh "root@$HOST" preview-ctl list | jq -r '.previews | keys[]' | sed "s/^/pr-/; s/\$/.$PREVIEW_DOMAIN/")
+          REGISTRY=$(ssh "root@$HOST" preview-ctl list)
+          # Main hosts plus every site/next app host.
+          LIVE=$( { jq -r '.previews | keys[]' <<<"$REGISTRY" | sed "s/^/pr-/; s/\$/.$PREVIEW_DOMAIN/"
+                    jq -r '.previews[].components[] | .host // empty' <<<"$REGISTRY"; } )
           cf() { curl -fsS -H "Authorization: Bearer $CFT" -H "Content-Type: application/json" "$@"; }
           API=https://api.cloudflare.com/client/v4
           ZONE=$(cf "$API/zones?name=$PREVIEW_DOMAIN" | jq -r '.result[0].id')
