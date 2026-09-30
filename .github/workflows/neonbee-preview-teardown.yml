@@ -4,7 +4,9 @@
 # Called from a repo's `on: delete` trigger. Removes that repo's component from
 # the branch preview; when it was the last component the whole preview goes,
 # and so do its Cloudflare DNS record and Access app (DNS first, then Access —
-# the reverse of creation, so the hostname never resolves ungated).
+# the reverse of creation, so the hostname never resolves ungated). A site/next
+# component's own host (REMOVED_HOST) is cleaned up the same way, even while
+# the rest of the preview stays.
 #
 # Caller:
 #   on:
@@ -89,21 +91,28 @@ jobs:
           echo "$OUT"
           ssh-agent -k >/dev/null
           if grep -qx 'REMOVED_PREVIEW=1' <<<"$OUT"; then echo "removed=1" >> "$GITHUB_OUTPUT"; else echo "removed=0" >> "$GITHUB_OUTPUT"; fi
+          HOSTS=$(sed -n 's/^REMOVED_HOST=\(pr-[a-z0-9-]*\.skyoffice360\.com\)$/\1/p' <<<"$OUT" | tr '\n' ' ')
+          echo "hosts=$HOSTS" >> "$GITHUB_OUTPUT"
 
       - name: Remove Cloudflare DNS + Access app
-        if: steps.rm.outputs.removed == '1'
+        if: steps.rm.outputs.removed == '1' || steps.rm.outputs.hosts != ''
         env:
           CFT: ${{ secrets.CF_PREVIEW_API_TOKEN }}
           SLUG: ${{ steps.s.outputs.slug }}
+          REMOVED: ${{ steps.rm.outputs.removed }}
+          HOSTS: ${{ steps.rm.outputs.hosts }}
         run: |
           set -euo pipefail
-          FQDN="pr-$SLUG.$PREVIEW_DOMAIN"
+          FQDNS="$HOSTS"
+          [ "$REMOVED" = 1 ] && FQDNS="pr-$SLUG.$PREVIEW_DOMAIN $FQDNS"
           cf() { curl -fsS -H "Authorization: Bearer $CFT" -H "Content-Type: application/json" "$@"; }
           API=https://api.cloudflare.com/client/v4
           ZONE=$(cf "$API/zones?name=$PREVIEW_DOMAIN" | jq -r '.result[0].id')
-          for id in $(cf "$API/zones/$ZONE/dns_records?name=$FQDN" | jq -r '.result[] | select((.comment // "") | startswith("so360-preview")) | .id'); do
-            cf -X DELETE "$API/zones/$ZONE/dns_records/$id" >/dev/null && echo "Deleted DNS $FQDN"
-          done
-          for id in $(cf "$API/accounts/$CF_ACCOUNT_ID/access/apps?domain=$FQDN" | jq -r --arg d "$FQDN" '.result[] | select(.domain == $d and (.name | startswith("SO360 Preview"))) | .id'); do
-            cf -X DELETE "$API/accounts/$CF_ACCOUNT_ID/access/apps/$id" >/dev/null && echo "Deleted Access app $FQDN"
+          for FQDN in $FQDNS; do
+            for id in $(cf "$API/zones/$ZONE/dns_records?name=$FQDN" | jq -r '.result[] | select((.comment // "") | startswith("so360-preview")) | .id'); do
+              cf -X DELETE "$API/zones/$ZONE/dns_records/$id" >/dev/null && echo "Deleted DNS $FQDN"
+            done
+            for id in $(cf "$API/accounts/$CF_ACCOUNT_ID/access/apps?domain=$FQDN" | jq -r --arg d "$FQDN" '.result[] | select(.domain == $d and (.name | startswith("SO360 Preview"))) | .id'); do
+              cf -X DELETE "$API/accounts/$CF_ACCOUNT_ID/access/apps/$id" >/dev/null && echo "Deleted Access app $FQDN"
+            done
           done

@@ -35,6 +35,26 @@ browser ─► Cloudflare (Access app per preview) ─► preview host nginx
 | 24 h no push | backends stopped (`sleep`); next push wakes them |
 | 72 h no push, or branch gone everywhere | removed by `preview-reconcile.yml` (nightly) |
 
+## Kinds
+
+| `kind` | Served from | Used by |
+|---|---|---|
+| `fe` | `/cdn/<name>/` on the main host (`is_mfe: false` → SPA fallback to its `index.html`) | MFEs; help-fe, platform-help-fe, sign-public-fe |
+| `shell` | `/` on the main host | so360-shell-fe |
+| `be` | `/api/<name>/` → pm2 | NestJS services |
+| `site` | own host `pr-<slug>--<name>`, static | sso-fe, client-portal-pwa |
+| `next` | own host `pr-<slug>--<name>` → pm2 (`next start` or standalone `server.js`) | so360-command, mobility-pwa, partner-portal-fe, storefront-web-fe, tools-fe |
+
+- `site`/`next` hosts get the same `/cdn` + `/api` overlay and their own
+  Access app and DNS record. Pass `dev_host` (e.g. `dev-sso.skyoffice360.com`)
+  and every preview host rewrites links to it to the app host.
+- Next browser calls go through `/__so360api/` on the app host. Server-side
+  calls to develop's service ports hit loopback listeners (`127.0.0.1:60xx`)
+  that proxy to dev-api.
+- Next `.env.local` comes from `extra_env` plus develop's public Supabase URL
+  and anon key. `preview-ctl` strips any `*SERVICE_KEY*`/`*SERVICE_ROLE*`, so
+  SSR can do no more than the signed-in user.
+
 ## Backends (phase 2)
 
 Backend previews need a **non-production database**. They are refused unless:
@@ -71,7 +91,9 @@ jobs:
     permissions: { contents: read, pull-requests: write }
     uses: Neonbee-ai/neonbee-devops/.github/workflows/neonbee-deploy-preview.yml@main
     with:
-      kind: fe            # fe | shell | be
+      kind: fe            # fe | shell | be | site | next
+      # is_mfe: false     # fe that is a standalone SPA, not a remoteEntry MFE
+      # dev_host: dev-sso.skyoffice360.com   # site/next: the app's dev host
       name: crm           # dev-cdn folder / dev-api prefix
       vite_base_url: https://dev-cdn.skyoffice360.com/crm/
       vite_env: |         # same block as vite_env_dev
@@ -92,4 +114,7 @@ The existing develop/qa/main deploy jobs need `if:` guards so that they skip
 - SSO login returns to the preview only once so360-shell-fe#113 (`redirect_url`) is merged.
 - `runtimeConfig.ts` in the shell and `manufacturingApi.ts` in insight-fe treat `*.skyoffice360.com` as prod.
 - client-portal-pwa hard-codes the prod SSO host.
-- Next.js apps (storefront, portals) are not previewable yet.
+- storefront-web-fe tenant subdomains are not previewed; only the app host.
+- mobility-pwa's dev API is a plain-http IP URL; it is not rewritten, so point `extra_env` at dev-api instead.
+- tools-fe links to prod `neonbee.app` URLs; those stay prod.
+- Cross-host calls from a site/next host to another preview host need CORS on the target.
