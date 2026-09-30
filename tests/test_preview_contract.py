@@ -108,12 +108,26 @@ class DeployBehaviour(unittest.TestCase):
         self.assertRegex(read(DEPLOY), r"feat/\*\|fix/\*\)")
 
     def test_access_app_is_created_before_dns(self):
-        text = read(DEPLOY)
-        self.assertLess(text.index("/access/apps\""), text.index("/dns_records\""))
+        text = read(CTL)
+        body = text[text.index("cmd_cf_ensure() {"):text.index("cmd_cf_remove() {")]
+        self.assertLess(body.index("/access/apps\""), body.index("/dns_records\""))
 
     def test_teardown_removes_dns_before_access(self):
-        text = read(TEARDOWN)
-        self.assertLess(text.index("dns_records/$id"), text.index("access/apps/$id"))
+        text = read(CTL)
+        body = text[text.index("cmd_cf_remove() {"):]
+        self.assertLess(body.index("dns_records/$id"), body.index("access/apps/$id"))
+
+    def test_deploy_and_teardown_use_the_host_for_cloudflare(self):
+        # Private repos get no org secrets; the token lives on the preview host.
+        self.assertIn("preview-ctl cf-ensure", read(DEPLOY))
+        self.assertIn("preview-ctl cf-remove", read(TEARDOWN))
+        for path in (DEPLOY, TEARDOWN):
+            self.assertNotIn("api.cloudflare.com", read(path), os.path.basename(path))
+
+    def test_the_host_config_block_writes_the_cloudflare_token_privately(self):
+        block = host_config_block(read(RECONCILE))
+        self.assertIn("mv /etc/so360-preview/cf.env.tmp /etc/so360-preview/cf.env", block)
+        self.assertIn('if [ -n "${CFT:-}" ]', block)
 
     def test_slug_is_computed_identically(self):
         self.assertEqual(slug_block(read(DEPLOY)), slug_block(read(TEARDOWN)))

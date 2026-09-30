@@ -76,6 +76,13 @@ on a port from 7100–7999.
    - `PREVIEW_HOST`: the preview host's IP.
    - `PREVIEW_SSH_KEY`: its root key.
    - `CF_PREVIEW_API_TOKEN`: a token with Zone DNS:Edit on skyoffice360.com and Account Access: Apps and Policies:Edit.
+     Only public repos (this one) receive it on the org's plan: the host config
+     sync writes it to `/etc/so360-preview/cf.env` (600) and `preview-ctl
+     cf-ensure` / `cf-remove` make the DNS + Access calls on the host. Run
+     preview-reconcile once after creating or rotating it.
+   - Private repos get no org secrets on the free plan, so each preview repo
+     needs `PREVIEW_HOST`, `PREVIEW_SSH_KEY` and `PREVIEW_DEV_ORIGIN` as repo
+     secrets (the Cloudflare token is not needed).
 3. Phase 2 only: the `*_PREVIEW` database secrets above.
 4. Add to each repo's `deploy.yml`:
 

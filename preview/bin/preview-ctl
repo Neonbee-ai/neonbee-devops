@@ -27,6 +27,8 @@
 #   deps-present --repo R --lockhash H  (exit 0 if shared deps exist)
 #   prune-deps                          (drop unreferenced _deps)
 #   render                              (regenerate nginx + reload)
+#   cf-ensure --slug S --ip IP --fqdn F [--fqdn F…]   (Access app, then DNS)
+#   cf-remove --fqdn F [--fqdn F…]                    (DNS, then Access app)
 # =============================================================================
 set -euo pipefail
 
@@ -52,6 +54,16 @@ PORT_MAX=${PREVIEW_PORT_MAX:-7999}
 PM2_MEM=${PREVIEW_PM2_MEM:-300M}
 PM2_MEM_NEXT=${PREVIEW_PM2_MEM_NEXT:-600M}
 DOMAIN_RE=$(sed 's/\./\\./g' <<<"$DOMAIN")
+
+# Cloudflare DNS + Access for preview hostnames. The API token lives only on
+# this host (cf.env, written from the org secret by the public reconcile
+# workflow), so repos that get no org secrets never need it. Read only by the
+# cf-* commands, never exported to a preview process.
+PREVIEW_CF_ENV_FILE=${PREVIEW_CF_ENV_FILE:-/etc/so360-preview/cf.env}
+CF_API=${PREVIEW_CF_API:-https://api.cloudflare.com/client/v4}
+CF_ACCOUNT_ID=${PREVIEW_CF_ACCOUNT_ID:-96ba885239b5d682270e57908693b93e}
+# "Moonhive / NeonBee team" reusable Access policy.
+CF_ACCESS_POLICY_ID=${PREVIEW_CF_ACCESS_POLICY_ID:-ef40640b-ee71-4b45-9202-cff5f7de4e39}
 
 # Server-side calls from Next apps use the same 127.0.0.1:<port> addresses as
 # on the Dev VM. The preview host answers them with loopback listeners that
@@ -425,6 +437,76 @@ cmd_prune_deps() {
   done
 }
 
+# ── Cloudflare ───────────────────────────────────────────────────────────────
+# The token goes to curl on stdin (-K -), never on a command line.
+cf() {
+  printf 'header = "Authorization: Bearer %s"\n' "$CF_TOKEN" |
+    curl -K - -fsS -H "Content-Type: application/json" "$@"
+}
+
+cf_load() {
+  [ -r "$PREVIEW_CF_ENV_FILE" ] || die "no Cloudflare token on this host ($PREVIEW_CF_ENV_FILE) - run preview-reconcile once"
+  CF_TOKEN=$(sed -n 's/^CF_API_TOKEN=//p' "$PREVIEW_CF_ENV_FILE" | head -n1)
+  [ -n "$CF_TOKEN" ] || die "CF_API_TOKEN missing from $PREVIEW_CF_ENV_FILE"
+  CF_ZONE=$(cf "$CF_API/zones?name=$DOMAIN" | jq -r '.result[0].id // empty')
+  [ -n "$CF_ZONE" ] || die "Cloudflare zone $DOMAIN not found"
+}
+
+cf_fqdns() {
+  CF_FQDNS=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --fqdn) valid_host "$2"; CF_FQDNS+=("$2"); shift 2 ;;
+      --slug) CF_SLUG=$2; shift 2 ;; --ip) CF_IP=$2; shift 2 ;;
+      *) die "cf: unknown flag $1" ;;
+    esac
+  done
+  [ ${#CF_FQDNS[@]} -gt 0 ] || die "cf: at least one --fqdn required"
+}
+
+# Access first, DNS second: the hostname never resolves ungated.
+cmd_cf_ensure() {
+  CF_SLUG="" CF_IP=""
+  cf_fqdns "$@"
+  valid_slug "$CF_SLUG"
+  [[ "$CF_IP" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || die "cf-ensure: invalid --ip '$CF_IP'"
+  cf_load
+  local fqdn app rec body
+  for fqdn in "${CF_FQDNS[@]}"; do
+    app=$(cf "$CF_API/accounts/$CF_ACCOUNT_ID/access/apps?domain=$fqdn" | jq -r --arg d "$fqdn" '[.result[] | select(.domain == $d)][0].id // empty')
+    if [ -z "$app" ]; then
+      cf -X POST "$CF_API/accounts/$CF_ACCOUNT_ID/access/apps" --data "$(jq -n --arg d "$fqdn" --arg n "SO360 Preview – $CF_SLUG" --arg p "$CF_ACCESS_POLICY_ID" \
+        '{name: $n, domain: $d, type: "self_hosted", session_duration: "720h", app_launcher_visible: false,
+          policies: [{id: $p, precedence: 1}]}')" >/dev/null
+      echo "Created Access app for $fqdn"
+    fi
+    rec=$(cf "$CF_API/zones/$CF_ZONE/dns_records?type=A&name=$fqdn" | jq -r '.result[0].id // empty')
+    body=$(jq -n --arg n "$fqdn" --arg ip "$CF_IP" --arg s "$CF_SLUG" '{type: "A", name: $n, content: $ip, proxied: true, ttl: 1, comment: ("so360-preview " + $s)}')
+    if [ -z "$rec" ]; then
+      cf -X POST "$CF_API/zones/$CF_ZONE/dns_records" --data "$body" >/dev/null
+      echo "Created DNS $fqdn -> $CF_IP (proxied)"
+    else
+      cf -X PUT "$CF_API/zones/$CF_ZONE/dns_records/$rec" --data "$body" >/dev/null
+    fi
+  done
+}
+
+# DNS first, then Access - the reverse of creation. Only ever deletes what the
+# preview tooling made (comment / app name prefix).
+cmd_cf_remove() {
+  cf_fqdns "$@"
+  cf_load
+  local fqdn id
+  for fqdn in "${CF_FQDNS[@]}"; do
+    for id in $(cf "$CF_API/zones/$CF_ZONE/dns_records?name=$fqdn" | jq -r '.result[] | select((.comment // "") | startswith("so360-preview")) | .id'); do
+      cf -X DELETE "$CF_API/zones/$CF_ZONE/dns_records/$id" >/dev/null && echo "Deleted DNS $fqdn"
+    done
+    for id in $(cf "$CF_API/accounts/$CF_ACCOUNT_ID/access/apps?domain=$fqdn" | jq -r --arg d "$fqdn" '.result[] | select(.domain == $d and (.name | startswith("SO360 Preview"))) | .id'); do
+      cf -X DELETE "$CF_API/accounts/$CF_ACCOUNT_ID/access/apps/$id" >/dev/null && echo "Deleted Access app $fqdn"
+    done
+  done
+}
+
 # ── nginx ────────────────────────────────────────────────────────────────────
 # One generated file. Everything a preview lacks is proxied to the Dev VM
 # origin directly (not through Cloudflare — dev-dashboard sits behind Access),
@@ -630,5 +712,7 @@ case "$cmd" in
   render)       lock; render_nginx ;;
   list)         reg_read ;;
   deps-present) cmd_deps_present "$@" ;;
-  *) echo "usage: preview-ctl deploy|remove|sleep|wake|list|deps-present|prune-deps|render (see header)" >&2; exit 2 ;;
+  cf-ensure)    cmd_cf_ensure "$@" ;;
+  cf-remove)    cmd_cf_remove "$@" ;;
+  *) echo "usage: preview-ctl deploy|remove|sleep|wake|list|deps-present|prune-deps|render|cf-ensure|cf-remove (see header)" >&2; exit 2 ;;
 esac

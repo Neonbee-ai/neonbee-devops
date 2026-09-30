@@ -3,8 +3,9 @@
 # =============================================================================
 # Called from a repo's `on: delete` trigger. Removes that repo's component from
 # the branch preview; when it was the last component the whole preview goes,
-# and so do its Cloudflare DNS record and Access app (DNS first, then Access —
-# the reverse of creation, so the hostname never resolves ungated). A site/next
+# and so do its Cloudflare DNS record and Access app (preview-ctl cf-remove on
+# the preview host: DNS first, then Access — the reverse of creation, so the
+# hostname never resolves ungated). A site/next
 # component's own host (REMOVED_HOST) is cleaned up the same way, even while
 # the rest of the preview stays.
 #
@@ -39,7 +40,6 @@ on:
 
 env:
   PREVIEW_DOMAIN: skyoffice360.com
-  CF_ACCOUNT_ID: 96ba885239b5d682270e57908693b93e
 
 jobs:
   teardown:
@@ -72,6 +72,7 @@ jobs:
           REPO: ${{ github.event.repository.name }}
           DEVO: ${{ secrets.PREVIEW_DEV_ORIGIN }}
           SBURL: ${{ secrets.SUPABASE_URL }}
+          CFT: ${{ secrets.CF_PREVIEW_API_TOKEN }}
         run: |
           set -euo pipefail
           [ -n "$HOST" ] || { echo "::notice::PREVIEW_HOST not set — nothing to tear down"; echo "removed=0" >> "$GITHUB_OUTPUT"; exit 0; }
@@ -86,33 +87,15 @@ jobs:
           else
             printf 'DEV_ORIGIN=%s\nPROD_SUPABASE_HOST=%s\n' "$DEVO" "$PSH" | ssh "root@$HOST" 'install -d -m 700 /etc/so360-preview && umask 077 && cat > /etc/so360-preview/ci.env.tmp && mv /etc/so360-preview/ci.env.tmp /etc/so360-preview/ci.env'
           fi
+          if [ -n "${CFT:-}" ]; then
+            printf 'CF_API_TOKEN=%s\n' "$CFT" | ssh "root@$HOST" 'install -d -m 700 /etc/so360-preview && umask 077 && cat > /etc/so360-preview/cf.env.tmp && mv /etc/so360-preview/cf.env.tmp /etc/so360-preview/cf.env'
+          fi
           # ── end host config ──
           OUT=$(ssh "root@$HOST" "preview-ctl remove --slug '$SLUG' --repo '$REPO'")
           echo "$OUT"
+          # DNS + Access for every host that went away (preview-ctl cf-remove:
+          # DNS first, then Access). The Cloudflare token stays on the host.
+          FQDNS=$(sed -n 's/^REMOVED_HOST=\(pr-[a-z0-9-]*\.skyoffice360\.com\)$/--fqdn \1/p' <<<"$OUT" | tr '\n' ' ')
+          if grep -qx 'REMOVED_PREVIEW=1' <<<"$OUT"; then FQDNS="--fqdn pr-$SLUG.$PREVIEW_DOMAIN $FQDNS"; fi
+          if [ -n "${FQDNS// /}" ]; then ssh "root@$HOST" "preview-ctl cf-remove $FQDNS"; fi
           ssh-agent -k >/dev/null
-          if grep -qx 'REMOVED_PREVIEW=1' <<<"$OUT"; then echo "removed=1" >> "$GITHUB_OUTPUT"; else echo "removed=0" >> "$GITHUB_OUTPUT"; fi
-          HOSTS=$(sed -n 's/^REMOVED_HOST=\(pr-[a-z0-9-]*\.skyoffice360\.com\)$/\1/p' <<<"$OUT" | tr '\n' ' ')
-          echo "hosts=$HOSTS" >> "$GITHUB_OUTPUT"
-
-      - name: Remove Cloudflare DNS + Access app
-        if: steps.rm.outputs.removed == '1' || steps.rm.outputs.hosts != ''
-        env:
-          CFT: ${{ secrets.CF_PREVIEW_API_TOKEN }}
-          SLUG: ${{ steps.s.outputs.slug }}
-          REMOVED: ${{ steps.rm.outputs.removed }}
-          HOSTS: ${{ steps.rm.outputs.hosts }}
-        run: |
-          set -euo pipefail
-          FQDNS="$HOSTS"
-          [ "$REMOVED" = 1 ] && FQDNS="pr-$SLUG.$PREVIEW_DOMAIN $FQDNS"
-          cf() { curl -fsS -H "Authorization: Bearer $CFT" -H "Content-Type: application/json" "$@"; }
-          API=https://api.cloudflare.com/client/v4
-          ZONE=$(cf "$API/zones?name=$PREVIEW_DOMAIN" | jq -r '.result[0].id')
-          for FQDN in $FQDNS; do
-            for id in $(cf "$API/zones/$ZONE/dns_records?name=$FQDN" | jq -r '.result[] | select((.comment // "") | startswith("so360-preview")) | .id'); do
-              cf -X DELETE "$API/zones/$ZONE/dns_records/$id" >/dev/null && echo "Deleted DNS $FQDN"
-            done
-            for id in $(cf "$API/accounts/$CF_ACCOUNT_ID/access/apps?domain=$FQDN" | jq -r --arg d "$FQDN" '.result[] | select(.domain == $d and (.name | startswith("SO360 Preview"))) | .id'); do
-              cf -X DELETE "$API/accounts/$CF_ACCOUNT_ID/access/apps/$id" >/dev/null && echo "Deleted Access app $FQDN"
-            done
-          done
