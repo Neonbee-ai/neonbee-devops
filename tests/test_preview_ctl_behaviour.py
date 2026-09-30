@@ -8,8 +8,9 @@ replaced by logging stubs, so every branch of the script is exercised without
 touching a real host.
 
 Needs Linux (GNU sed -i, bash 4+) and jq — exactly what the self-hosted runner
-has. Skipped elsewhere, and skipped on a real preview host (a present
-/etc/so360-preview/preview.env would override the sandbox paths).
+has. Skipped elsewhere. The host config is redirected via PREVIEW_ENV_FILE to a
+sandbox path, so the specs also run on the runner that doubles as the preview
+host without reading /etc/so360-preview/preview.env.
 Run: python3 -m unittest discover -s tests -p 'test_*.py' -v
 """
 
@@ -25,7 +26,6 @@ import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CTL = os.path.join(ROOT, "preview", "bin", "preview-ctl")
-HOST_ENV = "/etc/so360-preview/preview.env"
 
 HASH = "0123456789abcdef"
 SLUG = "feat-crm-owner"
@@ -44,8 +44,6 @@ if platform.system() != "Linux":
     SKIP_REASON = "preview-ctl targets Linux (GNU sed -i)"
 elif not shutil.which("jq") or not shutil.which("bash") or not _gnu_sed():
     SKIP_REASON = "needs bash, jq and GNU sed"
-elif os.path.exists(HOST_ENV):
-    SKIP_REASON = f"{HOST_ENV} exists — refusing to run on a real preview host"
 
 
 # Stubs log every call to $STUB_STATE/calls.log. Behaviour is switched by
@@ -126,6 +124,8 @@ class PreviewCtlCase(unittest.TestCase):
             "PREVIEW_PORT_MIN": "7100",
             "PREVIEW_PORT_MAX": "7105",
             "DEV_ORIGIN": "10.0.0.1",
+            "PREVIEW_ENV_FILE": os.path.join(self.tmp, "etc", "preview.env"),
+            "PREVIEW_CI_ENV_FILE": os.path.join(self.tmp, "etc", "ci.env"),
         })
         self.env = env
 
@@ -477,6 +477,16 @@ class GivenABackendEnv(PreviewCtlCase):
                    env={"PROD_SUPABASE_HOST": "prodref.supabase.co"})
         self.assertFalse(any(c.startswith("pm2 start") for c in self.calls()))
 
+    def test_when_ci_env_carries_the_production_database_host_then_deploy_is_refused(self):
+        path = self.env["PREVIEW_CI_ENV_FILE"]
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write("PROD_SUPABASE_HOST=prodref.supabase.co\n")
+        self.upload_be("so360-crm-be", env_text="SUPABASE_URL=https://prodref.supabase.co\n")
+        self.fails(*self.deploy("so360-crm-be", "be", "crm", extra=("--lockhash", HASH)),
+                   message="references the production database")
+        self.assertFalse(any(c.startswith("pm2 start") for c in self.calls()))
+
 
 # ── Sleep / wake ─────────────────────────────────────────────────────────────
 class GivenARunningPreview(PreviewCtlCase):
@@ -645,6 +655,32 @@ class GivenRender(PreviewCtlCase):
     def test_when_dev_origin_is_unset_then_render_is_refused(self):
         self.fails("render", message="DEV_ORIGIN is not set", env={"DEV_ORIGIN": None})
         self.assertFalse(os.path.exists(self.nginx_out))
+
+    def write_host_env(self, key, body):
+        path = self.env[key]
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write(body)
+
+    def test_when_the_env_files_are_missing_then_the_refusal_names_both_configured_files(self):
+        r = self.fails("render", message="DEV_ORIGIN is not set", env={"DEV_ORIGIN": None})
+        self.assertIn(self.env["PREVIEW_CI_ENV_FILE"], r.stderr)
+        self.assertIn(self.env["PREVIEW_ENV_FILE"], r.stderr)
+        self.assertIn("PREVIEW_DEV_ORIGIN secret", r.stderr)
+        self.assertNotIn("/etc/so360-preview", r.stderr)
+
+    def test_when_only_the_host_env_file_sets_dev_origin_then_render_uses_it(self):
+        self.write_host_env("PREVIEW_ENV_FILE", "DEV_ORIGIN=10.9.9.9\n")
+        self.ok("render", env={"DEV_ORIGIN": None})
+        self.assertIn("upstream so360_dev_origin { server 10.9.9.9:443; keepalive 16; }", self.nginx())
+
+    def test_when_the_ci_env_file_sets_dev_origin_then_it_wins_over_the_host_env_file(self):
+        self.write_host_env("PREVIEW_ENV_FILE", "DEV_ORIGIN=10.9.9.9\n")
+        self.write_host_env("PREVIEW_CI_ENV_FILE", "DEV_ORIGIN=10.8.8.8\n")
+        self.ok("render", env={"DEV_ORIGIN": None})
+        conf = self.nginx()
+        self.assertIn("server 10.8.8.8:443;", conf)
+        self.assertNotIn("10.9.9.9", conf)
 
     def test_when_rendered_empty_then_http_redirects_and_unknown_previews_get_a_noindex_404(self):
         self.ok("render")
