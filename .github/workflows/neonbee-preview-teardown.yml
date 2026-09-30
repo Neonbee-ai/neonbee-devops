@@ -32,6 +32,8 @@ on:
       PREVIEW_HOST:         { required: false }
       PREVIEW_SSH_KEY:      { required: false }
       CF_PREVIEW_API_TOKEN: { required: false }
+      PREVIEW_DEV_ORIGIN:   { required: false }
+      SUPABASE_URL:         { required: false }
 
 env:
   PREVIEW_DOMAIN: skyoffice360.com
@@ -66,6 +68,8 @@ jobs:
           HOST: ${{ secrets.PREVIEW_HOST }}
           SLUG: ${{ steps.s.outputs.slug }}
           REPO: ${{ github.event.repository.name }}
+          DEVO: ${{ secrets.PREVIEW_DEV_ORIGIN }}
+          SBURL: ${{ secrets.SUPABASE_URL }}
         run: |
           set -euo pipefail
           [ -n "$HOST" ] || { echo "::notice::PREVIEW_HOST not set — nothing to tear down"; echo "removed=0" >> "$GITHUB_OUTPUT"; exit 0; }
@@ -73,6 +77,14 @@ jobs:
           eval "$(ssh-agent -s)"
           echo "$KEY" | ssh-add -
           ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts 2>/dev/null
+          # ── host config from secrets (keep identical in all preview workflows) ──
+          PSH=$(printf '%s' "$SBURL" | sed -E 's#^[a-z]+://##; s#[/:].*$##')
+          if printf '%s\n%s\n' "$DEVO" "$PSH" | grep -qvxE '[A-Za-z0-9.-]+'; then
+            echo "::warning title=Preview host config::PREVIEW_DEV_ORIGIN or SUPABASE_URL secret missing/invalid - host keeps its current config"
+          else
+            printf 'DEV_ORIGIN=%s\nPROD_SUPABASE_HOST=%s\n' "$DEVO" "$PSH" | ssh "root@$HOST" 'install -d -m 700 /etc/so360-preview && umask 077 && cat > /etc/so360-preview/ci.env.tmp && mv /etc/so360-preview/ci.env.tmp /etc/so360-preview/ci.env'
+          fi
+          # ── end host config ──
           OUT=$(ssh "root@$HOST" "preview-ctl remove --slug '$SLUG' --repo '$REPO'")
           echo "$OUT"
           ssh-agent -k >/dev/null
