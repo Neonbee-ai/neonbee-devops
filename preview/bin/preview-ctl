@@ -316,6 +316,9 @@ render_nginx() {
     echo "server_names_hash_bucket_size 128;"
     echo "upstream so360_dev_origin { server $DEV_ORIGIN:443; keepalive 16; }"
     echo "map \$http_upgrade \$pv_connection_upgrade { default upgrade; '' ''; }"
+    # Only hashed build assets are safe to cache; index.html, remoteEntry.js and
+    # anything else must always come fresh from develop (dev sends no Cache-Control).
+    echo "map \$uri \$pv_nocache { ~remoteEntry\\.js\$ 1; ~/assets/ 0; default 1; }"
     cat <<EOF
 server {
     listen 80;
