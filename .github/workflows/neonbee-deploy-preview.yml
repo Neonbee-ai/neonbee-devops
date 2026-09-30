@@ -454,6 +454,17 @@ jobs:
             } > "$OUT/app/.env"
             EXTRA='${{ inputs.extra_env }}'
             [ -n "$EXTRA" ] && printf '%s\n' "$EXTRA" >> "$OUT/app/.env"
+            # The dev block calls sibling services on the Dev VM's loopback
+            # ports; the preview host has no listeners there for backends, so
+            # point them at develop's services on dev-api (same map as
+            # preview-ctl's DEV_SERVICES).
+            for svc in core:6000 crm:6003 inventory:6006 accounting:6008 projects:6010 \
+                       timesheet:6012 people:6015 inbox:6017 neura:6018 storefront:6020 flow:6021 \
+                       insight:6023 subscription:6026 forms:6027 dailystore:6029 fulfillment:6032 \
+                       support:6033 manufacturing:6034 chat:6036 documents:6037 sign:6038 \
+                       mobility:6040 folio:6044 connect:6048 signal:6049; do
+              sed -i -E "s#https?://(127\.0\.0\.1|localhost):${svc##*:}([^0-9]|\$)#https://dev-api.skyoffice360.com/${svc%%:*}\2#g" "$OUT/app/.env"
+            done
             sed -i '/=$/d' "$OUT/app/.env"
           elif [ "$KIND" = next ]; then
             cp -r .next "$OUT/app/.next"
