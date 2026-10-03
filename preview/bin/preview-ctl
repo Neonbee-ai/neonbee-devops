@@ -64,6 +64,8 @@ CF_API=${PREVIEW_CF_API:-https://api.cloudflare.com/client/v4}
 CF_ACCOUNT_ID=${PREVIEW_CF_ACCOUNT_ID:-96ba885239b5d682270e57908693b93e}
 # "Moonhive / NeonBee team" reusable Access policy.
 CF_ACCESS_POLICY_ID=${PREVIEW_CF_ACCESS_POLICY_ID:-ef40640b-ee71-4b45-9202-cff5f7de4e39}
+# "Office IP bypass" reusable Access policy: office network skips the login.
+CF_BYPASS_POLICY_ID=${PREVIEW_CF_BYPASS_POLICY_ID:-98a28b97-5830-45f8-992f-bdaeb54341d1}
 
 # Server-side calls from Next apps use the same 127.0.0.1:<port> addresses as
 # on the Dev VM. The preview host answers them with loopback listeners that
@@ -471,13 +473,20 @@ cmd_cf_ensure() {
   valid_slug "$CF_SLUG"
   [[ "$CF_IP" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || die "cf-ensure: invalid --ip '$CF_IP'"
   cf_load
-  local fqdn app rec body
+  local fqdn app wild rec body
   for fqdn in "${CF_FQDNS[@]}"; do
-    app=$(cf "$CF_API/accounts/$CF_ACCOUNT_ID/access/apps?domain=$fqdn" | jq -r --arg d "$fqdn" '[.result[] | select(.domain == $d)][0].id // empty')
+    # One shared "pr-*" Access app gates every preview, so a single login
+    # lasts 30 days across all branches; per-host apps only when it is absent.
+    wild="pr-*.${fqdn#*.}"
+    if [[ "$fqdn" == pr-* ]] && cf "$CF_API/accounts/$CF_ACCOUNT_ID/access/apps?domain=$wild" | jq -e --arg d "$wild" 'any(.result[]; .domain == $d)' >/dev/null; then
+      app=$wild
+    else
+      app=$(cf "$CF_API/accounts/$CF_ACCOUNT_ID/access/apps?domain=$fqdn" | jq -r --arg d "$fqdn" '[.result[] | select(.domain == $d)][0].id // empty')
+    fi
     if [ -z "$app" ]; then
-      cf -X POST "$CF_API/accounts/$CF_ACCOUNT_ID/access/apps" --data "$(jq -n --arg d "$fqdn" --arg n "SO360 Preview – $CF_SLUG" --arg p "$CF_ACCESS_POLICY_ID" \
+      cf -X POST "$CF_API/accounts/$CF_ACCOUNT_ID/access/apps" --data "$(jq -n --arg d "$fqdn" --arg n "SO360 Preview – $CF_SLUG" --arg p "$CF_ACCESS_POLICY_ID" --arg b "$CF_BYPASS_POLICY_ID" \
         '{name: $n, domain: $d, type: "self_hosted", session_duration: "720h", app_launcher_visible: false,
-          policies: [{id: $p, precedence: 1}]}')" >/dev/null
+          policies: [{id: $b, precedence: 1}, {id: $p, precedence: 2}]}')" >/dev/null
       echo "Created Access app for $fqdn"
     fi
     rec=$(cf "$CF_API/zones/$CF_ZONE/dns_records?type=A&name=$fqdn" | jq -r '.result[0].id // empty')
