@@ -1,0 +1,143 @@
+# =============================================================================
+# Neonbee — Provision tools.neonbee.app (one-time, workflow_dispatch, idempotent)
+# =============================================================================
+# Everything via CI — no manual server or Cloudflare access:
+#   1. nginx vhost nginx/tools.neonbee.app.conf → Prod VM + HA VM
+#      (sites-available + sites-enabled symlink, web root, nginx -t, reload;
+#       rolls the vhost back if nginx -t fails so the VM is never left broken)
+#   2. Cloudflare: proxied LB tools.neonbee.app on the existing HA pools
+#      (neonbee-prod-primary → neonbee-ha-standby). If the pools are missing,
+#      falls back to a proxied A record → Prod VM.
+#
+# Run AFTER merging, BEFORE the first so360-shell-fe deploy-tools run.
+# Re-running is safe: existing vhost is overwritten, existing LB/record kept.
+# =============================================================================
+
+name: "Provision tools.neonbee.app"
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run — validate and show actions without applying'
+        type: boolean
+        default: false
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  HOST_NAME: tools.neonbee.app
+  CONF: nginx/tools.neonbee.app.conf
+  WEB_ROOT: /var/www/tools.neonbee.app/html
+  PROD_IP: '68.183.86.248'
+
+jobs:
+  nginx:
+    runs-on: [self-hosted, contabo, Linux]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: |
+            ${{ secrets.DIGITALOCEAN_SSH_KEY }}
+            ${{ secrets.CONTABO_SSH_KEY }}
+
+      - name: Install vhost on Prod VM + HA VM
+        env:
+          HA_IP: ${{ secrets.HA_VM_IP }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          [ -z "$HA_IP" ] && echo "ERROR: HA_VM_IP secret is not set" && exit 1
+          NAME=$(basename "$CONF")
+          for IP in "$PROD_IP" "$HA_IP"; do
+            echo "── $IP ──"
+            ssh-keyscan -H "$IP" >> ~/.ssh/known_hosts 2>/dev/null
+            ssh root@"$IP" "test -f /etc/ssl/cloudflare/neonbee.app.crt && test -f /etc/ssl/cloudflare/neonbee.app.key" \
+              || { echo "ERROR: Cloudflare origin cert missing on $IP (/etc/ssl/cloudflare/neonbee.app.*)"; exit 1; }
+            if [ "$DRY_RUN" = "true" ]; then
+              echo "[DRY RUN] would install $NAME, mkdir $WEB_ROOT, nginx -t && reload on $IP"
+              continue
+            fi
+            rsync -avz "$CONF" "root@$IP:/etc/nginx/sites-available/$NAME.new"
+            ssh root@"$IP" "
+              set -e
+              mkdir -p '$WEB_ROOT'
+              [ -f /etc/nginx/sites-available/$NAME ] && cp /etc/nginx/sites-available/$NAME /tmp/$NAME.bak || rm -f /tmp/$NAME.bak
+              mv /etc/nginx/sites-available/$NAME.new /etc/nginx/sites-available/$NAME
+              ln -sf /etc/nginx/sites-available/$NAME /etc/nginx/sites-enabled/$NAME
+              if nginx -t; then
+                nginx -s reload
+                echo 'vhost $NAME active'
+              else
+                echo 'nginx -t FAILED — rolling back $NAME'
+                if [ -f /tmp/$NAME.bak ]; then mv /tmp/$NAME.bak /etc/nginx/sites-available/$NAME
+                else rm -f /etc/nginx/sites-enabled/$NAME /etc/nginx/sites-available/$NAME; fi
+                nginx -t && nginx -s reload
+                exit 1
+              fi
+            "
+          done
+
+  cloudflare:
+    needs: nginx
+    runs-on: [self-hosted, contabo, Linux]
+    timeout-minutes: 10
+    steps:
+      - name: Create LB / DNS for tools.neonbee.app
+        env:
+          CF_LB_TOKEN: ${{ secrets.CF_LB_API_TOKEN }}
+          CF_SAAS_TOKEN: ${{ secrets.CF_SAAS_API_TOKEN }}
+          CF_ACCOUNT: ${{ secrets.CF_R2_ACCOUNT_ID }}
+          CF_ZONE: ${{ secrets.CF_SAAS_ZONE_ID }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          CF_TOKEN="${CF_LB_TOKEN:-$CF_SAAS_TOKEN}"
+          [ -z "$CF_TOKEN" ] || [ -z "$CF_ZONE" ] && echo "ERROR: CF token / zone secret missing" && exit 1
+          echo "::add-mask::$CF_TOKEN"
+          API=https://api.cloudflare.com/client/v4
+          AUTH="Authorization: Bearer $CF_TOKEN"
+
+          # Already served? (LB or DNS record) → nothing to do.
+          LB_ID=$(curl -sf "$API/zones/$CF_ZONE/load_balancers" -H "$AUTH" | python3 -c "import sys,json; \
+            [print(x['id']) for x in json.load(sys.stdin).get('result',[]) if x.get('name')=='$HOST_NAME']" 2>/dev/null | head -1 || true)
+          REC_ID=$(curl -sf "$API/zones/$CF_ZONE/dns_records?name=$HOST_NAME" -H "$AUTH" | python3 -c "import sys,json; \
+            [print(x['id']+' '+x['type']+' '+x['content']+' proxied='+str(x['proxied'])) for x in json.load(sys.stdin).get('result',[])]" 2>/dev/null | head -1 || true)
+          [ -n "$LB_ID" ] && echo "LB $HOST_NAME already exists: $LB_ID" && exit 0
+          [ -n "$REC_ID" ] && echo "DNS record already exists: $REC_ID" && exit 0
+
+          pool_id() {
+            [ -z "$CF_ACCOUNT" ] && return 0
+            curl -sf "$API/accounts/$CF_ACCOUNT/load_balancers/pools" -H "$AUTH" | python3 -c "import sys,json; \
+              [print(p['id']) for p in json.load(sys.stdin).get('result',[]) if p.get('name')=='$1']" 2>/dev/null | head -1 || true
+          }
+          PROD_POOL=$(pool_id neonbee-prod-primary)
+          HA_POOL=$(pool_id neonbee-ha-standby)
+
+          if [ -n "$PROD_POOL" ] && [ -n "$HA_POOL" ]; then
+            BODY="{\"name\":\"$HOST_NAME\",\"default_pools\":[\"$PROD_POOL\"],\"fallback_pool\":\"$HA_POOL\",\"steering_policy\":\"off\",\"proxied\":true,\"enabled\":true,\"ttl\":30,\"description\":\"Neonbee HA failover — prod primary, HA standby fallback\"}"
+            URL="$API/zones/$CF_ZONE/load_balancers"; WHAT="LB (prod $PROD_POOL → HA $HA_POOL)"
+          else
+            BODY="{\"type\":\"A\",\"name\":\"$HOST_NAME\",\"content\":\"$PROD_IP\",\"proxied\":true,\"ttl\":1,\"comment\":\"Neonbee Free Tools — neonbee-tools-provision.yml\"}"
+            URL="$API/zones/$CF_ZONE/dns_records"; WHAT="proxied A record → $PROD_IP (HA pools not found)"
+          fi
+
+          [ "$DRY_RUN" = "true" ] && echo "[DRY RUN] would create $WHAT" && exit 0
+          RESP=$(curl -s -X POST "$URL" -H "$AUTH" -H "Content-Type: application/json" -d "$BODY")
+          echo "$RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); \
+            print('Created $WHAT: '+d['result']['id']) if d.get('success') else (print('FAILED: '+str(d.get('errors'))), sys.exit(1))"
+
+      - name: Smoke check
+        if: inputs.dry_run != true
+        run: |
+          # DNS/edge can take a minute; a 2xx/3xx/404 from the edge means routing works
+          # (the web root is empty until so360-shell-fe deploy-tools runs).
+          for i in 1 2 3 4 5 6; do
+            CODE=$(curl -s -o /dev/null -w "%{http_code}" -A "Mozilla/5.0 neonbee-provision" "https://$HOST_NAME/" || echo 000)
+            echo "attempt $i: https://$HOST_NAME → $CODE"
+            case "$CODE" in 2*|3*|403|404) exit 0;; esac
+            sleep 20
+          done
+          echo "::warning::$HOST_NAME not reachable yet — DNS may still be propagating"
