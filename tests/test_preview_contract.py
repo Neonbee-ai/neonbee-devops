@@ -156,5 +156,23 @@ class Reconcile(unittest.TestCase):
         self.assertIn('[ "$code" = 404 ] || alive=1', read(RECONCILE))
 
 
+class MfeStylesheetPath(unittest.TestCase):
+    """The federation runtime requests <base>/<file>.css, not <base>/assets/<file>.css."""
+
+    def test_an_mfe_preview_also_serves_its_stylesheet_from_the_root(self):
+        text = read(DEPLOY)
+        # Only MFE builds (kind fe + is_mfe) get the root copy.
+        self.assertIn('if [ "$KIND" = fe ] && [ "${{ inputs.is_mfe }}" = "true" ]; then', text)
+        self.assertIn("find dist/assets -maxdepth 1 -type f -name '*.css' -exec cp {} \"$OUT/app/\" \\;", text)
+
+    def test_the_root_copy_is_added_after_dist_is_staged_and_never_replaces_it(self):
+        text = read(DEPLOY)
+        stage = text.index('cp -r dist/. "$OUT/app/"')
+        css = text.index("find dist/assets -maxdepth 1")
+        self.assertLess(stage, css)
+        # assets/ stays in place — the copy is additive.
+        self.assertNotIn("mv dist/assets", text)
+
+
 if __name__ == "__main__":
     unittest.main()

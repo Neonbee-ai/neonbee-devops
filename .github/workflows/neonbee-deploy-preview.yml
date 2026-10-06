@@ -483,6 +483,16 @@ jobs:
             fi
           else
             cp -r dist/. "$OUT/app/"
+            # @originjs/vite-plugin-federation loads a remote's stylesheet from
+            # <vite base>/<file>.css — WITHOUT the assets/ segment (the remoteEntry
+            # carries `new base + css file`, never assetsDir). Dev serves the CSS at
+            # that root path too; a preview serves /cdn/<name>/ straight from this
+            # tree, where the build keeps the CSS under assets/, so every MFE
+            # rendered on a preview without its stylesheet (404 on
+            # /cdn/<name>/style-*.css). Keep a copy at the root as well.
+            if [ "$KIND" = fe ] && [ "${{ inputs.is_mfe }}" = "true" ]; then
+              find dist/assets -maxdepth 1 -type f -name '*.css' -exec cp {} "$OUT/app/" \;
+            fi
           fi
           echo "out=$OUT" >> "$GITHUB_OUTPUT"
 
