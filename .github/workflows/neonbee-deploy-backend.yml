@@ -757,9 +757,15 @@ jobs:
             pm2 stop "$SERVICE_NAME" 2>/dev/null || true
             pm2 delete "$SERVICE_NAME" 2>/dev/null || true
             sleep 3
-            fuser -k "$PORT/tcp" 2>/dev/null || true
-            lsof -ti :"$PORT" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
-            ss -Hlptn "sport = :$PORT" 2>/dev/null | grep -oP '(?<=pid=)\d+' | sort -u | xargs -r kill -9 2>/dev/null || true
+            # Free the port, but never kill a PM2 daemon or PM2-managed process: in cluster mode the
+            # God daemon holds the listen socket, and killing it takes every app on the VM down.
+            SAFE_PIDS=" $(pgrep -f 'PM2 v.*God Daemon' | tr '\n' ' ') $(pm2 jlist 2>/dev/null | grep -oP '"pid":\K[0-9]+' | tr '\n' ' ') "
+            for PID in $( { lsof -ti :"$PORT" 2>/dev/null; ss -Hlptn "sport = :$PORT" 2>/dev/null | grep -oP '(?<=pid=)\d+'; } | sort -u); do
+              case "$SAFE_PIDS" in
+                *" $PID "*) echo "Port $PORT held by PM2 pid $PID - not killing" ;;
+                *) kill -9 "$PID" 2>/dev/null || true ;;
+              esac
+            done
             sleep 2
             MAIN_JS=$(find dist -name main.js | head -1)
             PORT=$PORT pm2 start "$MAIN_JS" --name "$SERVICE_NAME" --cwd "$SERVICE_DIR" --instances 1 --max-memory-restart 400M --update-env
@@ -916,9 +922,15 @@ jobs:
             pm2 stop "$SERVICE_NAME" 2>/dev/null || true
             pm2 delete "$SERVICE_NAME" 2>/dev/null || true
             sleep 3
-            fuser -k "$PORT/tcp" 2>/dev/null || true
-            lsof -ti :"$PORT" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
-            ss -Hlptn "sport = :$PORT" 2>/dev/null | grep -oP '(?<=pid=)\d+' | sort -u | xargs -r kill -9 2>/dev/null || true
+            # Free the port, but never kill a PM2 daemon or PM2-managed process: in cluster mode the
+            # God daemon holds the listen socket, and killing it takes every app on the VM down.
+            SAFE_PIDS=" $(pgrep -f 'PM2 v.*God Daemon' | tr '\n' ' ') $(pm2 jlist 2>/dev/null | grep -oP '"pid":\K[0-9]+' | tr '\n' ' ') "
+            for PID in $( { lsof -ti :"$PORT" 2>/dev/null; ss -Hlptn "sport = :$PORT" 2>/dev/null | grep -oP '(?<=pid=)\d+'; } | sort -u); do
+              case "$SAFE_PIDS" in
+                *" $PID "*) echo "Port $PORT held by PM2 pid $PID - not killing" ;;
+                *) kill -9 "$PID" 2>/dev/null || true ;;
+              esac
+            done
             sleep 2
             MAIN_JS=$(find dist -name main.js | head -1)
             PORT=$PORT pm2 start "$MAIN_JS" --name "$SERVICE_NAME" --cwd "$SERVICE_DIR" --instances 1 --max-memory-restart 400M --update-env
