@@ -155,6 +155,13 @@ class Reconcile(unittest.TestCase):
     def test_api_errors_never_count_as_branch_deleted(self):
         self.assertIn('[ "$code" = 404 ] || alive=1', read(RECONCILE))
 
+    def test_ssh_inside_the_sleep_remove_loop_never_reads_the_loop_input(self):
+        # Without -n, the first sleep/remove ssh swallowed the rest of the
+        # `while read` input, so each nightly run handled one preview at most.
+        text = read(RECONCILE)
+        act = re.search(r"^\s*act\(\) \{.*$", text, re.M).group(0)
+        self.assertIn('ssh -n "root@$HOST"', act)
+
 
 if __name__ == "__main__":
     unittest.main()
