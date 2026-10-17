@@ -133,6 +133,7 @@ jobs:
           set -euo pipefail
           REG=$(ssh "root@$HOST" preview-ctl list)
           NOW=$(date -u +%s)
+          # ssh -n: without it the first ssh swallows the rest of the while-read input.
           act() { if [ "$DRY" = true ]; then echo "dry run: $*"; else ssh -n "root@$HOST" "preview-ctl $*"; fi; }
           jq -r '.previews | to_entries[] | [.key, .value.branch, .value.last_push, .value.asleep, (.value.components | keys | join(","))] | @tsv' <<<"$REG" |
           while IFS=$'\t' read -r slug branch last asleep repos; do
