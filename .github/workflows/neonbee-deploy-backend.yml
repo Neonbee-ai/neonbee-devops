@@ -93,6 +93,12 @@ on:
       PEOPLE_INTERNAL_KEY:          { required: false }
       PEOPLE_INTERNAL_KEY_2:        { required: false }
       CORE_INTERNAL_KEY:           { required: false }
+      NEURA_INTERNAL_KEY:           { required: false }
+      NEURA_INTERNAL_KEY_2:         { required: false }
+      CONNECT_INTERNAL_KEY:         { required: false }
+      CONNECT_INTERNAL_KEYS:        { required: false }
+      MARKETING_INTERNAL_KEY:       { required: false }
+      MARKETING_TRACKING_SECRET:    { required: false }
       FLOW_INTERNAL_KEY:           { required: false }
       EMAIL_INTERNAL_KEY:           { required: false }
       NOTIFICATION_INTERNAL_KEY:    { required: false }
@@ -701,6 +707,12 @@ jobs:
             [ -n "${{ secrets.EMAIL_INTERNAL_KEY }}" ]          && echo "EMAIL_INTERNAL_KEY=${{ secrets.EMAIL_INTERNAL_KEY }}"                   >> .env.ci
             [ -n "${{ secrets.NOTIFICATION_INTERNAL_KEY }}" ]   && echo "NOTIFICATION_INTERNAL_KEY=${{ secrets.NOTIFICATION_INTERNAL_KEY }}"     >> .env.ci
             [ -n "${{ secrets.INBOX_SERVICE_KEY }}" ]           && echo "INBOX_SERVICE_KEY=${{ secrets.INBOX_SERVICE_KEY }}"                     >> .env.ci
+            [ -n "${{ secrets.NEURA_INTERNAL_KEY }}" ]    && echo "NEURA_INTERNAL_KEY=${{ secrets.NEURA_INTERNAL_KEY }}"                      >> .env.ci
+            [ -n "${{ secrets.NEURA_INTERNAL_KEY_2 }}" ]  && echo "NEURA_INTERNAL_KEY_2=${{ secrets.NEURA_INTERNAL_KEY_2 }}"                    >> .env.ci
+            [ -n "${{ secrets.CONNECT_INTERNAL_KEY }}" ]  && echo "CONNECT_INTERNAL_KEY=${{ secrets.CONNECT_INTERNAL_KEY }}"                    >> .env.ci
+            [ -n "${{ secrets.CONNECT_INTERNAL_KEYS }}" ] && echo "CONNECT_INTERNAL_KEYS=${{ secrets.CONNECT_INTERNAL_KEYS }}"                   >> .env.ci
+            [ -n "${{ secrets.MARKETING_INTERNAL_KEY }}" ] && echo "MARKETING_INTERNAL_KEY=${{ secrets.MARKETING_INTERNAL_KEY }}"                  >> .env.ci
+            [ -n "${{ secrets.MARKETING_TRACKING_SECRET }}" ] && echo "MARKETING_TRACKING_SECRET=${{ secrets.MARKETING_TRACKING_SECRET }}"               >> .env.ci
             [ -n "${{ secrets.GEMINI_API_KEY }}" ]              && echo "GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}"                           >> .env.ci
             [ -n "${{ secrets.OPENAI_API_KEY }}" ]              && echo "OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}"                           >> .env.ci
             [ -n "${{ secrets.ANTHROPIC_API_KEY }}" ]           && echo "ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}"                     >> .env.ci
@@ -757,9 +769,15 @@ jobs:
             pm2 stop "$SERVICE_NAME" 2>/dev/null || true
             pm2 delete "$SERVICE_NAME" 2>/dev/null || true
             sleep 3
-            fuser -k "$PORT/tcp" 2>/dev/null || true
-            lsof -ti :"$PORT" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
-            ss -Hlptn "sport = :$PORT" 2>/dev/null | grep -oP '(?<=pid=)\d+' | sort -u | xargs -r kill -9 2>/dev/null || true
+            # Free the port, but never kill a PM2 daemon or PM2-managed process: in cluster mode the
+            # God daemon holds the listen socket, and killing it takes every app on the VM down.
+            SAFE_PIDS=" $(pgrep -f 'PM2 v.*God Daemon' | tr '\n' ' ') $(pm2 jlist 2>/dev/null | grep -oP '"pid":\K[0-9]+' | tr '\n' ' ') "
+            for PID in $( { lsof -ti :"$PORT" 2>/dev/null; ss -Hlptn "sport = :$PORT" 2>/dev/null | grep -oP '(?<=pid=)\d+'; } | sort -u); do
+              case "$SAFE_PIDS" in
+                *" $PID "*) echo "Port $PORT held by PM2 pid $PID - not killing" ;;
+                *) kill -9 "$PID" 2>/dev/null || true ;;
+              esac
+            done
             sleep 2
             MAIN_JS=$(find dist -name main.js | head -1)
             PORT=$PORT pm2 start "$MAIN_JS" --name "$SERVICE_NAME" --cwd "$SERVICE_DIR" --instances 1 --max-memory-restart 400M --update-env
@@ -865,6 +883,12 @@ jobs:
             [ -n "${{ secrets.EMAIL_INTERNAL_KEY }}" ]          && echo "EMAIL_INTERNAL_KEY=${{ secrets.EMAIL_INTERNAL_KEY }}"                   >> .env.ci
             [ -n "${{ secrets.NOTIFICATION_INTERNAL_KEY }}" ]   && echo "NOTIFICATION_INTERNAL_KEY=${{ secrets.NOTIFICATION_INTERNAL_KEY }}"     >> .env.ci
             [ -n "${{ secrets.INBOX_SERVICE_KEY }}" ]           && echo "INBOX_SERVICE_KEY=${{ secrets.INBOX_SERVICE_KEY }}"                     >> .env.ci
+            [ -n "${{ secrets.NEURA_INTERNAL_KEY }}" ]    && echo "NEURA_INTERNAL_KEY=${{ secrets.NEURA_INTERNAL_KEY }}"                      >> .env.ci
+            [ -n "${{ secrets.NEURA_INTERNAL_KEY_2 }}" ]  && echo "NEURA_INTERNAL_KEY_2=${{ secrets.NEURA_INTERNAL_KEY_2 }}"                    >> .env.ci
+            [ -n "${{ secrets.CONNECT_INTERNAL_KEY }}" ]  && echo "CONNECT_INTERNAL_KEY=${{ secrets.CONNECT_INTERNAL_KEY }}"                    >> .env.ci
+            [ -n "${{ secrets.CONNECT_INTERNAL_KEYS }}" ] && echo "CONNECT_INTERNAL_KEYS=${{ secrets.CONNECT_INTERNAL_KEYS }}"                   >> .env.ci
+            [ -n "${{ secrets.MARKETING_INTERNAL_KEY }}" ] && echo "MARKETING_INTERNAL_KEY=${{ secrets.MARKETING_INTERNAL_KEY }}"                  >> .env.ci
+            [ -n "${{ secrets.MARKETING_TRACKING_SECRET }}" ] && echo "MARKETING_TRACKING_SECRET=${{ secrets.MARKETING_TRACKING_SECRET }}"               >> .env.ci
             [ -n "${{ secrets.GEMINI_API_KEY }}" ]              && echo "GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}"                           >> .env.ci
             [ -n "${{ secrets.OPENAI_API_KEY }}" ]              && echo "OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}"                           >> .env.ci
             [ -n "${{ secrets.ANTHROPIC_API_KEY }}" ]           && echo "ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}"                     >> .env.ci
@@ -916,9 +940,15 @@ jobs:
             pm2 stop "$SERVICE_NAME" 2>/dev/null || true
             pm2 delete "$SERVICE_NAME" 2>/dev/null || true
             sleep 3
-            fuser -k "$PORT/tcp" 2>/dev/null || true
-            lsof -ti :"$PORT" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
-            ss -Hlptn "sport = :$PORT" 2>/dev/null | grep -oP '(?<=pid=)\d+' | sort -u | xargs -r kill -9 2>/dev/null || true
+            # Free the port, but never kill a PM2 daemon or PM2-managed process: in cluster mode the
+            # God daemon holds the listen socket, and killing it takes every app on the VM down.
+            SAFE_PIDS=" $(pgrep -f 'PM2 v.*God Daemon' | tr '\n' ' ') $(pm2 jlist 2>/dev/null | grep -oP '"pid":\K[0-9]+' | tr '\n' ' ') "
+            for PID in $( { lsof -ti :"$PORT" 2>/dev/null; ss -Hlptn "sport = :$PORT" 2>/dev/null | grep -oP '(?<=pid=)\d+'; } | sort -u); do
+              case "$SAFE_PIDS" in
+                *" $PID "*) echo "Port $PORT held by PM2 pid $PID - not killing" ;;
+                *) kill -9 "$PID" 2>/dev/null || true ;;
+              esac
+            done
             sleep 2
             MAIN_JS=$(find dist -name main.js | head -1)
             PORT=$PORT pm2 start "$MAIN_JS" --name "$SERVICE_NAME" --cwd "$SERVICE_DIR" --instances 1 --max-memory-restart 400M --update-env

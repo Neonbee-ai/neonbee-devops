@@ -120,6 +120,11 @@ reg_apply() { reg_read | jq "$@" | reg_write; }
 
 pm2_name() { echo "pv-$1-$2"; }
 
+# Registry key for a component. A repo can ship a shell and a standalone site
+# (so360-shell-fe → shell + tools); sites get their own key so the second deploy
+# doesn't overwrite the first. '@' can't appear in a repo name.
+comp_key() { if [ "$2" = site ]; then echo "$1@site:$3"; else echo "$1"; fi; }
+
 port_in_use() { ss -Hltn "sport = :$1" 2>/dev/null | grep -q .; }
 
 alloc_port() {
@@ -254,8 +259,10 @@ cmd_deploy() {
       [ -z "$dev_host" ] || valid_dev_host "$dev_host"
       local owner
       owner=$(reg_read | jq -r --arg h "$host" --arg s "$slug" --arg r "$repo" \
+        --arg key "$(comp_key "$repo" "$kind" "$name")" \
         '.previews | to_entries[] | .key as $k | .value.components | to_entries[]
-         | select(.value.host == $h and ($k != $s or .key != $r)) | "\($k)/\(.key)"' | head -1)
+         | select(.value.host == $h and ($k != $s or (.key != $key and .key != $r)))
+         | "\($k)/\(.key)"' | head -1)
       [ -z "$owner" ] || die "deploy: host $host already belongs to $owner"
       ;;
     *) [ -z "$host" ] && [ -z "$dev_host" ] || die "deploy: --host/--dev-host only apply to --kind site or next" ;;
@@ -293,12 +300,16 @@ cmd_deploy() {
   esac
 
   reg_apply --arg s "$slug" --arg b "$branch" --arg r "$repo" --arg k "$kind" \
+    --arg key "$(comp_key "$repo" "$kind" "$name")" \
     --arg n "$name" --arg sha "$sha" --arg h "$health" --arg lh "$lockhash" \
     --arg host "$host" --arg dh "$dev_host" --argjson spa "$spa" \
     --argjson p "$port" --argjson ts "$ts" '
     .previews[$s] = ((.previews[$s] // {created: $ts, components: {}})
       | .branch = $b | .last_push = $ts | .asleep = false
-      | .components[$r] = ({kind: $k, name: $n, sha: $sha, deployed: $ts,
+      # Drop a pre-comp_key site entry that was stored under the bare repo.
+      | (if $key != $r and .components[$r].kind == "site" and .components[$r].name == $n
+         then del(.components[$r]) else . end)
+      | .components[$key] = ({kind: $k, name: $n, sha: $sha, deployed: $ts,
                            port: $p, health: $h, lockhash: (if $lh == "" then null else $lh end)}
           + (if $spa then {spa: true} else {} end)
           + (if $host == "" then {} else {host: $host} end)
@@ -366,9 +377,10 @@ cmd_remove() {
   local base="$ROOT/$slug"
   if [ -n "$repo" ]; then
     valid_repo "$repo"
-    local comp kind name
-    comp=$(reg_read | jq -c --arg s "$slug" --arg r "$repo" '.previews[$s].components[$r] // empty')
-    if [ -n "$comp" ]; then
+    local comp kind name key
+    for key in $(reg_read | jq -r --arg s "$slug" --arg r "$repo" \
+        '.previews[$s].components // {} | keys[] | select(. == $r or startswith($r + "@"))'); do
+      comp=$(reg_read | jq -c --arg s "$slug" --arg k "$key" '.previews[$s].components[$k]')
       kind=$(jq -r .kind <<<"$comp"); name=$(jq -r .name <<<"$comp")
       case "$kind" in
         fe)    rm -rf "$base/cdn/$name" ;;
@@ -380,8 +392,8 @@ cmd_remove() {
                rm -rf "${base:?}/$kind/$name" ;;
       esac
       jq -r '.host // empty | "REMOVED_HOST=\(.)"' <<<"$comp"
-      reg_apply --arg s "$slug" --arg r "$repo" 'del(.previews[$s].components[$r])'
-    fi
+      reg_apply --arg s "$slug" --arg k "$key" 'del(.previews[$s].components[$k])'
+    done
     # Last component gone → the preview itself goes.
     if [ "$(reg_read | jq --arg s "$slug" '.previews[$s].components // {} | length')" != 0 ]; then
       render_nginx
@@ -429,7 +441,7 @@ cmd_deps_present() {
 
 cmd_prune_deps() {
   local keep dir
-  keep=$(reg_read | jq -r '.previews | to_entries[] | .value.components | to_entries[] | select(.value.lockhash) | "\(.key)/\(.value.lockhash)"')
+  keep=$(reg_read | jq -r '.previews | to_entries[] | .value.components | to_entries[] | select(.value.lockhash) | "\(.key | split("@")[0])/\(.value.lockhash)"')
   for dir in "$DEPS"/*/*; do
     [ -d "$dir" ] || continue
     grep -qx "${dir#"$DEPS"/}" <<<"$keep" && continue

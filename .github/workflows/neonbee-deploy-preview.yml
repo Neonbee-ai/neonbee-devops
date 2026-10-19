@@ -278,9 +278,20 @@ jobs:
           [ -L "$STALE_PKG" ] && rm -f "$STALE_PKG"
           if { [ "$KIND" = fe ] || [ "$KIND" = shell ] || [ "$KIND" = site ]; } && [ "${{ inputs.needs_shell_packages }}" = "true" ] && [ "${{ inputs.is_shell }}" != "true" ]; then
             rm -rf _shell-fe
-            if git clone --depth 1 --filter=blob:none --sparse --branch develop \
-                 "https://x-access-token:${{ secrets.PAT_TOKEN }}@github.com/Neonbee-ai/so360-shell-fe.git" \
-                 _shell-fe 2>/dev/null; then
+            # Build against the same-named so360-shell-fe branch when it exists,
+            # so a branch that changes @so360/* in the shell previews together.
+            SHELL_URL="https://x-access-token:${{ secrets.PAT_TOKEN }}@github.com/Neonbee-ai/so360-shell-fe.git"
+            shell_clone() {
+              rm -rf _shell-fe
+              git clone --depth 1 --filter=blob:none --sparse --branch "$1" "$SHELL_URL" _shell-fe
+            }
+            SHELL_BRANCH="${{ github.ref_name }}"
+            if ! shell_clone "$SHELL_BRANCH"; then
+              SHELL_BRANCH=develop
+              shell_clone "$SHELL_BRANCH" || rm -rf _shell-fe
+            fi
+            echo "@so360/* packages from so360-shell-fe@$SHELL_BRANCH"
+            if [ -d _shell-fe ]; then
               (cd _shell-fe && git sparse-checkout set packages)
               for p in shell-context design-system event-bus formatters; do
                 if [ -d "_shell-fe/packages/$p" ]; then
