@@ -134,6 +134,10 @@ on:
       DOCS_INTERNAL_SERVICE_KEY:     { required: false }
       NEURA_INTERNAL_KEY:            { required: false }
       NEURA_INTERNAL_KEY_2:          { required: false }
+      MARKETING_INTERNAL_KEY:        { required: false }
+      MARKETING_TRACKING_SECRET:     { required: false }
+      CONNECT_INTERNAL_KEY:          { required: false }
+      CONNECT_INTERNAL_KEYS:         { required: false }
       CHAT_INTERNAL_KEY:             { required: false }
       CRM_SYNC_INTERNAL_KEY:         { required: false }
       PROJECTS_INTERNAL_KEY:         { required: false }
@@ -1325,6 +1329,8 @@ jobs:
             [ -n "${{ secrets.FAILURE_TICKETS_PULSE_KEY }}" ] && echo "FAILURE_TICKETS_PULSE_KEY=${{ secrets.FAILURE_TICKETS_PULSE_KEY }}" >> .env.ci
             [ -n "${{ secrets.CONNECT_INTERNAL_KEY }}" ]      && echo "CONNECT_INTERNAL_KEY=${{ secrets.CONNECT_INTERNAL_KEY }}"     >> .env.ci
             [ -n "${{ secrets.CONNECT_INTERNAL_KEYS }}" ]     && echo "CONNECT_INTERNAL_KEYS=${{ secrets.CONNECT_INTERNAL_KEYS }}"   >> .env.ci
+            [ -n "${{ secrets.MARKETING_INTERNAL_KEY }}" ] && echo "MARKETING_INTERNAL_KEY=${{ secrets.MARKETING_INTERNAL_KEY }}"                  >> .env.ci
+            [ -n "${{ secrets.MARKETING_TRACKING_SECRET }}" ] && echo "MARKETING_TRACKING_SECRET=${{ secrets.MARKETING_TRACKING_SECRET }}"               >> .env.ci
             [ -n "${{ secrets.CRM_SYNC_INTERNAL_KEY }}" ]     && echo "CRM_SYNC_INTERNAL_KEY=${{ secrets.CRM_SYNC_INTERNAL_KEY }}"   >> .env.ci
             [ -n "${{ secrets.SUPPORT_INTERNAL_KEY }}" ]      && echo "SUPPORT_INTERNAL_KEY=${{ secrets.SUPPORT_INTERNAL_KEY }}"     >> .env.ci
             # Channel Program: HS256 secret Core signs partner delegated-access session tokens with. Absent = /access/session returns 503 and no partner can enter a client tenant.
