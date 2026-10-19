@@ -616,7 +616,7 @@ class GivenAStaticSite(PreviewCtlCase):
     def test_when_deployed_then_it_gets_its_own_host_with_the_overlay(self):
         r = self.deploy_site()
         host = self.site_host("sso")
-        comp = self.registry()["previews"][SLUG]["components"]["so360-sso-fe"]
+        comp = self.registry()["previews"][SLUG]["components"]["so360-sso-fe@site:sso"]
         self.assertEqual((comp["kind"], comp["host"], comp["dev_host"]), ("site", host, "dev-sso.skyoffice360.com"))
         self.assertTrue(os.path.isfile(self.p(SLUG, "site", "sso", "index.html")))
         conf = self.nginx()
