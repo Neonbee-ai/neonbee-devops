@@ -643,6 +643,13 @@ EOF
         alias $base/cdn/$name/;
         try_files \$uri =404;  # MFE bundles are fetched by path; no SPA fallback
         include /etc/nginx/snippets/so360-preview-static.conf;
+        # The federation plugin's dynamicLoadingCss drops assetsDir when base is
+        # a full URL, so remotes request <cdn>/<mfe>/style-*.css. The Dev CDN
+        # tolerates that; serve it from assets/ here too or every MFE loses its CSS.
+        location ~ ^/cdn/$name/([^/]+\.css)\$ {
+            alias $base/cdn/$name/assets/\$1;
+            include /etc/nginx/snippets/so360-preview-static.conf;
+        }
     }
 EOF
     fi
