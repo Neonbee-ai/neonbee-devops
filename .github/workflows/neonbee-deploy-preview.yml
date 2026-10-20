@@ -129,6 +129,7 @@ on:
       STOREFRONT_JWT_SECRET:       { required: false }
       INTERNAL_SERVICE_KEY:        { required: false }
       NOTIFICATION_INTERNAL_KEY:   { required: false }
+      EMAIL_INTERNAL_KEY:          { required: false }
       INBOX_SERVICE_KEY:           { required: false }
       GEMINI_API_KEY:              { required: false }
       OPENAI_API_KEY:              { required: false }
@@ -430,6 +431,7 @@ jobs:
               echo "STOREFRONT_JWT_SECRET=${{ secrets.STOREFRONT_JWT_SECRET }}"
               echo "INTERNAL_SERVICE_KEY=${{ secrets.INTERNAL_SERVICE_KEY }}"
               echo "NOTIFICATION_INTERNAL_KEY=${{ secrets.NOTIFICATION_INTERNAL_KEY }}"
+              echo "EMAIL_INTERNAL_KEY=${{ secrets.EMAIL_INTERNAL_KEY }}"
               echo "INBOX_SERVICE_KEY=${{ secrets.INBOX_SERVICE_KEY }}"
               echo "GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}"
               echo "OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}"
