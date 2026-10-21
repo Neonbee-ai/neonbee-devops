@@ -170,6 +170,29 @@ harden_env() {
   chmod 600 "$env"
 }
 
+# The workflow points every sibling URL at develop on dev-api, since one repo's
+# deploy can't know what else the preview holds. Re-point the URLs of siblings
+# this preview does hold at their loopback port, so a branch's own services
+# talk to each other (e.g. CRM → the preview's Core for assignee email).
+# Backends whose .env changed are restarted, except $3 (about to be started).
+link_siblings() {
+  local slug=$1 base="$ROOT/$1/be" skip=${2:-} name port env before rows
+  rows=$(reg_read | jq -r --arg s "$slug" \
+    '.previews[$s].components // {} | .[] | select(.kind == "be" and .port != null) | [.name, .port] | @tsv')
+  [ -n "$rows" ] || return 0
+  for env in "$base"/*/.env; do
+    [ -f "$env" ] || continue
+    before=$(md5sum "$env")
+    while IFS=$'\t' read -r name port; do
+      sed -i -E "s#https://dev-api\.${DOMAIN_RE}/${name}([^A-Za-z0-9_-]|\$)#http://127.0.0.1:${port}\1#g" "$env"
+    done <<<"$rows"
+    name=$(basename "$(dirname "$env")")
+    if [ "$before" != "$(md5sum "$env")" ] && [ "$name" != "$skip" ]; then
+      pm2 restart "$(pm2_name "$slug" "$name")" --update-env >/dev/null 2>&1 || true
+    fi
+  done
+}
+
 # A Next preview is a frontend server: it keeps develop's public Supabase
 # URL/anon key (like every other frontend preview) but never a service-role
 # key, so server code can do no more than the signed-in user could.
@@ -313,6 +336,7 @@ cmd_deploy() {
           + (if $host == "" then {} else {host: $host} end)
           + (if $dh == "" then {} else {dev_host: $dh} end)))'
 
+  if [ "$kind" = be ]; then link_siblings "$slug" "$name"; fi
   if [ "$kind" = be ] || [ "$kind" = next ]; then
     start_backend "$slug" "$name" "$base/$kind/$name" "$port" "$health" "$kind" \
       || die "$repo did not become healthy on :$port"

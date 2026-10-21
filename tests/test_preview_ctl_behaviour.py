@@ -538,6 +538,36 @@ class GivenABackendEnv(PreviewCtlCase):
         self.assertFalse(any(c.startswith("pm2 start") for c in self.calls()))
 
 
+class GivenSiblingBackendsInOnePreview(PreviewCtlCase):
+    DEV_CORE = "CORE_BE_URL=https://dev-api.skyoffice360.com/core\nCORE_API=https://dev-api.skyoffice360.com/core/v1\nCOREX=https://dev-api.skyoffice360.com/corex\n"
+
+    def read_env(self, name):
+        with open(self.p(SLUG, "be", name, ".env")) as f:
+            return f.read().splitlines()
+
+    def test_when_a_sibling_is_already_in_the_preview_then_a_new_backend_calls_it_on_loopback(self):
+        self.deploy_be("so360-core", "core")                       # core → :7100
+        self.upload_be("so360-crm-be", env_text=self.DEV_CORE)
+        self.ok(*self.deploy("so360-crm-be", "be", "crm", extra=("--lockhash", HASH)))
+        lines = self.read_env("crm")
+        self.assertIn("CORE_BE_URL=http://127.0.0.1:7100", lines)
+        self.assertIn("CORE_API=http://127.0.0.1:7100/v1", lines)
+        self.assertIn("COREX=https://dev-api.skyoffice360.com/corex", lines)
+
+    def test_when_a_sibling_arrives_later_then_existing_backends_are_relinked_and_restarted(self):
+        self.upload_be("so360-crm-be", env_text=self.DEV_CORE)
+        self.ok(*self.deploy("so360-crm-be", "be", "crm", extra=("--lockhash", HASH)))  # crm → :7100
+        self.assertIn("CORE_BE_URL=https://dev-api.skyoffice360.com/core", self.read_env("crm"))
+        self.deploy_be("so360-core", "core")                       # core → :7101
+        self.assertIn("CORE_BE_URL=http://127.0.0.1:7101", self.read_env("crm"))
+        self.assertTrue(any(c.startswith("pm2 restart pv-feat-crm-owner-crm") for c in self.calls()))
+
+    def test_when_nothing_changes_then_no_sibling_is_restarted(self):
+        self.deploy_be("so360-crm-be", "crm")
+        self.deploy_be("so360-core", "core")
+        self.assertFalse(any(c.startswith("pm2 restart") for c in self.calls()))
+
+
 # ── Sleep / wake ─────────────────────────────────────────────────────────────
 class GivenARunningPreview(PreviewCtlCase):
     def setUp(self):
