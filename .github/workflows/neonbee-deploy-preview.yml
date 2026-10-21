@@ -462,9 +462,15 @@ jobs:
               echo "CF_R2_BUCKET=${{ secrets.CF_R2_BUCKET }}"
               echo "CF_R2_PUBLIC_URL=${{ secrets.CF_R2_PUBLIC_URL }}"
               echo "CF_R2_PREFIX=${{ secrets.CF_R2_PREFIX }}"
-              # No outbound-mail, push or Slack keys are passed on purpose:
-              # outbound mail from a preview fails closed instead of reaching
-              # real inboxes (it shares the production database).
+              # AWS SES so preview flows (e.g. assignee emails) can be tested end
+              # to end. Only repos that hold the AWS_* secrets get them; Core's
+              # email queue worker stays idle under SO360_PREVIEW, so a preview
+              # sends its own direct mail but never drains the shared queue.
+              # Push and Slack keys are still withheld on purpose.
+              [ -n "${{ secrets.AWS_ACCESS_KEY_ID }}" ]     && echo "AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}"
+              [ -n "${{ secrets.AWS_SECRET_ACCESS_KEY }}" ] && echo "AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}"
+              [ -n "${{ secrets.AWS_REGION }}" ]            && echo "AWS_REGION=${{ secrets.AWS_REGION }}"
+              true
             } > "$OUT/app/.env"
             EXTRA='${{ inputs.extra_env }}'
             [ -n "$EXTRA" ] && printf '%s\n' "$EXTRA" >> "$OUT/app/.env"
