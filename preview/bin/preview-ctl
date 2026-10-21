@@ -229,6 +229,42 @@ start_backend() {
 }
 
 # ── Commands ─────────────────────────────────────────────────────────────────
+# Same-preview sibling wiring: the deploy workflow points every backend at
+# develop (https://dev-api.<domain>/<svc>). When the same preview also runs
+# <svc>, point at its local port instead so a cross-repo branch tests its own
+# changes end to end. Restarts the siblings whose .env changed, except $3
+# (the component being deployed, which the caller starts next).
+wire_siblings() {
+  local slug=$1 mode=${2:-wire} skip=${3:-} name port target dir env before
+  local -a subs=()
+  while IFS=$'\t' read -r name port; do
+    [ -n "$name" ] || continue
+    if [ "$mode" = wire ]; then
+      subs+=(-e "s#https://dev-api\.skyoffice360\.com/$name(/|[\"']|[[:space:]]|\$)#http://127.0.0.1:$port\\1#g")
+    else
+      subs+=(-e "s#http://127\.0\.0\.1:$port(/|[\"']|[[:space:]]|\$)#https://dev-api.skyoffice360.com/$name\\1#g")
+    fi
+  done < <(reg_read | jq -r --arg s "$slug" --arg m "$mode" --arg n "$skip" \
+    '.previews[$s].components // {} | .[] | select(.kind == "be")
+     | select($m == "wire" or .name == $n) | [.name, .port] | @tsv')
+  [ ${#subs[@]} -gt 0 ] || return 0
+  while IFS=$'\t' read -r target port; do
+    [ -n "$target" ] || continue
+    dir="$ROOT/$slug/be/$target"; env="$dir/.env"
+    [ -f "$env" ] || continue
+    before=$(cksum <"$env")
+    sed -E -i "${subs[@]}" "$env"
+    [ "$(cksum <"$env")" != "$before" ] || continue
+    echo "wired siblings into $target"
+    [ "$target" != "$skip" ] || continue
+    start_backend "$slug" "$target" "$dir" "$port" \
+      "$(reg_read | jq -r --arg s "$slug" --arg t "$target" \
+          '.previews[$s].components[] | select(.kind == "be" and .name == $t) | .health')" be \
+      || echo "::warning::$target failed to restart after sibling wiring"
+  done < <(reg_read | jq -r --arg s "$slug" \
+    '.previews[$s].components // {} | .[] | select(.kind == "be") | [.name, .port] | @tsv')
+}
+
 cmd_deploy() {
   local slug="" branch="" repo="" kind="" name="" sha="" health="" lockhash=""
   local spa=false host="" dev_host=""
@@ -313,6 +349,7 @@ cmd_deploy() {
           + (if $host == "" then {} else {host: $host} end)
           + (if $dh == "" then {} else {dev_host: $dh} end)))'
 
+  if [ "$kind" = be ]; then wire_siblings "$slug" wire "$name"; fi
   if [ "$kind" = be ] || [ "$kind" = next ]; then
     start_backend "$slug" "$name" "$base/$kind/$name" "$port" "$health" "$kind" \
       || die "$repo did not become healthy on :$port"
@@ -385,6 +422,7 @@ cmd_remove() {
         shell) rm -rf "$base/shell" ;;
         site)  rm -rf "$base/site/$name" ;;
         be|next)
+               [ "$kind" = be ] && wire_siblings "$slug" unwire "$name"
                pm2 delete "$(pm2_name "$slug" "$name")" >/dev/null 2>&1 || true
                pm2 save >/dev/null 2>&1 || true
                rm -rf "${base:?}/$kind/$name" ;;
