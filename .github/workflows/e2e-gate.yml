@@ -1,0 +1,318 @@
+# =============================================================================
+# Neonbee — Reusable post-deploy E2E gate (QA plan step 6)
+# =============================================================================
+# Runs AFTER a preview or Dev deploy succeeded, against the deployed URL:
+#
+#   T0  crawl      — tests/e2e/tools/exploratory/crawl.mjs, limited to the
+#                    changed modules' routes (incremental); read-only signals
+#   T1  contracts  — floorplan contract specs under tests/e2e/contracts/
+#                    (skipped cleanly while that folder has no specs)
+#   T2  journeys   — tests/e2e/journeys/<module>/ for the changed modules only
+#                    (each module skipped cleanly while it has no journeys)
+#
+# One PR comment (marker <!-- neonbee-e2e-gate -->) is created and then
+# updated on every later run: pass/fail per tier and per journey; screenshots
+# are uploaded for FAILURES ONLY and linked from the comment.
+#
+# REPORT-ONLY by default: `blocking: false` never fails the check. Set
+# `blocking: true` once the suite is trusted (design §4.5 gate).
+#
+# Never targets prod: target_url must be a preview host or dev-dashboard.
+# Runs on the pinned Contabo browser fleet only (see .claude/deployment.md) —
+# never GitHub-hosted, never the bare contabo label (Mac Mini failover).
+#
+# Caller (one extra job in the repo's deploy.yml; see
+# documents/qa/e2e-gate-rollout.md in the workspace for the full snippet):
+#
+#   e2e-gate:
+#     needs: [preview]
+#     if: needs.preview.result == 'success'
+#     permissions: { contents: read, pull-requests: write }
+#     uses: Neonbee-ai/neonbee-devops/.github/workflows/e2e-gate.yml@main
+#     with:
+#       target_url: https://pr-<slug>.skyoffice360.com
+#       changed_modules: crm
+#     secrets: inherit
+# =============================================================================
+
+name: E2E gate (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      target_url:
+        description: 'Deployed shell URL to test: https://pr-<slug>.skyoffice360.com or https://dev-dashboard.skyoffice360.com'
+        required: true
+        type: string
+      changed_modules:
+        description: 'Comma/space separated route modules (crm, accounting, …) or "all"'
+        required: false
+        type: string
+        default: 'all'
+      pr_number:
+        description: 'PR to comment on. Empty: look up the open PR for this branch; none found → step summary only'
+        required: false
+        type: string
+        default: ''
+      tiers:
+        description: 'Comma separated subset of t0,t1,t2'
+        required: false
+        type: string
+        default: 't0,t1,t2'
+      blocking:
+        description: 'true: a red T1/T2 fails this check. false (default): report only'
+        required: false
+        type: boolean
+        default: false
+      e2e_ref:
+        description: 'Branch/tag of Neonbee-ai/so360-e2e-tests to run'
+        required: false
+        type: string
+        default: 'main'
+      devops_ref:
+        description: 'Branch/tag of Neonbee-ai/neonbee-devops providing scripts/e2e-gate'
+        required: false
+        type: string
+        default: 'main'
+    secrets:
+      PAT_TOKEN:               { required: false }
+      # Cloudflare Access service token (dev-dashboard / previews sit behind Access).
+      CF_ACCESS_CLIENT_ID:     { required: false }
+      CF_ACCESS_CLIENT_SECRET: { required: false }
+      # Test account only — same rule as so360-e2e-tests nightly-heavy.yml:
+      # never the E2E admin secrets (a real user's login).
+      E2E_TEST_USER_EMAIL:     { required: false }
+      E2E_TEST_USER_PASSWORD:  { required: false }
+      TEST_TENANT_ID:          { required: false }
+      TEST_ORG_ID:             { required: false }
+
+concurrency:
+  group: neonbee-e2e-gate-${{ github.repository }}-${{ inputs.pr_number || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  e2e:
+    name: E2E gate (${{ inputs.tiers }})
+    runs-on: [self-hosted, Linux, X64, contabo, browsers]
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      pull-requests: write
+    env:
+      TARGET_ENV: dev
+      SHELL_URL: ${{ inputs.target_url }}
+      CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+      CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+      ADMIN_EMAIL: ${{ secrets.E2E_TEST_USER_EMAIL }}
+      ADMIN_PASSWORD: ${{ secrets.E2E_TEST_USER_PASSWORD }}
+      TEST_TENANT_ID: ${{ secrets.TEST_TENANT_ID }}
+      TEST_ORG_ID: ${{ secrets.TEST_ORG_ID }}
+      CI: 'true'
+      PLAYWRIGHT_HTML_OPEN: never
+      GATE_DIR: ${{ github.workspace }}/.e2e-gate-out
+    steps:
+      - name: Validate inputs
+        id: in
+        env:
+          URL: ${{ inputs.target_url }}
+          TIERS: ${{ inputs.tiers }}
+          MODULES: ${{ inputs.changed_modules }}
+        run: |
+          set -euo pipefail
+          # Previews and Dev only. Dev shares the prod database, so a prod
+          # shell URL here would run data-writing journeys against live tenants.
+          if ! [[ "$URL" =~ ^https://(pr-[a-z0-9-]+(--[a-z0-9-]+)?\.skyoffice360\.com|dev-dashboard\.skyoffice360\.com)/?$ ]]; then
+            echo "::error::target_url must be a preview (https://pr-<slug>.skyoffice360.com) or https://dev-dashboard.skyoffice360.com — got '$URL'"
+            exit 1
+          fi
+          T=$(printf '%s' "$TIERS" | tr 'A-Z' 'a-z' | tr -c 'a-z0-9\n' ' ')
+          for t in $T; do case "$t" in t0|t1|t2) ;; *) echo "::error::unknown tier '$t'"; exit 1 ;; esac; done
+          M=$(printf '%s' "$MODULES" | tr 'A-Z' 'a-z' | tr ',' ' ' | xargs)
+          for m in $M; do [[ "$m" =~ ^[a-z0-9][a-z0-9-]{0,40}$ ]] || { echo "::error::invalid module '$m'"; exit 1; }; done
+          [ -n "$M" ] || M=all
+          echo "tiers=$T"   >> "$GITHUB_OUTPUT"
+          echo "modules=$M" >> "$GITHUB_OUTPUT"
+          [ -n "$CF_ACCESS_CLIENT_ID" ] || echo "::warning title=No CF service token::CF_ACCESS_CLIENT_ID is empty — Access-protected hosts will redirect to login"
+          [ -n "$ADMIN_EMAIL" ] || echo "::warning title=No test user::E2E_TEST_USER_EMAIL is empty — sign-in will fail"
+          rm -rf "$GATE_DIR" && mkdir -p "$GATE_DIR/failures"
+
+      - name: Checkout so360-e2e-tests
+        uses: actions/checkout@v4.3.1
+        with:
+          repository: Neonbee-ai/so360-e2e-tests
+          ref: ${{ inputs.e2e_ref }}
+          token: ${{ secrets.PAT_TOKEN || github.token }}
+          path: e2e
+
+      - name: Checkout neonbee-devops (gate scripts)
+        uses: actions/checkout@v4.3.1
+        with:
+          repository: Neonbee-ai/neonbee-devops
+          ref: ${{ inputs.devops_ref }}
+          token: ${{ secrets.PAT_TOKEN || github.token }}
+          path: .devops
+
+      - uses: actions/setup-node@v4.4.0
+        with:
+          node-version: '22'
+
+      - name: Install test dependencies
+        working-directory: e2e
+        run: |
+          npm ci
+          # No --with-deps: the `browsers` label means the system libs are
+          # already on the host (sudo apt is not allowed on this fleet).
+          npx playwright install chromium
+
+      - name: Sign in (setup project)
+        working-directory: e2e
+        run: npx playwright test --config=playwright.prod.config.ts --project=setup --reporter=list
+
+      # ── T0: incremental crawl ────────────────────────────────────────────
+      - name: T0 — crawl changed modules
+        if: contains(steps.in.outputs.tiers, 't0')
+        working-directory: e2e
+        env:
+          MODULES: ${{ steps.in.outputs.modules }}
+        run: |
+          set -uo pipefail
+          # crawl.mjs reads routes/routes.generated.json; narrow that file in
+          # this throwaway checkout to the changed modules (incremental T0).
+          if [ "$MODULES" != all ]; then
+            node -e '
+              const fs = require("fs"), f = "routes/routes.generated.json";
+              const keep = new Set(process.argv[1].split(" "));
+              const r = JSON.parse(fs.readFileSync(f, "utf8")).filter((x) => keep.has(x.module));
+              fs.writeFileSync(f, JSON.stringify(r));
+              console.log(`T0: ${r.length} routes for ${[...keep].join(", ")}`);
+            ' "$MODULES"
+          fi
+          node tools/exploratory/crawl.mjs; echo "$?" > "$GATE_DIR/t0.exit"
+          cp test-results/exploratory/findings.json "$GATE_DIR/t0-findings.json" 2>/dev/null || true
+
+      # ── T1: floorplan contracts ──────────────────────────────────────────
+      - name: T1 — floorplan contracts
+        if: contains(steps.in.outputs.tiers, 't1')
+        working-directory: e2e
+        run: |
+          set -uo pipefail
+          if [ -z "$(find contracts -name '*.spec.ts' 2>/dev/null | head -1)" ]; then
+            echo "::notice::T1 skipped — no specs under tests/e2e/contracts/ yet"
+            echo skip > "$GATE_DIR/t1.exit"; exit 0
+          fi
+          # playwright.prod.config.ts testMatch does not list contracts/ yet;
+          # extend it for this run only (drop once step 4 adds it upstream).
+          printf '%s\n' \
+            "import base from './playwright.prod.config';" \
+            "export default { ...base, testMatch: [...(base.testMatch as string[]), '**/contracts/**/*.spec.ts'] };" \
+            > playwright.gate.config.ts
+          PLAYWRIGHT_JSON_OUTPUT_NAME="$GATE_DIR/t1.json" \
+            npx playwright test --config=playwright.gate.config.ts --project=chromium \
+              --reporter=json,list --max-failures=30 "$PWD/contracts/"
+          echo "$?" > "$GATE_DIR/t1.exit"
+
+      # ── T2: business journeys, changed modules only ──────────────────────
+      - name: T2 — journeys for changed modules
+        if: contains(steps.in.outputs.tiers, 't2')
+        working-directory: e2e
+        env:
+          MODULES: ${{ steps.in.outputs.modules }}
+        run: |
+          set -uo pipefail
+          DIRS=()
+          if [ "$MODULES" = all ]; then
+            for d in journeys/*/; do [ -d "$d" ] && DIRS+=("$PWD/${d%/}/"); done
+          else
+            for m in $MODULES; do
+              if [ -n "$(find "journeys/$m" -name '*.spec.ts' 2>/dev/null | head -1)" ]; then
+                DIRS+=("$PWD/journeys/$m/")
+              else
+                echo "::notice::T2 $m skipped — no journeys under tests/e2e/journeys/$m/"
+              fi
+            done
+          fi
+          if [ ${#DIRS[@]} -eq 0 ]; then echo skip > "$GATE_DIR/t2.exit"; exit 0; fi
+          PLAYWRIGHT_JSON_OUTPUT_NAME="$GATE_DIR/t2.json" \
+            npx playwright test --config=playwright.prod.config.ts --project=chromium \
+              --reporter=json,list --max-failures=30 "${DIRS[@]}"
+          echo "$?" > "$GATE_DIR/t2.exit"
+
+      # ── Report ───────────────────────────────────────────────────────────
+      - name: Build report
+        id: report
+        if: always()
+        env:
+          TIERS: ${{ steps.in.outputs.tiers }}
+          MODULES: ${{ steps.in.outputs.modules }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: node .devops/scripts/e2e-gate/report.mjs
+
+      - name: Upload failure screenshots
+        id: shots
+        if: always() && steps.report.outputs.screenshots != '0' && steps.report.outputs.screenshots != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-gate-failures-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .e2e-gate-out/failures/
+          retention-days: 7
+          if-no-files-found: ignore
+
+      - name: Comment on the PR
+        if: always() && steps.report.outcome == 'success'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_IN: ${{ inputs.pr_number }}
+          BRANCH: ${{ github.head_ref || github.ref_name }}
+          SHOTS_URL: ${{ steps.shots.outputs.artifact-url }}
+        run: |
+          set -euo pipefail
+          BODY=$(cat "$GATE_DIR/comment.md")
+          [ -n "$SHOTS_URL" ] && BODY="$BODY
+
+          📸 Failure screenshots: $SHOTS_URL"
+          printf '%s\n' "$BODY" >> "$GITHUB_STEP_SUMMARY"
+          API="https://api.github.com/repos/${{ github.repository }}"
+          H=(-H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json")
+          PR="$PR_IN"
+          [ -n "$PR" ] || PR=$(curl -fsS "${H[@]}" "$API/pulls?state=open&head=${{ github.repository_owner }}:$BRANCH" | jq -r '.[0].number // empty')
+          [ -n "$PR" ] || { echo "No PR for $BRANCH — report is in the step summary only"; exit 0; }
+          [[ "$PR" =~ ^[0-9]+$ ]] || { echo "::error::pr_number must be numeric"; exit 1; }
+          MARK="<!-- neonbee-e2e-gate -->"
+          BODY="$MARK
+          $BODY"
+          CID=$(curl -fsS "${H[@]}" "$API/issues/$PR/comments?per_page=100" | jq -r --arg m "$MARK" '[.[] | select(.body | startswith($m))][0].id // empty')
+          if [ -n "$CID" ]; then
+            curl -fsS -X PATCH "${H[@]}" "$API/issues/comments/$CID" -d "$(jq -n --arg b "$BODY" '{body: $b}')" >/dev/null
+          else
+            curl -fsS -X POST "${H[@]}" "$API/issues/$PR/comments" -d "$(jq -n --arg b "$BODY" '{body: $b}')" >/dev/null
+          fi
+
+      - name: File Pulse task on failure
+        if: always() && steps.report.outputs.failed == 'true'
+        continue-on-error: true
+        env:
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          BRANCH: ${{ github.head_ref || github.ref_name }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: bash .devops/scripts/e2e-gate/file-failure.sh "$GATE_DIR/comment.md"
+
+      - name: Gate verdict
+        if: always()
+        env:
+          BLOCKING: ${{ inputs.blocking }}
+          BLOCKING_FAILED: ${{ steps.report.outputs.blocking_failed }}
+        run: |
+          if [ "$BLOCKING_FAILED" = true ] && [ "$BLOCKING" = true ]; then
+            echo "::error::E2E gate red (T1/T2) and blocking=true"; exit 1
+          fi
+          [ "$BLOCKING_FAILED" = true ] && echo "::warning::E2E gate red — report-only (blocking=false)"
+          exit 0
+
+      # Never leave traces/auth state on a shared runner slot.
+      - name: Reclaim disk
+        if: always()
+        run: |
+          rm -rf e2e/.auth e2e/test-results e2e/playwright-report "$GATE_DIR"
+          df -h . | tail -1
