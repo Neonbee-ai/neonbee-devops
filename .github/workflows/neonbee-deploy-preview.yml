@@ -139,6 +139,7 @@ on:
       CHAT_INTERNAL_KEY:           { required: false }
       DOCS_INTERNAL_SERVICE_KEY:   { required: false }
       CRM_SYNC_INTERNAL_KEY:       { required: false }
+      MAINTENANCE_INTERNAL_KEY:       { required: false }
       CHANNEL_DELEGATION_SECRET:   { required: false }
       COMPENSATION_ENCRYPTION_KEY: { required: false }
       PLATFORM_OPS_INTERNAL_KEY:   { required: false }
@@ -441,6 +442,7 @@ jobs:
               echo "CHAT_INTERNAL_KEY=${{ secrets.CHAT_INTERNAL_KEY }}"
               echo "DOCS_INTERNAL_SERVICE_KEY=${{ secrets.DOCS_INTERNAL_SERVICE_KEY }}"
               echo "CRM_SYNC_INTERNAL_KEY=${{ secrets.CRM_SYNC_INTERNAL_KEY }}"
+              echo "MAINTENANCE_INTERNAL_KEY=${{ secrets.MAINTENANCE_INTERNAL_KEY }}"
               echo "CHANNEL_DELEGATION_SECRET=${{ secrets.CHANNEL_DELEGATION_SECRET }}"
               echo "COMPENSATION_ENCRYPTION_KEY=${{ secrets.COMPENSATION_ENCRYPTION_KEY }}"
               echo "PLATFORM_OPS_INTERNAL_KEY=${{ secrets.PLATFORM_OPS_INTERNAL_KEY }}"
