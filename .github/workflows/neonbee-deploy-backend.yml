@@ -112,6 +112,9 @@ on:
       MANUFACTURING_INTERNAL_KEY:   { required: false }
       ACCOUNTING_INTERNAL_KEY:      { required: false }
       ACCOUNTING_INTERNAL_KEY_2:    { required: false }
+      # External accounting sync: Connect → Core partner external refs (route-scoped key).
+      CORE_PARTNER_INTERNAL_KEY:    { required: false }
+      PARTNER_RESOLVE_INTERNAL_KEY: { required: false }
       SUBSCRIPTION_INTERNAL_KEY:    { required: false }
       VAPID_PUBLIC_KEY:             { required: false }
       VAPID_PRIVATE_KEY:            { required: false }
@@ -737,6 +740,9 @@ jobs:
             [ -n "${{ secrets.MANUFACTURING_INTERNAL_KEY }}" ] && echo "MANUFACTURING_INTERNAL_KEY=${{ secrets.MANUFACTURING_INTERNAL_KEY }}" >> .env.ci
             [ -n "${{ secrets.ACCOUNTING_INTERNAL_KEY }}" ]    && echo "ACCOUNTING_INTERNAL_KEY=${{ secrets.ACCOUNTING_INTERNAL_KEY }}"       >> .env.ci
             [ -n "${{ secrets.ACCOUNTING_INTERNAL_KEY_2 }}" ]  && echo "ACCOUNTING_INTERNAL_KEY_2=${{ secrets.ACCOUNTING_INTERNAL_KEY_2 }}"   >> .env.ci
+            [ -n "${{ secrets.CORE_INTERNAL_KEY }}" ] && echo "CORE_INTERNAL_KEY=${{ secrets.CORE_INTERNAL_KEY }}" >> .env.ci
+            [ -n "${{ secrets.CORE_PARTNER_INTERNAL_KEY }}" ] && echo "CORE_PARTNER_INTERNAL_KEY=${{ secrets.CORE_PARTNER_INTERNAL_KEY }}" >> .env.ci
+            [ -n "${{ secrets.PARTNER_RESOLVE_INTERNAL_KEY }}" ] && echo "PARTNER_RESOLVE_INTERNAL_KEY=${{ secrets.PARTNER_RESOLVE_INTERNAL_KEY }}" >> .env.ci
             [ -n "${{ secrets.PEOPLE_INTERNAL_KEY }}" ]        && echo "PEOPLE_INTERNAL_KEY=${{ secrets.PEOPLE_INTERNAL_KEY }}"               >> .env.ci
             [ -n "${{ secrets.PEOPLE_INTERNAL_KEY_2 }}" ]      && echo "PEOPLE_INTERNAL_KEY_2=${{ secrets.PEOPLE_INTERNAL_KEY_2 }}"           >> .env.ci
             [ -n "${{ secrets.SUBSCRIPTION_INTERNAL_KEY }}" ]  && echo "SUBSCRIPTION_INTERNAL_KEY=${{ secrets.SUBSCRIPTION_INTERNAL_KEY }}"   >> .env.ci
@@ -913,6 +919,9 @@ jobs:
             [ -n "${{ secrets.MANUFACTURING_INTERNAL_KEY }}" ] && echo "MANUFACTURING_INTERNAL_KEY=${{ secrets.MANUFACTURING_INTERNAL_KEY }}" >> .env.ci
             [ -n "${{ secrets.ACCOUNTING_INTERNAL_KEY }}" ]    && echo "ACCOUNTING_INTERNAL_KEY=${{ secrets.ACCOUNTING_INTERNAL_KEY }}"       >> .env.ci
             [ -n "${{ secrets.ACCOUNTING_INTERNAL_KEY_2 }}" ]  && echo "ACCOUNTING_INTERNAL_KEY_2=${{ secrets.ACCOUNTING_INTERNAL_KEY_2 }}"   >> .env.ci
+            [ -n "${{ secrets.CORE_INTERNAL_KEY }}" ] && echo "CORE_INTERNAL_KEY=${{ secrets.CORE_INTERNAL_KEY }}" >> .env.ci
+            [ -n "${{ secrets.CORE_PARTNER_INTERNAL_KEY }}" ] && echo "CORE_PARTNER_INTERNAL_KEY=${{ secrets.CORE_PARTNER_INTERNAL_KEY }}" >> .env.ci
+            [ -n "${{ secrets.PARTNER_RESOLVE_INTERNAL_KEY }}" ] && echo "PARTNER_RESOLVE_INTERNAL_KEY=${{ secrets.PARTNER_RESOLVE_INTERNAL_KEY }}" >> .env.ci
             [ -n "${{ secrets.PEOPLE_INTERNAL_KEY }}" ]        && echo "PEOPLE_INTERNAL_KEY=${{ secrets.PEOPLE_INTERNAL_KEY }}"               >> .env.ci
             [ -n "${{ secrets.PEOPLE_INTERNAL_KEY_2 }}" ]      && echo "PEOPLE_INTERNAL_KEY_2=${{ secrets.PEOPLE_INTERNAL_KEY_2 }}"           >> .env.ci
             [ -n "${{ secrets.SUBSCRIPTION_INTERNAL_KEY }}" ]  && echo "SUBSCRIPTION_INTERNAL_KEY=${{ secrets.SUBSCRIPTION_INTERNAL_KEY }}"   >> .env.ci

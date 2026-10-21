@@ -145,6 +145,9 @@ on:
       MANUFACTURING_INTERNAL_KEY:    { required: false }
       ACCOUNTING_INTERNAL_KEY:       { required: false }
       ACCOUNTING_INTERNAL_KEY_2:     { required: false }
+      # External accounting sync: Connect → Core partner external refs (route-scoped key).
+      CORE_PARTNER_INTERNAL_KEY:     { required: false }
+      PARTNER_RESOLVE_INTERNAL_KEY:  { required: false }
       PLATFORM_OPS_INTERNAL_KEY:     { required: false }
       SUBSCRIPTION_INTERNAL_KEY:     { required: false }
       STOREFRONT_INTERNAL_OPS_KEY:   { required: false }
@@ -1346,6 +1349,8 @@ jobs:
             [ -n "${{ secrets.INBOX_EMAIL_S3_BUCKET }}" ]     && echo "INBOX_EMAIL_S3_BUCKET=${{ secrets.INBOX_EMAIL_S3_BUCKET }}"     >> .env.ci
             [ -n "${{ secrets.ACCOUNTING_INTERNAL_KEY }}" ]   && echo "ACCOUNTING_INTERNAL_KEY=${{ secrets.ACCOUNTING_INTERNAL_KEY }}" >> .env.ci
             [ -n "${{ secrets.ACCOUNTING_INTERNAL_KEY_2 }}" ] && echo "ACCOUNTING_INTERNAL_KEY_2=${{ secrets.ACCOUNTING_INTERNAL_KEY_2 }}" >> .env.ci
+            [ -n "${{ secrets.CORE_PARTNER_INTERNAL_KEY }}" ] && echo "CORE_PARTNER_INTERNAL_KEY=${{ secrets.CORE_PARTNER_INTERNAL_KEY }}" >> .env.ci
+            [ -n "${{ secrets.PARTNER_RESOLVE_INTERNAL_KEY }}" ] && echo "PARTNER_RESOLVE_INTERNAL_KEY=${{ secrets.PARTNER_RESOLVE_INTERNAL_KEY }}" >> .env.ci
             [ -n "${{ secrets.INVENTORY_INTERNAL_KEY }}" ]    && echo "INVENTORY_INTERNAL_KEY=${{ secrets.INVENTORY_INTERNAL_KEY }}"   >> .env.ci
             [ -n "${{ secrets.PEOPLE_INTERNAL_KEY }}" ]       && echo "PEOPLE_INTERNAL_KEY=${{ secrets.PEOPLE_INTERNAL_KEY }}"         >> .env.ci
             [ -n "${{ secrets.PEOPLE_INTERNAL_KEY_2 }}" ]     && echo "PEOPLE_INTERNAL_KEY_2=${{ secrets.PEOPLE_INTERNAL_KEY_2 }}"     >> .env.ci
