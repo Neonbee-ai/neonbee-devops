@@ -156,5 +156,23 @@ class Reconcile(unittest.TestCase):
         self.assertIn('[ "$code" = 404 ] || alive=1', read(RECONCILE))
 
 
+class RunsOnAMacRunner(unittest.TestCase):
+    """Previews keep building on the Mac Mini runners when the Linux runners are down."""
+
+    def test_the_build_job_accepts_any_self_hosted_runner_except_for_a_next_app(self):
+        text = read(DEPLOY)
+        self.assertIn("runs-on: [self-hosted, contabo]\n", text)
+        self.assertIn("inputs.kind == 'next' && fromJSON('[\"self-hosted\",\"contabo\",\"Linux\"]')", text)
+        self.assertNotIn("runs-on: [self-hosted, contabo, Linux]", text)
+
+    def test_sed_edits_in_place_with_a_suffix_bsd_sed_accepts(self):
+        text = read(DEPLOY)
+        self.assertEqual(re.findall(r"sed -i(?!\.bak)", text), [])
+
+    def test_the_host_ip_lookup_does_not_fail_without_getent(self):
+        text = read(DEPLOY)
+        self.assertIn('{ getent ahostsv4 "$HOST" 2>/dev/null || true; }', text)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -170,7 +170,7 @@ env:
 
 jobs:
   check:
-    runs-on: [self-hosted, contabo, Linux]
+    runs-on: [self-hosted, contabo]
     outputs:
       run:  ${{ steps.c.outputs.run }}
       slug: ${{ steps.c.outputs.slug }}
@@ -219,7 +219,10 @@ jobs:
   build-deploy:
     needs: [check]
     if: needs.check.outputs.run == 'true'
-    runs-on: [self-hosted, contabo, Linux]
+    # Any self-hosted runner (a Mac Mini when the Linux runners are down): the
+    # build output is plain JS and the host links prod deps by lockfile. A Next
+    # app stays on Linux, since a standalone build ships native node_modules.
+    runs-on: ${{ inputs.kind == 'next' && fromJSON('["self-hosted","contabo","Linux"]') || fromJSON('["self-hosted","contabo"]') }}
     timeout-minutes: 25
     # Latest push wins: a newer push to the same branch cancels this one.
     concurrency:
@@ -364,7 +367,7 @@ jobs:
               echo "NEXT_PUBLIC_SUPABASE_URL=${{ secrets.SUPABASE_URL_DEV || secrets.SUPABASE_URL }}"
               echo "NEXT_PUBLIC_SUPABASE_ANON_KEY=${{ secrets.SUPABASE_ANON_KEY_DEV || secrets.SUPABASE_ANON_KEY }}"
             } >> .env.local
-            sed -i '/=$/d; /^$/d' .env.local
+            sed -i.bak '/=$/d; /^$/d' .env.local && rm -f .env.local.bak
             npm run build
             exit 0
           fi
@@ -379,8 +382,8 @@ jobs:
             > .env
           EXTRA_VITE='${{ inputs.vite_env }}'
           [ -n "$EXTRA_VITE" ] && printf '%s\n' "$EXTRA_VITE" >> .env
-          sed -i '/^$/d' .env
-          [ -f .env.production ] && sed -i '/neonbee\.app/d' .env.production
+          sed -i.bak '/^$/d' .env && rm -f .env.bak
+          if [ -f .env.production ]; then sed -i.bak '/neonbee\.app/d' .env.production && rm -f .env.production.bak; fi
           cp .env .env.production.local
           # Some MFEs @import the shell theme by relative path
           # (../../../so360-shell-fe/packages/theme). Link the sibling for this
@@ -477,9 +480,9 @@ jobs:
                        insight:6023 subscription:6026 forms:6027 dailystore:6029 fulfillment:6032 \
                        support:6033 manufacturing:6034 chat:6036 documents:6037 sign:6038 \
                        mobility:6040 folio:6044 connect:6048 signal:6049; do
-              sed -i -E "s#https?://(127\.0\.0\.1|localhost):${svc##*:}([^0-9]|\$)#https://dev-api.skyoffice360.com/${svc%%:*}\2#g" "$OUT/app/.env"
+              sed -i.bak -E "s#https?://(127\.0\.0\.1|localhost):${svc##*:}([^0-9]|\$)#https://dev-api.skyoffice360.com/${svc%%:*}\2#g" "$OUT/app/.env" && rm -f "$OUT/app/.env.bak"
             done
-            sed -i '/=$/d' "$OUT/app/.env"
+            sed -i.bak '/=$/d' "$OUT/app/.env" && rm -f "$OUT/app/.env.bak"
           elif [ "$KIND" = next ]; then
             cp -r .next "$OUT/app/.next"
             rm -rf "$OUT/app/.next/cache"
@@ -539,7 +542,7 @@ jobs:
           HOST: ${{ secrets.PREVIEW_HOST }}
         run: |
           set -euo pipefail
-          IP=$(getent ahostsv4 "$HOST" | awk 'NR==1{print $1}')
+          IP=$( { getent ahostsv4 "$HOST" 2>/dev/null || true; } | awk 'NR==1{print $1}')
           [ -n "$IP" ] || IP=$HOST
           FQDNS="--fqdn 'pr-$SLUG.$PREVIEW_DOMAIN'"
           [ -n "$APP_HOST" ] && FQDNS="$FQDNS --fqdn '$APP_HOST'"
