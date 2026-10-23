@@ -10,6 +10,7 @@
 #   4. every nginx server_name served by Prod/Storefront is served by HA
 #   5. every .env KEY NAME present on Prod is present on HA (values never read
 #      off the box — only key names are compared)
+#   6. Prod TLS certs not within 14d of expiry; HA cert copies not stale
 # Changes nothing on any VM. Fix drift with neonbee-ha-populate.yml or a
 # redeploy of the drifted repo.
 # =============================================================================
@@ -74,6 +75,10 @@ jobs:
           for d in /var/www/*/html; do [ -f "$d/index.html" ] && echo "$(basename "$(dirname "$d")") $(md5sum < "$d/index.html" | cut -c1-10)"; done
           echo "##NGINX"
           nginx -T 2>/dev/null | awk '$1=="server_name"{for(i=2;i<=NF;i++){gsub(";","",$i);print $i}}' | sort -u
+          echo "##CERTS"
+          for f in /etc/letsencrypt/live/*neonbee*/fullchain.pem /etc/ssl/neonbee.ai/*/fullchain.pem; do
+            [ -f "$f" ] && echo "$(basename "$(dirname "$f")") $(date -d "$(openssl x509 -noout -enddate -in "$f" | cut -d= -f2)" +%s)"
+          done
           EOF
           ssh root@$PROD_IP 'bash -s' < parity/collect.sh > parity/prod.txt
           ssh root@$SF_IP   'bash -s' < parity/collect.sh > parity/sf.txt
@@ -118,6 +123,15 @@ jobs:
           hn = set(H.get('NGINX', []))
           for n in sorted(set(P.get('NGINX', []) + S.get('NGINX', []))):
               if n not in hn and not any(s in n for s in SKIP): drift.append(f'nginx {n}: not served by HA')
+          # TLS: Prod certs must not be near expiry; HA copies (neonbee.ai,
+          # mirrored from Prod by hand) must not be older than Prod's.
+          import time
+          now = time.time()
+          hc = dict(x.split() for x in H.get('CERTS', []))
+          for x in P.get('CERTS', []):
+              d, t = x.split(); t = int(t)
+              if t - now < 14 * 86400: drift.append(f'cert {d}: Prod expires in {int((t - now) // 86400)}d')
+              if d in hc and int(hc[d]) < t: drift.append(f'cert {d}: HA copy older than Prod (re-sync)')
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as s:
               s.write('## HA parity\n\n' + ('\n'.join(f'- ❌ {d}' for d in drift) if drift else '✅ Prod, Storefront and HA in parity') + '\n')
           with open(os.environ['GITHUB_OUTPUT'], 'a') as o:
