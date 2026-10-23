@@ -94,8 +94,9 @@ jobs:
           python3 - <<'EOF'
           import os, sys
           # Apps/hosts that are intentionally not on the HA standby
-          # (temp jobs, previews, non-Neonbee sites, the platform help preview).
-          SKIP = ('temp', 'preview', 'v9', 'moonhive')
+          # (temp jobs, previews, non-Neonbee sites, the platform help preview,
+          # and neonbee.ai — served from the Internal Tools VM, not Prod/HA).
+          SKIP = ('temp', 'preview', 'v9', 'moonhive', 'neonbee.ai')
           def parse(f):
               sec, cur = {}, None
               for l in open(f):
@@ -133,6 +134,7 @@ jobs:
           hc = dict(x.split() for x in H.get('CERTS', []))
           for x in P.get('CERTS', []):
               d, t = x.split(); t = int(t)
+              if any(s in d for s in SKIP): continue
               if t - now < 14 * 86400: drift.append(f'cert {d}: Prod expires in {int((t - now) // 86400)}d')
               if d in hc and int(hc[d]) < t: drift.append(f'cert {d}: HA copy older than Prod (re-sync)')
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as s:
