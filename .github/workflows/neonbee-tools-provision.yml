@@ -32,7 +32,7 @@ env:
 
 jobs:
   nginx:
-    runs-on: [self-hosted, contabo, Linux]
+    runs-on: [self-hosted, runner-vm]
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
@@ -82,7 +82,7 @@ jobs:
 
   cloudflare:
     needs: nginx
-    runs-on: [self-hosted, contabo, Linux]
+    runs-on: [self-hosted, runner-vm]
     timeout-minutes: 10
     steps:
       - name: Create LB / DNS for tools.neonbee.app

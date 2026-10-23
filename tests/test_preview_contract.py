@@ -95,9 +95,14 @@ class BackendDatabase(unittest.TestCase):
             self.assertIn("PROD_SUPABASE_HOST=\\n", read(path), os.path.basename(path))
 
     def test_no_mail_keys_reach_a_preview_backend(self):
+        # Whole key names only: EMAIL_INTERNAL_KEY is the internal service key
+        # (forwarded for dev/prod parity, #62), not a mail provider credential.
         text = read(DEPLOY)
         for key in ("SES_", "SMTP", "AWS_SECRET", "MAIL_"):
-            self.assertNotIn(key, text)
+            self.assertIsNone(re.search(r"(?<![A-Z])" + key, text), key)
+
+    def test_the_internal_email_service_key_is_forwarded(self):
+        self.assertIn("EMAIL_INTERNAL_KEY=${{ secrets.EMAIL_INTERNAL_KEY }}", read(DEPLOY))
 
     def test_preview_ctl_refuses_the_production_database(self):
         text = read(CTL)
@@ -154,6 +159,25 @@ class Reconcile(unittest.TestCase):
 
     def test_api_errors_never_count_as_branch_deleted(self):
         self.assertIn('[ "$code" = 404 ] || alive=1', read(RECONCILE))
+
+
+class RunsOnTheRunnerVmOnly(unittest.TestCase):
+    """Preview builds stay off the Mac Minis (autonomous QA) and the Dev VM."""
+
+    def test_every_preview_job_runs_on_the_runner_vm(self):
+        text = read(DEPLOY)
+        self.assertEqual(re.findall(r"runs-on: (.*)", text), ["[self-hosted, runner-vm]"] * 2)
+
+    def test_no_job_targets_the_shared_contabo_label(self):
+        self.assertNotIn("contabo", "".join(re.findall(r"runs-on: .*", read(DEPLOY))))
+
+    def test_sed_edits_in_place_with_a_suffix_bsd_sed_accepts(self):
+        text = read(DEPLOY)
+        self.assertEqual(re.findall(r"sed -i(?!\.bak)", text), [])
+
+    def test_the_host_ip_lookup_does_not_fail_without_getent(self):
+        text = read(DEPLOY)
+        self.assertIn('{ getent ahostsv4 "$HOST" 2>/dev/null || true; }', text)
 
 
 if __name__ == "__main__":

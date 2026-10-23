@@ -47,7 +47,7 @@ env:
 
 jobs:
   reconcile:
-    runs-on: [self-hosted, contabo, Linux]
+    runs-on: [self-hosted, runner-vm]
     timeout-minutes: 30
     env:
       HOST: ${{ secrets.PREVIEW_HOST }}

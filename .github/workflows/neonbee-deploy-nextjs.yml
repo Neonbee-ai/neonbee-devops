@@ -64,7 +64,7 @@ jobs:
 
   # ── Gate: single merged job ────────────────────────────────────────────────
   gate:
-    runs-on: [self-hosted, contabo, Linux]
+    runs-on: [self-hosted, runner-vm]
     steps:
       - uses: actions/checkout@v4.3.1
         with:
@@ -227,7 +227,7 @@ jobs:
     needs: [gate]
     # Linux only: the Mac Mini gate runners also carry `contabo` (they run the
     # gate), but this job builds + rsyncs to the VMs and assumes a Linux host.
-    runs-on: [self-hosted, contabo, Linux]
+    runs-on: [self-hosted, runner-vm]
     concurrency:
       group: neonbee-deploy-${{ inputs.service_name }}-${{ github.ref_name }}
       cancel-in-progress: false
@@ -528,7 +528,7 @@ jobs:
     name: Notify Teams
     needs: [gate, build-deploy]
     if: always()
-    runs-on: [self-hosted, contabo, Linux]
+    runs-on: [self-hosted, runner-vm]
     steps:
       - name: Post pipeline result to Teams
         env:
