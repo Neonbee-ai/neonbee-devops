@@ -44,7 +44,7 @@ env:
 
 jobs:
   teardown:
-    runs-on: [self-hosted, contabo, Linux]
+    runs-on: [self-hosted, runner-vm]
     timeout-minutes: 10
     steps:
       - name: Slug

@@ -90,7 +90,7 @@ on:
 
 jobs:
   rollback:
-    runs-on: [self-hosted, contabo, Linux]
+    runs-on: [self-hosted, runner-vm]
     # Guard: require explicit confirmation word
     if: ${{ github.event.inputs.confirm == 'ROLLBACK' }}
 
@@ -535,7 +535,7 @@ jobs:
     name: Notify Teams
     needs: [rollback]
     if: always()
-    runs-on: [self-hosted, contabo, Linux]
+    runs-on: [self-hosted, runner-vm]
     steps:
       - name: Post result to Teams
         env:

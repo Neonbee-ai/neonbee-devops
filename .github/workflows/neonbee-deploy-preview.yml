@@ -170,7 +170,7 @@ env:
 
 jobs:
   check:
-    runs-on: [self-hosted, contabo]
+    runs-on: [self-hosted, runner-vm]
     outputs:
       run:  ${{ steps.c.outputs.run }}
       slug: ${{ steps.c.outputs.slug }}
@@ -219,10 +219,9 @@ jobs:
   build-deploy:
     needs: [check]
     if: needs.check.outputs.run == 'true'
-    # Any self-hosted runner (a Mac Mini when the Linux runners are down): the
-    # build output is plain JS and the host links prod deps by lockfile. A Next
-    # app stays on Linux, since a standalone build ships native node_modules.
-    runs-on: ${{ inputs.kind == 'next' && fromJSON('["self-hosted","contabo","Linux"]') || fromJSON('["self-hosted","contabo"]') }}
+    # The runner VM only: the Mac Minis are reserved for autonomous QA and the
+    # Dev VM never builds (it only receives dist).
+    runs-on: [self-hosted, runner-vm]
     timeout-minutes: 25
     # Latest push wins: a newer push to the same branch cancels this one.
     concurrency:
