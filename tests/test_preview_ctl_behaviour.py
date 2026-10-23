@@ -61,6 +61,8 @@ case "$1" in
     grep -vx -- "$2" "$on" > "$on.tmp" || true; mv "$on.tmp" "$on" ;;
   describe)
     if grep -qx -- "$2" "$on"; then echo "| status | online |"; else echo "| status | stopped |"; fi ;;
+  jlist)
+    jq -R '{name: ., pm2_env: {status: "online"}}' "$on" | jq -s . ;;
 esac
 exit 0
 ''',
@@ -137,6 +139,8 @@ class PreviewCtlCase(unittest.TestCase):
             "PREVIEW_CI_ENV_FILE": os.path.join(self.tmp, "etc", "ci.env"),
             "PREVIEW_CF_ENV_FILE": os.path.join(self.tmp, "etc", "cf.env"),
             "PREVIEW_CF_API": "https://cf.test",
+            "PREVIEW_NGINX_MAIN": os.path.join(self.tmp, "etc", "nginx.conf"),
+            "PREVIEW_MEMINFO": os.path.join(self.tmp, "etc", "meminfo"),
         })
         self.env = env
 
@@ -1053,6 +1057,90 @@ class GivenCloudflareOnTheHost(PreviewCtlCase):
         self.assertTrue(deletes[0].endswith("/zones/Z1/dns_records/D1"))
         self.assertTrue(deletes[1].endswith("/access/apps/A1"))
         self.assertIn(f"Deleted DNS {MAIN_HOST}", r.stdout)
+
+
+
+# ── Shared-host caps (Dev VM) ────────────────────────────────────────────────
+class GivenAnAwakeCap(PreviewCtlCase):
+    def setUp(self):
+        super().setUp()
+        self.env["PREVIEW_MAX_AWAKE"] = "1"
+        self.deploy_be(slug="old-preview")
+        self.clear_calls()
+
+    def test_when_another_preview_starts_then_the_least_recently_pushed_one_is_put_to_sleep(self):
+        r = self.deploy_be(slug="new-preview")
+        self.assertIn("pm2 stop pv-old-preview-crm PORT=", self.calls())
+        self.assertIn("putting preview old-preview to sleep", r.stderr)
+        self.assertTrue(self.registry()["previews"]["old-preview"]["asleep"])
+        self.assertFalse(self.registry()["previews"]["new-preview"]["asleep"])
+
+    def test_when_the_same_preview_is_redeployed_then_it_does_not_evict_itself(self):
+        self.deploy_be(slug="old-preview")
+        self.assertFalse(any(c.startswith("pm2 stop") for c in self.calls()))
+        self.assertFalse(self.registry()["previews"]["old-preview"]["asleep"])
+
+    def test_when_no_awake_backend_preview_can_be_put_to_sleep_then_the_backend_is_not_started(self):
+        self.deploy_fe(slug="fe-only")
+        reg = self.registry()
+        reg["previews"]["old-preview"]["asleep"] = True
+        self.write_registry(reg)
+        self.clear_calls()
+        self.upload_be("so360-crm-be", slug="third")
+        self.fails(*self.deploy("so360-crm-be", "be", "crm", slug="third", extra=("--lockhash", HASH)),
+                   message="1 preview backends already awake")
+        self.assertFalse(any(c.startswith("pm2 start") for c in self.calls()))
+        self.assertFalse(self.registry()["previews"]["fe-only"].get("asleep"))
+
+
+class GivenAMemoryFloor(PreviewCtlCase):
+    def meminfo(self, mb):
+        os.makedirs(os.path.join(self.tmp, "etc"), exist_ok=True)
+        with open(self.env["PREVIEW_MEMINFO"], "w") as f:
+            f.write(f"MemTotal: 25000000 kB\nMemAvailable: {mb * 1024} kB\n")
+
+    def test_when_available_memory_is_below_the_floor_then_no_backend_starts(self):
+        self.env["PREVIEW_MIN_AVAIL_MB"] = "3072"
+        self.meminfo(2000)
+        self.upload_be("so360-crm-be")
+        self.fails(*self.deploy("so360-crm-be", "be", "crm", extra=("--lockhash", HASH)),
+                   message="2000 MB available, below the 3072 MB floor")
+        self.assertFalse(any(c.startswith("pm2 start") for c in self.calls()))
+
+    def test_when_available_memory_is_above_the_floor_then_the_backend_starts(self):
+        self.env["PREVIEW_MIN_AVAIL_MB"] = "3072"
+        self.meminfo(8000)
+        self.deploy_be()
+        self.assertTrue(any(c.startswith("pm2 start") for c in self.calls()))
+
+    def test_when_no_floor_is_set_then_meminfo_is_not_consulted(self):
+        self.meminfo(10)
+        self.deploy_be()
+        self.assertTrue(any(c.startswith("pm2 start") for c in self.calls()))
+
+
+class GivenTheHostNginxConf(PreviewCtlCase):
+    def nginx_main(self, text):
+        os.makedirs(os.path.join(self.tmp, "etc"), exist_ok=True)
+        with open(self.env["PREVIEW_NGINX_MAIN"], "w") as f:
+            f.write(text)
+
+    def test_when_nginx_conf_already_sets_the_hash_bucket_size_then_it_is_not_repeated(self):
+        self.nginx_main("http {\n    server_names_hash_bucket_size 128;\n}\n")
+        self.deploy_fe()
+        self.assertNotIn("server_names_hash_bucket_size", self.nginx())
+
+    def test_when_nginx_conf_does_not_set_it_then_the_preview_config_does(self):
+        self.nginx_main("http {\n    # server_names_hash_bucket_size 64;\n}\n")
+        self.deploy_fe()
+        self.assertIn("server_names_hash_bucket_size 128;", self.nginx())
+
+    def test_when_loopback_is_skipped_then_a_next_app_renders_no_loopback_listeners(self):
+        self.env["PREVIEW_SKIP_LOOPBACK"] = "1"
+        self.deploy_next()
+        conf = self.nginx()
+        self.assertNotIn("listen 127.0.0.1:", conf)
+        self.assertIn("proxy_pass http://127.0.0.1:7100;", conf)
 
 
 if __name__ == "__main__":
