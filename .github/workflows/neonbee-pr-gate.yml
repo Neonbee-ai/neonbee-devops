@@ -85,10 +85,9 @@ jobs:
 
   gate:
     name: Gate
-    # Unit tests, lint, typecheck and scans run on the Mac mini runners
-    # (macmini-preview*, label macOS). Contract/integration tests and every
-    # build/deploy job stay on the Linux contabo fleet.
-    runs-on: [self-hosted, macOS]
+    # The runner VM only: the Mac Minis are reserved for autonomous QA and the
+    # Dev VM never builds.
+    runs-on: [self-hosted, runner-vm]
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4.3.1
@@ -368,7 +367,7 @@ jobs:
     name: API Contract Tests
     if: inputs.deploy_type == 'backend'
     needs: [gate]
-    runs-on: [self-hosted, contabo, Linux]
+    runs-on: [self-hosted, runner-vm]
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4.3.1
@@ -463,7 +462,7 @@ jobs:
     name: Integration Tests
     if: inputs.deploy_type == 'backend'
     needs: [gate]
-    runs-on: [self-hosted, contabo, Linux]
+    runs-on: [self-hosted, runner-vm]
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4.3.1
