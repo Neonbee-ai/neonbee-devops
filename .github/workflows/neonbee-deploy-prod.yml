@@ -1441,6 +1441,20 @@ jobs:
             echo "HA VM: failed (exit $H)"
           fi
 
+          # ── HA parity status for the final "Enforce HA standby parity" step ──
+          case "$TARGET_VM" in
+            prod|storefront|internal)
+              if [ -z "$HA_IP" ]; then
+                echo "::error::HA_VM_IP secret missing in ${{ github.repository }} — HA standby NOT deployed (Prod/HA parity broken)"
+                echo "ha=missing" >> "$GITHUB_OUTPUT"
+              elif [ $H -eq 0 ]; then
+                echo "ha=success" >> "$GITHUB_OUTPUT"
+              else
+                echo "ha=failure" >> "$GITHUB_OUTPUT"
+              fi ;;
+            *) echo "ha=n/a" >> "$GITHUB_OUTPUT" ;;
+          esac
+
           # ── gate: pass if ≥1 VM received the build ─────────────────────────
           if [ $P -eq 0 ]; then exit 0; fi
           if [ $H -eq 0 ]; then echo "Primary unavailable — HA standby is live"; exit 0; fi
@@ -1537,7 +1551,10 @@ jobs:
           HA_IP: ${{ secrets.HA_VM_IP }}
           NGINX_ROOT: ${{ inputs.nginx_root }}
         run: |
-          [ -z "$HA_IP" ] && echo "HA_VM_IP not configured, skipping HA deploy" && exit 0
+          if [ -z "$HA_IP" ]; then
+            echo "::error::HA_VM_IP secret missing in ${{ github.repository }} — HA standby NOT deployed (Prod/HA parity broken)"
+            exit 1
+          fi
           ssh-keyscan -H $HA_IP >> ~/.ssh/known_hosts 2>/dev/null
           ssh root@$HA_IP "
             mkdir -p '$NGINX_ROOT-prev' '$NGINX_ROOT'
@@ -1621,7 +1638,10 @@ jobs:
           SERVICE_NAME: ${{ inputs.service_name }}-ha
           PORT: ${{ inputs.port }}
         run: |
-          [ -z "$HA_IP" ] && echo "HA_VM_IP not configured, skipping HA deploy" && exit 0
+          if [ -z "$HA_IP" ]; then
+            echo "::error::HA_VM_IP secret missing in ${{ github.repository }} — HA standby NOT deployed (Prod/HA parity broken)"
+            exit 1
+          fi
           ssh-keyscan -H $HA_IP >> ~/.ssh/known_hosts 2>/dev/null
 
           ssh root@$HA_IP "
@@ -1715,7 +1735,10 @@ jobs:
           SERVICE_NAME: ${{ inputs.service_name }}-ha
           PORT: ${{ inputs.port }}
         run: |
-          [ -z "$HA_IP" ] && echo "HA_VM_IP not configured, skipping HA deploy" && exit 0
+          if [ -z "$HA_IP" ]; then
+            echo "::error::HA_VM_IP secret missing in ${{ github.repository }} — HA standby NOT deployed (Prod/HA parity broken)"
+            exit 1
+          fi
           ssh-keyscan -H $HA_IP >> ~/.ssh/known_hosts 2>/dev/null
 
           ssh root@$HA_IP "mkdir -p '$SERVICE_DIR/.next/static' '$SERVICE_DIR/public'"
@@ -1783,6 +1806,38 @@ jobs:
         if: always()
         run: |
           echo "Service: ${{ inputs.service_name }} | Type: ${{ inputs.deploy_type }} | VM: ${{ inputs.target_vm }} | Status: ${{ job.status }}"
+
+      # ── HA parity gate ─────────────────────────────────────────────────────
+      # Primary deployed but the HA standby was not (secret missing, VM down,
+      # deploy error) → job goes RED so drift is never a silent "success".
+      # Runs last: the primary deploy, swagger publish and metrics have already
+      # completed, and nothing rolls back on failure — this only surfaces drift.
+      - name: Enforce HA standby parity
+        if: always()
+        env:
+          BACKEND_PRIMARY: ${{ steps.deploy_backend.outcome }}
+          BACKEND_HA: ${{ steps.deploy_backend.outputs.ha }}
+          VITE_PRIMARY: ${{ steps.deploy_vitemfe_primary.outcome }}
+          VITE_HA: ${{ steps.deploy_vitemfe_ha.outcome }}
+          NEXT_PRIMARY: ${{ steps.deploy_nextjs_primary.outcome }}
+          NEXT_HA: ${{ steps.deploy_nextjs_ha.outcome }}
+          NEXT_SA_PRIMARY: ${{ steps.deploy_nextjs_standalone_primary.outcome }}
+          NEXT_SA_HA: ${{ steps.deploy_nextjs_standalone_ha.outcome }}
+        run: |
+          FAIL=0
+          check() {  # $1 label, $2 primary outcome, $3 HA result
+            [ "$2" = "success" ] || return 0   # primary failed → its own gate is already red
+            case "$3" in
+              success)        echo "✅ $1: HA standby in parity" ;;
+              skipped|n/a|'') echo "ℹ️  $1: HA standby not in scope for target_vm=${{ inputs.target_vm }}" ;;
+              *) echo "::error::$1: primary deployed but HA standby is '$3' — Prod/HA out of parity"; FAIL=1 ;;
+            esac
+          }
+          check backend           "$BACKEND_PRIMARY" "$BACKEND_HA"
+          check vite-mfe          "$VITE_PRIMARY"    "$VITE_HA"
+          check nextjs            "$NEXT_PRIMARY"    "$NEXT_HA"
+          check nextjs-standalone "$NEXT_SA_PRIMARY" "$NEXT_SA_HA"
+          exit $FAIL
 
   # ── Notify: Microsoft Teams webhook on completion ───────────────────────────
   # Additive only — does NOT change the gate → build → deploy flow (Rule 0).

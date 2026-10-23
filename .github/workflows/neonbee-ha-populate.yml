@@ -46,19 +46,24 @@ jobs:
         env:
           HA_IP: ${{ secrets.HA_VM_IP }}
         run: |
-          ssh root@$HA_IP "mkdir -p \
-            /var/www/cdn.neonbee.app/html \
-            /var/www/dashboard.neonbee.app/html \
-            /var/www/sso.neonbee.app/html"
+          # Every static site Prod serves from /var/www/<site>/html. The nginx
+          # vhosts for these live on the HA VM; this step only syncs content.
+          SITES="cdn.neonbee.app dashboard.neonbee.app sso.neonbee.app \
+            portal.neonbee.app sign.neonbee.app \
+            docs.neonbee.ai developers.neonbee.ai tools.neonbee.ai"
+
+          ssh root@$HA_IP "for S in $SITES; do mkdir -p /var/www/\$S/html; done"
 
           # Agent-forwarded SSH: rsync directly Prod → HA (no runner intermediary)
           ssh -A root@${{ env.PROD_IP }} "
-            rsync -az --delete -e 'ssh -o StrictHostKeyChecking=no' \
-              /var/www/cdn.neonbee.app/html/ root@$HA_IP:/var/www/cdn.neonbee.app/html/
-            rsync -az --delete -e 'ssh -o StrictHostKeyChecking=no' \
-              /var/www/dashboard.neonbee.app/html/ root@$HA_IP:/var/www/dashboard.neonbee.app/html/
-            rsync -az --delete -e 'ssh -o StrictHostKeyChecking=no' \
-              /var/www/sso.neonbee.app/html/ root@$HA_IP:/var/www/sso.neonbee.app/html/
+            for S in $SITES; do
+              if [ -d /var/www/\$S/html ]; then
+                rsync -az --delete -e 'ssh -o StrictHostKeyChecking=no' \
+                  /var/www/\$S/html/ root@$HA_IP:/var/www/\$S/html/
+              else
+                echo \"SKIP: /var/www/\$S/html not found on Prod\"
+              fi
+            done
             echo 'Frontend rsync complete'
           "
           ssh root@$HA_IP "nginx -t && nginx -s reload"
@@ -110,6 +115,41 @@ jobs:
             " || echo "WARNING: sync failed for $DIR"
           done
           echo "All backend dist/ synced"
+
+      # ── Next.js apps: built tree Prod → HA VM, restart PM2 ─────────────────
+      # These run `npm start` from the repo dir (no dist/main.js), so the
+      # built .next + node_modules are copied as-is. .env stays server-side.
+      - name: Sync + start Next.js apps (Prod → HA VM)
+        env:
+          HA_IP: ${{ secrets.HA_VM_IP }}
+        run: |
+          # name:dir:port — verify names against `pm2 jlist` on the HA VM.
+          APPS=(
+            "partner-portal-prod-ha:/github/neonbee/so360-partner-portal-fe:8046"
+            "neonbee-website-prod-ha:/github/neonbee/neonbee-website:6061"
+          )
+          for APP in "${APPS[@]}"; do
+            IFS=':' read -r NAME DIR PORT <<< "$APP"
+            echo "=== Syncing $DIR ==="
+            ssh root@$HA_IP "mkdir -p '$DIR'"
+            ssh -A root@${{ env.PROD_IP }} "
+              rsync -az --delete --exclude '.env*' --exclude '.next/cache' \
+                -e 'ssh -o StrictHostKeyChecking=no' '$DIR/' 'root@$HA_IP:$DIR/'
+            " || { echo "WARNING: sync failed for $DIR"; continue; }
+            ssh root@$HA_IP "bash -s" << APP_START
+              export NVM_DIR="\$HOME/.nvm"
+              [ -s "\$NVM_DIR/nvm.sh" ] && \. "\$NVM_DIR/nvm.sh"
+              nvm use 22 >/dev/null
+              cd '$DIR'
+              if pm2 describe '$NAME' >/dev/null 2>&1; then
+                pm2 restart '$NAME' --update-env
+              else
+                PORT=$PORT pm2 start npm --name '$NAME' -- start
+              fi
+              echo "Started $NAME on :$PORT"
+          APP_START
+          done
+          ssh root@$HA_IP 'export NVM_DIR="$HOME/.nvm"; . "$NVM_DIR/nvm.sh"; pm2 save'
 
       # ── npm install + .env + PM2 on HA VM (parallel per service) ───────────
       - name: Install deps + write .env + start PM2 on HA VM
