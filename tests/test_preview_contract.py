@@ -156,14 +156,15 @@ class Reconcile(unittest.TestCase):
         self.assertIn('[ "$code" = 404 ] || alive=1', read(RECONCILE))
 
 
-class RunsOnAMacRunner(unittest.TestCase):
-    """Previews keep building on the Mac Mini runners when the Linux runners are down."""
+class RunsOnTheRunnerVmOnly(unittest.TestCase):
+    """Preview builds stay off the Mac Minis (autonomous QA) and the Dev VM."""
 
-    def test_the_build_job_accepts_any_self_hosted_runner_except_for_a_next_app(self):
+    def test_every_preview_job_runs_on_the_runner_vm(self):
         text = read(DEPLOY)
-        self.assertIn("runs-on: [self-hosted, contabo]\n", text)
-        self.assertIn("inputs.kind == 'next' && fromJSON('[\"self-hosted\",\"contabo\",\"Linux\"]')", text)
-        self.assertNotIn("runs-on: [self-hosted, contabo, Linux]", text)
+        self.assertEqual(re.findall(r"runs-on: (.*)", text), ["[self-hosted, runner-vm]"] * 2)
+
+    def test_no_job_targets_the_shared_contabo_label(self):
+        self.assertNotIn("contabo", "".join(re.findall(r"runs-on: .*", read(DEPLOY))))
 
     def test_sed_edits_in_place_with_a_suffix_bsd_sed_accepts(self):
         text = read(DEPLOY)
