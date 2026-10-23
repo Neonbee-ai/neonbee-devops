@@ -79,6 +79,9 @@ jobs:
           for f in /etc/letsencrypt/live/*neonbee*/fullchain.pem /etc/ssl/neonbee.ai/*/fullchain.pem; do
             [ -f "$f" ] && echo "$(basename "$(dirname "$f")") $(date -d "$(openssl x509 -noout -enddate -in "$f" | cut -d= -f2)" +%s)"
           done
+          # A non-matching glob above leaves a false test as the last status;
+          # the listing itself is the result, so never fail the ssh on it.
+          exit 0
           EOF
           ssh root@$PROD_IP 'bash -s' < parity/collect.sh > parity/prod.txt
           ssh root@$SF_IP   'bash -s' < parity/collect.sh > parity/sf.txt
