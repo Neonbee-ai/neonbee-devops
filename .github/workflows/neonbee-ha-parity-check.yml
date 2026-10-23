@@ -1,0 +1,167 @@
+# =============================================================================
+# Neonbee — Nightly HA Parity Check (read-only)
+# =============================================================================
+# Compares Prod + Storefront against the HA standby and fails (+ Teams alert)
+# on any drift:
+#   1. every Prod/Storefront PM2 app has an online `<name>-ha` (or
+#      `<name>-prod-ha`) twin on HA
+#   2. build fingerprints match (.next/BUILD_ID or dist/main.js md5)
+#   3. static sites match (/var/www/<site>/html/index.html md5)
+#   4. every nginx server_name served by Prod/Storefront is served by HA
+#   5. every .env KEY NAME present on Prod is present on HA (values never read
+#      off the box — only key names are compared)
+#   6. Prod TLS certs not within 14d of expiry; HA cert copies not stale
+# Changes nothing on any VM. Fix drift with neonbee-ha-populate.yml or a
+# redeploy of the drifted repo.
+# =============================================================================
+
+name: "HA Standby — Nightly Parity Check"
+
+on:
+  schedule:
+    - cron: '30 21 * * *'   # 03:00 IST
+  workflow_dispatch:
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  PROD_IP: '68.183.86.248'
+
+jobs:
+  parity:
+    runs-on: [self-hosted, runner-vm]
+    timeout-minutes: 15
+    steps:
+      - uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: |
+            ${{ secrets.DIGITALOCEAN_SSH_KEY }}
+            ${{ secrets.CONTABO_SSH_KEY }}
+            ${{ secrets.STOREFRONT_PROD_SSH_KEY }}
+
+      - name: Collect fingerprints
+        env:
+          HA_IP: ${{ secrets.HA_VM_IP }}
+          SF_IP: ${{ secrets.STOREFRONT_PROD_IP }}
+        run: |
+          set -euo pipefail
+          for IP in "$PROD_IP" "$SF_IP" "$HA_IP"; do
+            [ -n "$IP" ] || { echo "::error::Prod/Storefront/HA IP secret missing"; exit 1; }
+            ssh-keyscan -H "$IP" >> ~/.ssh/known_hosts 2>/dev/null
+          done
+          mkdir -p parity
+          cat > parity/collect.sh <<'EOF'
+          export NVM_DIR=/root/.nvm; . "$NVM_DIR/nvm.sh" >/dev/null 2>&1 || true
+          echo "##PM2"
+          pm2 jlist 2>/dev/null | python3 -c '
+          import json,sys,hashlib,os
+          for a in json.load(sys.stdin):
+              e=a["pm2_env"]; cwd=e.get("pm_cwd") or "-"
+              fp="-"
+              for f in (".next/BUILD_ID","dist/main.js","dist/src/main.js"):
+                  p=os.path.join(cwd,f)
+                  if os.path.isfile(p):
+                      fp=hashlib.md5(open(p,"rb").read()).hexdigest()[:10]; break
+              keys=set()
+              for f in (".env",".env.production",".env.local"):
+                  p=os.path.join(cwd,f)
+                  if os.path.isfile(p):
+                      for l in open(p,errors="ignore"):
+                          l=l.strip()
+                          if l and not l.startswith("#") and "=" in l:
+                              keys.add(l.split("=",1)[0].replace("export ","").strip())
+              print(a["name"], e.get("status"), fp, ",".join(sorted(keys)) or "-")
+          ' | sort -u
+          echo "##SITES"
+          for d in /var/www/*/html; do [ -f "$d/index.html" ] && echo "$(basename "$(dirname "$d")") $(md5sum < "$d/index.html" | cut -c1-10)"; done
+          echo "##NGINX"
+          nginx -T 2>/dev/null | awk '$1=="server_name"{for(i=2;i<=NF;i++){gsub(";","",$i);print $i}}' | sort -u
+          echo "##CERTS"
+          for f in /etc/letsencrypt/live/*neonbee*/fullchain.pem /etc/ssl/neonbee.ai/*/fullchain.pem; do
+            [ -f "$f" ] && echo "$(basename "$(dirname "$f")") $(date -d "$(openssl x509 -noout -enddate -in "$f" | cut -d= -f2)" +%s)"
+          done
+          EOF
+          ssh root@$PROD_IP 'bash -s' < parity/collect.sh > parity/prod.txt
+          ssh root@$SF_IP   'bash -s' < parity/collect.sh > parity/sf.txt
+          ssh root@$HA_IP   'bash -s' < parity/collect.sh > parity/ha.txt
+          wc -l parity/*.txt
+
+      - name: Compare Prod/Storefront vs HA
+        id: compare
+        run: |
+          python3 - <<'EOF'
+          import os, sys
+          # Apps/hosts that are intentionally not on the HA standby
+          # (temp jobs, previews, non-Neonbee sites, the platform help preview).
+          SKIP = ('temp', 'preview', 'v9', 'moonhive')
+          def parse(f):
+              sec, cur = {}, None
+              for l in open(f):
+                  l = l.rstrip()
+                  if l.startswith('##'): cur = l[2:]; sec[cur] = []; continue
+                  if cur and l: sec[cur].append(l)
+              return sec
+          P, S, H = parse('parity/prod.txt'), parse('parity/sf.txt'), parse('parity/ha.txt')
+          if not P.get('PM2') or not H.get('PM2'):
+              print('::error::empty PM2 listing from Prod or HA — cannot compare'); sys.exit(1)
+          ha = {l.split()[0]: l.split() for l in H['PM2']}
+          drift = []
+          for src, label in ((P, 'Prod'), (S, 'Storefront')):
+              for l in src.get('PM2', []):
+                  n, st, fp, keys = (l.split() + ['-'] * 4)[:4]
+                  if st != 'online' or any(s in n for s in SKIP): continue
+                  h = ha.get(n + '-ha') or ha.get(n + '-prod-ha')
+                  if not h: drift.append(f'{label} app {n}: no HA twin'); continue
+                  if h[1] != 'online': drift.append(f'{label} app {n}: HA twin {h[0]} is {h[1]}')
+                  if fp != '-' and h[2] != fp: drift.append(f'{label} app {n}: build {fp} != HA {h[2]}')
+                  miss = set(keys.split(',')) - set(h[3].split(',')) - {'-'}
+                  if miss: drift.append(f'{label} app {n}: HA .env missing keys {",".join(sorted(miss))}')
+          hs = dict(x.split() for x in H.get('SITES', []))
+          for x in P.get('SITES', []):
+              k, v = x.split()
+              if any(s in k for s in SKIP): continue
+              if hs.get(k) != v: drift.append(f'site {k}: {v} != HA {hs.get(k)}')
+          hn = set(H.get('NGINX', []))
+          for n in sorted(set(P.get('NGINX', []) + S.get('NGINX', []))):
+              if n not in hn and not any(s in n for s in SKIP): drift.append(f'nginx {n}: not served by HA')
+          # TLS: Prod certs must not be near expiry; HA copies (neonbee.ai,
+          # mirrored from Prod by hand) must not be older than Prod's.
+          import time
+          now = time.time()
+          hc = dict(x.split() for x in H.get('CERTS', []))
+          for x in P.get('CERTS', []):
+              d, t = x.split(); t = int(t)
+              if t - now < 14 * 86400: drift.append(f'cert {d}: Prod expires in {int((t - now) // 86400)}d')
+              if d in hc and int(hc[d]) < t: drift.append(f'cert {d}: HA copy older than Prod (re-sync)')
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as s:
+              s.write('## HA parity\n\n' + ('\n'.join(f'- ❌ {d}' for d in drift) if drift else '✅ Prod, Storefront and HA in parity') + '\n')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as o:
+              o.write(f'count={len(drift)}\n')
+          for d in drift: print(f'::error::{d}')
+          sys.exit(1 if drift else 0)
+          EOF
+
+      - name: Notify Teams on drift
+        if: failure()
+        env:
+          HOOK: ${{ secrets.NOTIFY_WEBHOOK_URL }}
+          COUNT: ${{ steps.compare.outputs.count }}
+        run: |
+          if [ -z "$HOOK" ]; then echo "NOTIFY_WEBHOOK_URL not set — skipping notification"; exit 0; fi
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          curl -sf -H 'Content-Type: application/json' --data @- "$HOOK" <<JSON || echo "Teams notify failed (non-fatal)"
+          {
+            "type": "message",
+            "attachments": [{
+              "contentType": "application/vnd.microsoft.card.adaptive",
+              "content": {
+                "type": "AdaptiveCard",
+                "version": "1.4",
+                "body": [
+                  { "type": "TextBlock", "size": "Large", "weight": "Bolder", "color": "Attention", "text": "HA standby drift — ${COUNT:-?} issue(s)", "wrap": true },
+                  { "type": "TextBlock", "text": "Prod/Storefront vs HA nightly parity check failed", "isSubtle": true, "spacing": "None", "wrap": true }
+                ],
+                "actions": [{ "type": "Action.OpenUrl", "title": "View drift", "url": "${RUN_URL}" }]
+              }
+            }]
+          }
+          JSON
