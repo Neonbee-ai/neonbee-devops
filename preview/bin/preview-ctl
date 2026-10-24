@@ -703,6 +703,23 @@ EOF
   jq -r '.[] | select(.dev_host and .host) | "    sub_filter '"'"'https://\(.dev_host)'"'"' '"'"'https://\(.host)'"'"';"' <<<"$comps"
 }
 
+# Preview backends, on their pm2 port. Every static host of a preview gets
+# them, so a site's same-origin /api/<svc>/ calls reach the branch build too.
+be_locations() {
+  local name port
+  while IFS=$'\t' read -r name port; do
+    [ -n "$name" ] || continue
+    cat <<EOF
+    location ^~ /api/$name/ {
+        rewrite ^/api/$name/(.*)\$ /\$1 break;
+        proxy_pass http://127.0.0.1:$port;
+        include /etc/nginx/snippets/so360-preview-api.conf;
+        error_page 502 503 504 = @asleep;
+    }
+EOF
+  done < <(jq -r '.[] | select(.kind == "be") | [.name, .port] | @tsv' <<<"$1")
+}
+
 render_server() {
   local slug=$1 host="pr-$1.$DOMAIN" base="$ROOT/$1" comps name port spa xhost
   comps=$(reg_read | jq -c --arg s "$slug" '.previews[$s].components')
@@ -738,18 +755,7 @@ EOF
 EOF
     fi
   done < <(jq -r '.[] | select(.kind == "fe") | [.name, (.spa // false)] | @tsv' <<<"$comps")
-  # Preview backends, on their pm2 port.
-  while IFS=$'\t' read -r name port; do
-    [ -n "$name" ] || continue
-    cat <<EOF
-    location ^~ /api/$name/ {
-        rewrite ^/api/$name/(.*)\$ /\$1 break;
-        proxy_pass http://127.0.0.1:$port;
-        include /etc/nginx/snippets/so360-preview-api.conf;
-        error_page 502 503 504 = @asleep;
-    }
-EOF
-  done < <(jq -r '.[] | select(.kind == "be") | [.name, .port] | @tsv' <<<"$comps")
+  be_locations "$comps"
   # Host shell: the preview's own build, else develop's.
   if [ -n "$(jq -r '.[] | select(.kind == "shell") | .name' <<<"$comps")" ]; then
     cat <<EOF
@@ -773,8 +779,9 @@ EOF
   while IFS=$'\t' read -r name xhost; do
     [ -n "$name" ] || continue
     server_head "$slug" "$xhost" "$comps" "$xhost/api" "$xhost/cdn"
+    echo "    include /etc/nginx/snippets/so360-preview-overlay.conf;"
+    be_locations "$comps"
     cat <<EOF
-    include /etc/nginx/snippets/so360-preview-overlay.conf;
     location / {
         root $base/site/$name;
         try_files \$uri \$uri/ /index.html =404;
