@@ -70,11 +70,19 @@ jobs:
       - name: Setup SSH
         if: steps.pre.outputs.go == 'true'
         env:
+          # Both keys, as in neonbee-deploy-preview.yml Setup SSH: the Dev VM
+          # (PREVIEW_HOST) authorizes CONTABO_SSH_KEY, not the old preview key.
           KEY: ${{ secrets.PREVIEW_SSH_KEY }}
+          FALLBACK_KEY: ${{ secrets.CONTABO_SSH_KEY }}
         run: |
           mkdir -p ~/.ssh && chmod 700 ~/.ssh
           eval "$(ssh-agent -s)"
-          echo "$KEY" | ssh-add -
+          for k in "$KEY" "$FALLBACK_KEY"; do
+            if [ -n "$k" ]; then
+              printf '%s\n' "$k" | ssh-add - || echo "::warning::an SSH key secret could not be loaded into ssh-agent"
+            fi
+          done
+          ssh-add -l >/dev/null || { echo "::error::no usable SSH key (PREVIEW_SSH_KEY / CONTABO_SSH_KEY) reaches this repo"; exit 1; }
           echo "SSH_AUTH_SOCK=$SSH_AUTH_SOCK" >> "$GITHUB_ENV"
           echo "SSH_AGENT_PID=$SSH_AGENT_PID" >> "$GITHUB_ENV"
           ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts 2>/dev/null

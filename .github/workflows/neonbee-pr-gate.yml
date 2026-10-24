@@ -25,10 +25,10 @@ on:
   workflow_call:
     inputs:
       test_max_workers:
-        description: 'Worker cap for jest/vitest in the unit, contract and integration steps (jest --maxWorkers; vitest --maxWorkers, plus --minWorkers=1 on vitest < 4). Number or percent; 0 disables the cap.'
+        description: 'Worker cap for jest/vitest in the unit, contract and integration steps (jest --maxWorkers; vitest --maxWorkers, plus --minWorkers=1 on vitest < 4). Number or percent; 0 disables the cap. Empty = jest 2, vitest 4.'
         required: false
         type: string
-        default: '2'
+        default: ''
       service_name:
         description: 'e.g. crm-be, core, folio-be — used in warning annotations'
         required: true
@@ -91,18 +91,20 @@ env:
   # Runner = the script text (vitest wins), else package.json deps (wrapper
   # scripts such as `bash scripts/test.sh`). Nothing is printed when the
   # script already pins workers or runs in band, or when the cap is 0.
-  TEST_MAX_WORKERS: ${{ inputs.test_max_workers || '2' }}
+  # Empty = per-runner default: jest 2, vitest 4. jsdom vitest suites are
+  # far heavier per file; so360-command's gate hit its 20-min limit at 2.
+  TEST_MAX_WORKERS: ${{ inputs.test_max_workers || '' }}
   TEST_WORKER_FLAGS_JS: |
     const fs = require('fs');
     const key = process.argv[1] || 'test';
-    const n = String(process.env.TEST_MAX_WORKERS || '2').trim();
-    if (!/^[1-9][0-9]*%?$/.test(n)) process.exit(0);
     const p = JSON.parse(fs.readFileSync('package.json', 'utf8'));
     const s = (p.scripts || {})[key] || '';
     if (/--runInBand|(^|\s)-i(\s|$)|--maxWorkers|--minWorkers|--poolOptions|--no-file-parallelism/.test(s)) process.exit(0);
     const d = Object.assign({}, p.dependencies, p.devDependencies);
     let r = /vitest/.test(s) ? 'vitest' : /jest/.test(s) ? 'jest' : '';
     if (!r) r = d.vitest ? 'vitest' : d.jest ? 'jest' : '';
+    const n = String(process.env.TEST_MAX_WORKERS || (r === 'vitest' ? '4' : '2')).trim();
+    if (!/^[1-9][0-9]*%?$/.test(n)) process.exit(0);
     if (r === 'jest') console.log('--maxWorkers=' + n);
     if (r === 'vitest') {
       let major = parseInt(String(d.vitest || '3').replace(/^[^0-9]*/, ''), 10) || 3;
