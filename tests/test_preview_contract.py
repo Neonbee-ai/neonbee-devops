@@ -104,6 +104,17 @@ class BackendDatabase(unittest.TestCase):
     def test_the_internal_email_service_key_is_forwarded(self):
         self.assertIn("EMAIL_INTERNAL_KEY=${{ secrets.EMAIL_INTERNAL_KEY }}", read(DEPLOY))
 
+    def test_inventory_fulfillment_ticketing_internal_keys_are_declared_and_forwarded(self):
+        # Given the preview deploy workflow
+        text = read(DEPLOY)
+        for key in ("INVENTORY_INTERNAL_KEY", "FULFILLMENT_INTERNAL_KEY", "TICKETING_INTERNAL_KEY"):
+            with self.subTest(key=key):
+                # When a backend preview env is written
+                # Then the secret is declared and forwarded under the same name,
+                # so fail-closed internal guards accept their M2M callers
+                self.assertIn(f"{key}:", text)
+                self.assertIn(f"{key}=${{{{ secrets.{key} }}}}", text)
+
     def test_preview_ctl_refuses_the_production_database(self):
         text = read(CTL)
         self.assertIn('grep -qF "$PROD_SUPABASE_HOST"', text)
