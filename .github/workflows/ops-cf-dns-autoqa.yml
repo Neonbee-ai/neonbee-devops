@@ -1,0 +1,32 @@
+# One-off: create A record autoqa.moonhive.in -> Internal Tools VM (AutoQA coordinator). Idempotent.
+name: ops-cf-dns-autoqa
+on:
+  push:
+    branches: [ops/cf-dns-autoqa-moonhive]
+permissions: {}
+jobs:
+  dns:
+    runs-on: [self-hosted, runner-vm]
+    steps:
+      - name: Upsert A record
+        env:
+          T1: ${{ secrets.CF_SAAS_API_TOKEN }}
+          T2: ${{ secrets.CF_PREVIEW_API_TOKEN }}
+          ZONE_NAME: moonhive.in
+          REC: autoqa.moonhive.in
+          IP: 167.114.98.177
+        run: |
+          set -euo pipefail
+          API=https://api.cloudflare.com/client/v4
+          for T in "$T1" "$T2"; do
+            [ -n "$T" ] || continue
+            Z=$(curl -s -H "Authorization: Bearer $T" "$API/zones?name=$ZONE_NAME" | jq -r '.result[0].id // empty')
+            [ -n "$Z" ] || { echo "token cannot see $ZONE_NAME, trying next"; continue; }
+            ID=$(curl -s -H "Authorization: Bearer $T" "$API/zones/$Z/dns_records?type=A&name=$REC" | jq -r '.result[0].id // empty')
+            BODY=$(jq -nc --arg n "$REC" --arg c "$IP" '{type:"A",name:$n,content:$c,ttl:300,proxied:false,comment:"AutoQA coordinator (Internal Tools VM)"}')
+            if [ -n "$ID" ]; then R=$(curl -s -X PUT -H "Authorization: Bearer $T" -H "Content-Type: application/json" "$API/zones/$Z/dns_records/$ID" -d "$BODY")
+            else R=$(curl -s -X POST -H "Authorization: Bearer $T" -H "Content-Type: application/json" "$API/zones/$Z/dns_records" -d "$BODY"); fi
+            echo "$R" | jq -c '{success, errors, rec: (.result | {name, content, proxied})}'
+            [ "$(echo "$R" | jq -r .success)" = true ] && exit 0
+          done
+          echo "no token could write $ZONE_NAME"; exit 1
