@@ -665,6 +665,7 @@ class GivenAStaticSite(PreviewCtlCase):
         self.assertEqual(conf.count(f"sub_filter 'https://dev-sso.skyoffice360.com' 'https://{host}';"), 2)
         self.assertEqual(conf.count("include /etc/nginx/snippets/so360-preview-overlay.conf;"), 2)
 
+        self.assertIn(f"PREVIEW_HOST_URL=https://{host}", r.stdout)
     def test_when_the_preview_has_a_backend_then_the_site_host_routes_to_it_too(self):
         self.deploy_be()
         self.deploy_site()
@@ -672,7 +673,6 @@ class GivenAStaticSite(PreviewCtlCase):
         site_block = conf[conf.index(f"server_name {self.site_host('sso')};"):]
         self.assertEqual(conf.count("location ^~ /api/crm/ {"), 2)
         self.assertIn("location ^~ /api/crm/ {", site_block)
-        self.assertIn(f"PREVIEW_HOST_URL=https://{host}", r.stdout)
 
     def test_when_the_host_is_missing_or_malformed_then_deploy_is_refused(self):
         for host in ("", "sso.skyoffice360.com", "pr-x.example.com", "pr-x-.skyoffice360.com",
