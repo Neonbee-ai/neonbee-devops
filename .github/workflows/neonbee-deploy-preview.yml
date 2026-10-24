@@ -152,6 +152,8 @@ on:
       PEOPLE_INTERNAL_KEY:         { required: false }
       PEOPLE_INTERNAL_KEY_2:       { required: false }
       SUBSCRIPTION_INTERNAL_KEY:   { required: false }
+      CONNECT_INTERNAL_KEY:        { required: false }
+      CONNECT_INTERNAL_KEYS:       { required: false }
       BUNNY_STORAGE_HOSTNAME:      { required: false }
       BUNNY_STORAGE_ZONE:          { required: false }
       BUNNY_ACCESS_KEY:            { required: false }
@@ -536,6 +538,8 @@ jobs:
               echo "PEOPLE_INTERNAL_KEY=${{ secrets.PEOPLE_INTERNAL_KEY }}"
               echo "PEOPLE_INTERNAL_KEY_2=${{ secrets.PEOPLE_INTERNAL_KEY_2 }}"
               echo "SUBSCRIPTION_INTERNAL_KEY=${{ secrets.SUBSCRIPTION_INTERNAL_KEY }}"
+              echo "CONNECT_INTERNAL_KEY=${{ secrets.CONNECT_INTERNAL_KEY }}"
+              echo "CONNECT_INTERNAL_KEYS=${{ secrets.CONNECT_INTERNAL_KEYS }}"
               echo "BUNNY_STORAGE_HOSTNAME=${{ secrets.BUNNY_STORAGE_HOSTNAME }}"
               echo "BUNNY_STORAGE_ZONE=${{ secrets.BUNNY_STORAGE_ZONE }}"
               echo "BUNNY_ACCESS_KEY=${{ secrets.BUNNY_ACCESS_KEY }}"
