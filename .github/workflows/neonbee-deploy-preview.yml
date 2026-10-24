@@ -142,6 +142,9 @@ on:
       MARKETING_INTERNAL_KEY:      { required: false }
       MARKETING_TRACKING_SECRET:   { required: false }
       MAINTENANCE_INTERNAL_KEY:       { required: false }
+      INVENTORY_INTERNAL_KEY:      { required: false }
+      FULFILLMENT_INTERNAL_KEY:    { required: false }
+      TICKETING_INTERNAL_KEY:      { required: false }
       CHANNEL_DELEGATION_SECRET:   { required: false }
       COMPENSATION_ENCRYPTION_KEY: { required: false }
       PLATFORM_OPS_INTERNAL_KEY:   { required: false }
@@ -528,6 +531,9 @@ jobs:
               echo "MARKETING_INTERNAL_KEY=${{ secrets.MARKETING_INTERNAL_KEY }}"
               echo "MARKETING_TRACKING_SECRET=${{ secrets.MARKETING_TRACKING_SECRET }}"
               echo "MAINTENANCE_INTERNAL_KEY=${{ secrets.MAINTENANCE_INTERNAL_KEY }}"
+              echo "INVENTORY_INTERNAL_KEY=${{ secrets.INVENTORY_INTERNAL_KEY }}"
+              echo "FULFILLMENT_INTERNAL_KEY=${{ secrets.FULFILLMENT_INTERNAL_KEY }}"
+              echo "TICKETING_INTERNAL_KEY=${{ secrets.TICKETING_INTERNAL_KEY }}"
               echo "CHANNEL_DELEGATION_SECRET=${{ secrets.CHANNEL_DELEGATION_SECRET }}"
               echo "COMPENSATION_ENCRYPTION_KEY=${{ secrets.COMPENSATION_ENCRYPTION_KEY }}"
               echo "PLATFORM_OPS_INTERNAL_KEY=${{ secrets.PLATFORM_OPS_INTERNAL_KEY }}"
