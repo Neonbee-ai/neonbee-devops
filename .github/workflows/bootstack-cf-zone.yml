@@ -29,6 +29,17 @@ jobs:
           API=https://api.cloudflare.com/client/v4
           cf() { curl -sS -H "Authorization: Bearer $CF_TOKEN" -H "Content-Type: application/json" "$@"; }
 
+          # Diagnostics: what each org token can do (no secret values printed).
+          for N in SAAS PREVIEW; do
+            V="CF_TOKEN_$N"; T="${!V}"
+            [ -n "$T" ] || { echo "$N: not set"; continue; }
+            VER=$(curl -sS -H "Authorization: Bearer $T" "$API/user/tokens/verify" | jq -r '.result.status // .errors[0].message')
+            ACC=$(curl -sS -H "Authorization: Bearer $T" "$API/accounts" | jq -r '[.result[]?.name] | join(", ")')
+            ZN=$(curl -sS -H "Authorization: Bearer $T" "$API/zones?per_page=50" | jq -r '[.result[]?.name] | join(", ")')
+            echo "$N: status=$VER accounts=[$ACC] zones=[$ZN]"
+          done
+          echo "account id secret set: $([ -n "$CF_ACCOUNT_ID" ] && echo yes || echo no)"
+
           # Use whichever org token can see the account.
           CF_TOKEN=""
           for T in "$CF_TOKEN_SAAS" "$CF_TOKEN_PREVIEW"; do
