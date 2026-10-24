@@ -302,7 +302,7 @@ jobs:
               for p in shell-context design-system event-bus formatters; do
                 if [ -d "_shell-fe/packages/$p" ]; then
                   if ! ( cd "_shell-fe/packages/$p" \
-                         && npm install --legacy-peer-deps --include=dev --no-audit --no-fund >/dev/null 2>&1 \
+                         && npm install --legacy-peer-deps --include=dev --no-audit --no-fund --prefer-offline >/dev/null 2>&1 \
                          && npm run build ); then
                     echo "::warning::could not rebuild @so360/$p — restoring its committed dist"
                     ( cd _shell-fe && git checkout -- "packages/$p/dist" ) 2>/dev/null || true
@@ -314,11 +314,88 @@ jobs:
               echo "::warning title=No PAT_TOKEN::could not clone so360-shell-fe — using .ci-stubs for @so360/*"
             fi
           fi
+          # node_modules reuse: a tree keyed on sha256(package-lock + package.json +
+          # node/npm major + install flags + omit/include env) is stored per caller repo
+          # in a host-local store shared by every runner slot. Writes go to a temp file
+          # + atomic mv, so a reader only ever sees a complete archive; a restore is
+          # extracted to a staging dir, moved in only when tar exits 0, and must pass the
+          # same binary check as a fresh install — otherwise it is discarded and npm ci
+          # runs exactly as before. Repos with root install lifecycle scripts never use it.
+          nb_nm_dir="${NB_NM_CACHE_DIR:-$HOME/.cache/neonbee-nm-cache}/${GITHUB_REPOSITORY//\//__}"
+          nb_nm_bins_ok() {
+            local b
+            [ -f node_modules/.package-lock.json ] || return 1
+            for b in $(node -e "const s=require('./package.json').scripts||{};const o=new Set();for(const k of ['test','build']){const m=String(s[k]||'').match(/\b(vitest|jest|vite|next|nest|tsc)\b/);if(m)o.add(m[1])}console.log([...o].join(' '))" 2>/dev/null); do
+              [ -x "node_modules/.bin/$b" ] || return 1
+              "node_modules/.bin/$b" --version >/dev/null 2>&1 || return 1
+            done
+            return 0
+          }
+          nb_nm_key() {
+            [ -f package-lock.json ] || return 1
+            node -e "const s=require('./package.json').scripts||{};process.exit(['preinstall','install','postinstall','prepare'].some(k=>s[k])?1:0)" 2>/dev/null || return 1
+            NB_NM_FLAGS="$1" NB_NM_NPM="$(npm -v 2>/dev/null | cut -d. -f1)" node -e "const c=require('crypto'),fs=require('fs');const h=c.createHash('sha256');for(const f of ['package-lock.json','package.json','.npmrc'])if(fs.existsSync(f))h.update(f+'\0').update(fs.readFileSync(f));const env=Object.keys(process.env).filter(k=>/^(npm_config_(omit|include|production|only|legacy_peer_deps|ignore_scripts)|NODE_ENV)$/i.test(k)).sort().map(k=>k.toLowerCase()+'='+process.env[k]);h.update(['nm-v1',process.env.NB_NM_FLAGS,process.env.NB_NM_NPM,process.versions.node.split('.')[0],process.platform,process.arch,process.cwd().slice((process.env.GITHUB_WORKSPACE||'').length),...env].join('|'));console.log(h.digest('hex').slice(0,40))"
+          }
+          nb_nm_restore() {
+            local f stage=".nb-nm-restore.$$"
+            for f in "$nb_nm_dir/$1.tar.zst" "$nb_nm_dir/$1.tar.gz"; do
+              [ -f "$f" ] || continue
+              case "$f" in *.zst) command -v zstd >/dev/null 2>&1 || continue ;; esac
+              rm -rf "$stage" node_modules && mkdir -p "$stage" || return 1
+              if ( set -o pipefail; case "$f" in *.zst) zstd -dcq "$f" ;; *) gzip -dc "$f" ;; esac | tar -xf - -C "$stage" ) && [ -d "$stage/node_modules" ]; then
+                mv "$stage/node_modules" node_modules && rm -rf "$stage"
+                if nb_nm_bins_ok; then
+                  touch "$f" 2>/dev/null || true
+                  echo "node_modules restored from runner cache (${f##*/})"
+                  return 0
+                fi
+                echo "::warning::cached node_modules failed the binary check — discarding it and running npm ci"
+              else
+                echo "::warning::cached node_modules archive unreadable — discarding it and running npm ci"
+              fi
+              rm -f "$f"; rm -rf "$stage" node_modules
+            done
+            return 1
+          }
+          nb_nm_save() {
+            local ext tmp used root total old
+            nb_nm_bins_ok || { echo "node_modules cache: fresh tree failed the binary check — not saving"; return 0; }
+            used=$(df -P "$HOME" 2>/dev/null | awk 'NR==2{gsub("%","",$5);print $5}')
+            [ "${used:-100}" -lt "${NB_NM_MAX_DISK_PCT:-85}" ] || { echo "::notice::node_modules cache: disk ${used:-?}% used — not saving"; return 0; }
+            mkdir -p "$nb_nm_dir" || return 0
+            if command -v zstd >/dev/null 2>&1; then ext=zst; else ext=gz; fi
+            tmp="$nb_nm_dir/.$1.$$.$RANDOM.tmp"
+            if ( set -o pipefail; tar -cf - node_modules | if [ "$ext" = zst ]; then zstd -q -3 -T4 -c; else gzip -1 -c; fi > "$tmp" ); then
+              mv -f "$tmp" "$nb_nm_dir/$1.tar.$ext" && echo "node_modules saved to runner cache ($1.tar.$ext)"
+            else
+              rm -f "$tmp"; echo "::warning::node_modules cache save failed — ignored"
+            fi
+            # Bound the store: stale temps, >7 days, last 3 keys per repo, 10 GB total.
+            find "$nb_nm_dir" -maxdepth 1 -name '.*.tmp' -mmin +120 -delete 2>/dev/null || true
+            find "$nb_nm_dir" -maxdepth 1 -name '*.tar.*' -mtime +7 -delete 2>/dev/null || true
+            ls -1t "$nb_nm_dir"/*.tar.* 2>/dev/null | tail -n +4 | while IFS= read -r old; do rm -f "$old"; done
+            root="${nb_nm_dir%/*}"
+            total=$(du -sk "$root" 2>/dev/null | cut -f1)
+            while [ "${total:-0}" -gt 10485760 ]; do
+              old=$(ls -1tr "$root"/*/*.tar.* 2>/dev/null | head -1)
+              [ -n "$old" ] || break
+              rm -f "$old"; total=$(du -sk "$root" 2>/dev/null | cut -f1)
+            done
+            return 0
+          }
+          nb_nm_install() {
+            local key
+            key=$(nb_nm_key "$1") || key=""
+            if [ -n "$key" ] && nb_nm_restore "$key"; then return 0; fi
+            npm_ci_retry || return 1
+            if [ -n "$key" ]; then nb_nm_save "$key"; fi
+            return 0
+          }
           npm_ci_retry() {
             local attempt rc
             for attempt in 1 2 3; do
               rm -rf node_modules
-              npm ci --legacy-peer-deps --include=dev && return 0
+              npm ci --legacy-peer-deps --include=dev --prefer-offline --no-audit --no-fund && return 0
               rc=$?
               if [ $attempt -lt 3 ]; then
                 echo "::warning::npm ci failed (exit $rc) on attempt $attempt — retrying after cache clean"
@@ -329,7 +406,7 @@ jobs:
             echo "::error::npm ci failed on every attempt"
             return 1
           }
-          npm_ci_retry
+          nb_nm_install "--legacy-peer-deps --include=dev"
           if [ "$KIND" = fe ] || [ "$KIND" = shell ] || [ "$KIND" = site ]; then
             if [ -d _shell-fe ] && [ "${{ inputs.is_shell }}" != "true" ]; then
               mkdir -p node_modules/@so360
@@ -608,7 +685,7 @@ jobs:
               DEPS="$RUNNER_TEMP/preview-deps"
               rm -rf "$DEPS" && mkdir -p "$DEPS"
               cp package.json package-lock.json "$DEPS/"
-              (cd "$DEPS" && npm ci --omit=dev --legacy-peer-deps)
+              (cd "$DEPS" && npm ci --omit=dev --legacy-peer-deps --prefer-offline --no-audit --no-fund)
               ssh "root@$HOST" "mkdir -p '$INC/_deps/$REPO/$LOCKHASH'"
               rsync -az --delete "$DEPS/node_modules" "root@$HOST:$INC/_deps/$REPO/$LOCKHASH/"
             fi
