@@ -1,0 +1,66 @@
+name: Bootstack Cloudflare zone setup
+
+# One-off, idempotent: creates the bootstack.co.in zone, points @ and www at
+# the target VM (proxied), sets SSL to Full and prints the nameservers to set
+# at the registrar. Safe to re-run.
+
+on:
+  push:
+    branches: [ops/bootstack-cf-zone]
+    paths: [.github/workflows/bootstack-cf-zone.yml]
+
+concurrency:
+  group: cloudflare-zone
+  cancel-in-progress: false
+
+jobs:
+  zone:
+    runs-on: [self-hosted, contabo, Linux]
+    env:
+      DOMAIN: bootstack.co.in
+      ORIGIN_IP: 167.114.98.177
+      CF_TOKEN_SAAS: ${{ secrets.CF_SAAS_API_TOKEN }}
+      CF_TOKEN_PREVIEW: ${{ secrets.CF_PREVIEW_API_TOKEN }}
+      CF_ACCOUNT_ID: ${{ secrets.CF_R2_ACCOUNT_ID }}
+    steps:
+      - name: Create zone, DNS and SSL settings
+        run: |
+          set -euo pipefail
+          API=https://api.cloudflare.com/client/v4
+          cf() { curl -sS -H "Authorization: Bearer $CF_TOKEN" -H "Content-Type: application/json" "$@"; }
+
+          # Use whichever org token can see the account.
+          CF_TOKEN=""
+          for T in "$CF_TOKEN_SAAS" "$CF_TOKEN_PREVIEW"; do
+            [ -n "$T" ] || continue
+            if curl -sS -H "Authorization: Bearer $T" "$API/accounts/$CF_ACCOUNT_ID" | jq -e '.success' >/dev/null; then CF_TOKEN="$T"; break; fi
+          done
+          [ -n "$CF_TOKEN" ] || { echo "::error::No org Cloudflare token has access to the account"; exit 1; }
+
+          ZONE=$(cf "$API/zones?name=$DOMAIN" | jq -r '.result[0].id // empty')
+          if [ -z "$ZONE" ]; then
+            RESP=$(cf -X POST "$API/zones" --data "{\"name\":\"$DOMAIN\",\"account\":{\"id\":\"$CF_ACCOUNT_ID\"},\"type\":\"full\"}")
+            ZONE=$(echo "$RESP" | jq -r '.result.id // empty')
+            [ -n "$ZONE" ] || { echo "::error::Zone create failed: $(echo "$RESP" | jq -c '.errors')"; exit 1; }
+            echo "Created zone $DOMAIN"
+          else
+            echo "Zone $DOMAIN already exists"
+          fi
+
+          for NAME in "$DOMAIN" "www.$DOMAIN"; do
+            BODY="{\"type\":\"A\",\"name\":\"$NAME\",\"content\":\"$ORIGIN_IP\",\"proxied\":true,\"ttl\":1}"
+            REC=$(cf "$API/zones/$ZONE/dns_records?type=A&name=$NAME" | jq -r '.result[0].id // empty')
+            if [ -n "$REC" ]; then
+              cf -X PUT "$API/zones/$ZONE/dns_records/$REC" --data "$BODY" | jq -e '.success' >/dev/null
+            else
+              cf -X POST "$API/zones/$ZONE/dns_records" --data "$BODY" | jq -e '.success' >/dev/null
+            fi
+            echo "A $NAME -> $ORIGIN_IP (proxied)"
+          done
+
+          cf -X PATCH "$API/zones/$ZONE/settings/ssl" --data '{"value":"full"}' | jq -e '.success' >/dev/null
+          cf -X PATCH "$API/zones/$ZONE/settings/always_use_https" --data '{"value":"on"}' | jq -e '.success' >/dev/null
+          echo "SSL: Full, Always HTTPS: on"
+
+          echo "Nameservers to set at Namecheap:"
+          cf "$API/zones/$ZONE" | jq -r '.result.name_servers[]' | tee -a "$GITHUB_STEP_SUMMARY"
