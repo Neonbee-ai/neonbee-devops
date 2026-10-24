@@ -29,24 +29,24 @@ jobs:
           API=https://api.cloudflare.com/client/v4
           cf() { curl -sS -H "Authorization: Bearer $CF_TOKEN" -H "Content-Type: application/json" "$@"; }
 
-          # Diagnostics: what each org token can do (no secret values printed).
-          for N in SAAS PREVIEW; do
-            V="CF_TOKEN_$N"; T="${!V}"
-            [ -n "$T" ] || { echo "$N: not set"; continue; }
-            VER=$(curl -sS -H "Authorization: Bearer $T" "$API/user/tokens/verify" | jq -r '.result.status // .errors[0].message')
-            ACC=$(curl -sS -H "Authorization: Bearer $T" "$API/accounts" | jq -r '[.result[]?.name] | join(", ")')
-            ZN=$(curl -sS -H "Authorization: Bearer $T" "$API/zones?per_page=50" | jq -r '[.result[]?.name] | join(", ")')
-            echo "$N: status=$VER accounts=[$ACC] zones=[$ZN]"
-          done
-          echo "account id secret set: $([ -n "$CF_ACCOUNT_ID" ] && echo yes || echo no)"
-
-          # Use whichever org token can see the account.
+          # Prefer a token that already manages the zone; else one that can see the account.
           CF_TOKEN=""
           for T in "$CF_TOKEN_SAAS" "$CF_TOKEN_PREVIEW"; do
             [ -n "$T" ] || continue
-            if curl -sS -H "Authorization: Bearer $T" "$API/accounts/$CF_ACCOUNT_ID" | jq -e '.success' >/dev/null; then CF_TOKEN="$T"; break; fi
+            if curl -sS -H "Authorization: Bearer $T" "$API/zones?name=$DOMAIN" | jq -e '.result | length > 0' >/dev/null; then CF_TOKEN="$T"; break; fi
           done
-          [ -n "$CF_TOKEN" ] || { echo "::error::No org Cloudflare token has access to the account"; exit 1; }
+          if [ -z "$CF_TOKEN" ]; then
+            for T in "$CF_TOKEN_SAAS" "$CF_TOKEN_PREVIEW"; do
+              [ -n "$T" ] || continue
+              if curl -sS -H "Authorization: Bearer $T" "$API/accounts/$CF_ACCOUNT_ID" | jq -e '.success' >/dev/null; then CF_TOKEN="$T"; break; fi
+            done
+          fi
+          [ -n "$CF_TOKEN" ] || { echo "::error::No org Cloudflare token can manage $DOMAIN or create zones"; exit 1; }
+
+          echo "Existing DNS records:"
+          Z0=$(cf "$API/zones?name=$DOMAIN" | jq -r '.result[0].id // empty')
+          [ -z "$Z0" ] || cf "$API/zones/$Z0/dns_records?per_page=100" | jq -r '.result[] | "  \(.type) \(.name) -> \(.content) proxied=\(.proxied)"'
+          [ -z "$Z0" ] || cf "$API/zones/$Z0" | jq -r '"Zone status: \(.result.status)"'
 
           ZONE=$(cf "$API/zones?name=$DOMAIN" | jq -r '.result[0].id // empty')
           if [ -z "$ZONE" ]; then
@@ -61,6 +61,8 @@ jobs:
           for NAME in "$DOMAIN" "www.$DOMAIN"; do
             BODY="{\"type\":\"A\",\"name\":\"$NAME\",\"content\":\"$ORIGIN_IP\",\"proxied\":true,\"ttl\":1}"
             REC=$(cf "$API/zones/$ZONE/dns_records?type=A&name=$NAME" | jq -r '.result[0].id // empty')
+            OTHER=$(cf "$API/zones/$ZONE/dns_records?name=$NAME" | jq -r '[.result[] | select(.type=="CNAME" or .type=="AAAA")] | length')
+            [ "$OTHER" = "0" ] || { echo "::error::$NAME has CNAME/AAAA records; not overwriting"; exit 1; }
             if [ -n "$REC" ]; then
               cf -X PUT "$API/zones/$ZONE/dns_records/$REC" --data "$BODY" | jq -e '.success' >/dev/null
             else
