@@ -516,9 +516,17 @@ cmd_prune_deps() {
 
 # ── Cloudflare ───────────────────────────────────────────────────────────────
 # The token goes to curl on stdin (-K -), never on a command line.
+# On an HTTP error Cloudflare's JSON goes to stderr: callers send stdout to
+# /dev/null or jq, and a bare "curl: (22) ... 400" says nothing about why.
 cf() {
-  printf 'header = "Authorization: Bearer %s"\n' "$CF_TOKEN" |
-    curl -K - -fsS -H "Content-Type: application/json" "$@"
+  local out rc=0
+  out=$(printf 'header = "Authorization: Bearer %s"\n' "$CF_TOKEN" |
+    curl -K - -sS --fail-with-body -H "Content-Type: application/json" "$@") || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    [ -n "$out" ] && printf 'Cloudflare: %s\n' "$out" >&2
+    return "$rc"
+  fi
+  printf '%s\n' "$out"
 }
 
 cf_load() {

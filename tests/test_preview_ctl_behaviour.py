@@ -72,6 +72,10 @@ a="curl $*"; echo "${a//$'\n'/ }" >> "$STUB_STATE/calls.log"
 # Cloudflare API fake (PREVIEW_CF_API=https://cf.test): -K - carries the token.
 case " $* " in *" -K - "*) cat >> "$STUB_STATE/curl_config" ;; esac
 url=""; for a in "$@"; do case "$a" in https://cf.test/*) url=$a ;; esac; done
+# cf_dns_error: the DNS create fails the way Cloudflare does (JSON body, exit 22).
+case " $* " in *" -X POST "*"/dns_records "*)
+  [ -e "$STUB_STATE/cf_dns_error" ] && { cat "$STUB_STATE/cf_dns_error"; exit 22; } ;;
+esac
 case " $* " in *" -X "*) exit 0 ;; esac
 case "$url" in
   *"/zones?name="*)       echo '{"result":[{"id":"Z1"}]}' ;;
@@ -1063,6 +1067,12 @@ class GivenCloudflareOnTheHost(PreviewCtlCase):
         writes = [c for c in self.cf_calls() if " -X " in c]
         self.assertEqual(len(writes), 1)
         self.assertIn("-X PUT https://cf.test/zones/Z1/dns_records/D1", writes[0])
+
+    def test_when_cloudflare_rejects_a_write_then_its_error_json_reaches_stderr(self):
+        body = '{"success":false,"errors":[{"code":81053,"message":"record already exists"}]}'
+        self.mark("cf_dns_error", body)
+        self.fails("cf-ensure", "--slug", SLUG, "--ip", "1.2.3.4", "--fqdn", MAIN_HOST,
+                   message=f"Cloudflare: {body}", code=22)
 
     def test_when_a_host_is_not_a_preview_host_then_nothing_is_touched(self):
         for bad in ("dev-api.skyoffice360.com", "pr-x.neonbee.app", "skyoffice360.com"):
