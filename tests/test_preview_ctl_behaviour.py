@@ -664,8 +664,8 @@ class GivenAStaticSite(PreviewCtlCase):
         # Both hosts rewrite the app's dev hostname, so the shell links to it.
         self.assertEqual(conf.count(f"sub_filter 'https://dev-sso.skyoffice360.com' 'https://{host}';"), 2)
         self.assertEqual(conf.count("include /etc/nginx/snippets/so360-preview-overlay.conf;"), 2)
-
         self.assertIn(f"PREVIEW_HOST_URL=https://{host}", r.stdout)
+
     def test_when_the_preview_has_a_backend_then_the_site_host_routes_to_it_too(self):
         self.deploy_be()
         self.deploy_site()
