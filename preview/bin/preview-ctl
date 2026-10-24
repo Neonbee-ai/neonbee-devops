@@ -234,8 +234,8 @@ pv_online() {
   pm2 jlist 2>/dev/null | jq -r '.[] | select(.name | startswith("pv-")) | select(.pm2_env.status == "online") | .name' 2>/dev/null || true
 }
 
-# Return 1 when the host is short on memory; put the least recently pushed
-# other preview to sleep while the awake cap is reached.
+# Return 1 when the host is short on memory; put the least recently pushed or
+# woken other preview to sleep while the awake cap is reached.
 make_room() {
   local slug=$1 pname=$2 avail victim
   if [ "$MAX_AWAKE" -gt 0 ]; then
@@ -243,7 +243,7 @@ make_room() {
       victim=$(reg_read | jq -r --arg s "$slug" '.previews | to_entries
         | map(select(.key != $s and (.value.asleep | not)
               and any(.value.components[]; .kind == "be" or .kind == "next")))
-        | sort_by(.value.last_push) | .[0].key // empty')
+        | sort_by([.value.last_push, (.value.last_wake // 0)] | max) | .[0].key // empty')
       [ -n "$victim" ] || { echo "::warning::$pname not started: $MAX_AWAKE preview backends already awake" >&2; return 1; }
       echo "::notice::putting preview $victim to sleep to stay within $MAX_AWAKE awake backends" >&2
       stop_backends "$victim"
@@ -489,6 +489,9 @@ cmd_sleep() {
 cmd_wake() {
   [ "${1:-}" = --slug ] || die "usage: wake --slug S"
   valid_slug "$2"
+  # A manual wake counts as recent use, so the awake cap evicts it last.
+  reg_apply --arg s "$2" --argjson ts "$(now)" \
+    'if .previews[$s] then .previews[$s].last_wake = $ts else . end'
   wake_backends "$2"
 }
 

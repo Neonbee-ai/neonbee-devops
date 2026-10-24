@@ -596,6 +596,11 @@ class GivenARunningPreview(PreviewCtlCase):
         self.assertTrue(any(c.startswith("pm2 start") for c in self.calls()))
         self.assertFalse(self.registry()["previews"][SLUG]["asleep"])
 
+    def test_when_woken_then_the_wake_time_is_recorded(self):
+        self.ok("sleep", "--slug", SLUG)
+        self.ok("wake", "--slug", SLUG)
+        self.assertIsInstance(self.registry()["previews"][SLUG]["last_wake"], int)
+
     def test_when_woken_while_already_online_then_nothing_restarts(self):
         self.ok("wake", "--slug", SLUG)
         self.assertFalse(any(c.startswith("pm2 start") for c in self.calls()))
@@ -1122,6 +1127,18 @@ class GivenAnAwakeCap(PreviewCtlCase):
         self.assertIn("putting preview old-preview to sleep", r.stderr)
         self.assertTrue(self.registry()["previews"]["old-preview"]["asleep"])
         self.assertFalse(self.registry()["previews"]["new-preview"]["asleep"])
+
+    def test_when_an_older_push_was_woken_recently_then_the_next_oldest_is_put_to_sleep(self):
+        self.env["PREVIEW_MAX_AWAKE"] = "2"
+        self.deploy_be(slug="mid-preview")
+        reg = self.registry()
+        reg["previews"]["old-preview"]["last_wake"] = reg["previews"]["mid-preview"]["last_push"] + 1000
+        self.write_registry(reg)
+        self.clear_calls()
+        self.deploy_be(slug="new-preview")
+        self.assertIn("pm2 stop pv-mid-preview-crm PORT=", self.calls())
+        self.assertFalse(self.registry()["previews"]["old-preview"]["asleep"])
+        self.assertTrue(self.registry()["previews"]["mid-preview"]["asleep"])
 
     def test_when_the_same_preview_is_redeployed_then_it_does_not_evict_itself(self):
         self.deploy_be(slug="old-preview")
