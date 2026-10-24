@@ -88,7 +88,8 @@ jobs:
     # The runner VM only: the Mac Minis are reserved for autonomous QA and the
     # Dev VM never builds.
     runs-on: [self-hosted, runner-vm]
-    timeout-minutes: 20
+    # shell-fe's unit suite (~610 files) needs ~26 min; 20 cancelled it mid-run.
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4.3.1
         with:
