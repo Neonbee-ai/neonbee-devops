@@ -596,6 +596,11 @@ class GivenARunningPreview(PreviewCtlCase):
         self.assertTrue(any(c.startswith("pm2 start") for c in self.calls()))
         self.assertFalse(self.registry()["previews"][SLUG]["asleep"])
 
+    def test_when_woken_then_the_wake_time_is_recorded(self):
+        self.ok("sleep", "--slug", SLUG)
+        self.ok("wake", "--slug", SLUG)
+        self.assertIsInstance(self.registry()["previews"][SLUG]["last_wake"], int)
+
     def test_when_woken_while_already_online_then_nothing_restarts(self):
         self.ok("wake", "--slug", SLUG)
         self.assertFalse(any(c.startswith("pm2 start") for c in self.calls()))
@@ -665,6 +670,14 @@ class GivenAStaticSite(PreviewCtlCase):
         self.assertEqual(conf.count(f"sub_filter 'https://dev-sso.skyoffice360.com' 'https://{host}';"), 2)
         self.assertEqual(conf.count("include /etc/nginx/snippets/so360-preview-overlay.conf;"), 2)
         self.assertIn(f"PREVIEW_HOST_URL=https://{host}", r.stdout)
+
+    def test_when_the_preview_has_a_backend_then_the_site_host_routes_to_it_too(self):
+        self.deploy_be()
+        self.deploy_site()
+        conf = self.nginx()
+        site_block = conf[conf.index(f"server_name {self.site_host('sso')};"):]
+        self.assertEqual(conf.count("location ^~ /api/crm/ {"), 2)
+        self.assertIn("location ^~ /api/crm/ {", site_block)
 
     def test_when_the_host_is_missing_or_malformed_then_deploy_is_refused(self):
         for host in ("", "sso.skyoffice360.com", "pr-x.example.com", "pr-x-.skyoffice360.com",
@@ -1114,6 +1127,18 @@ class GivenAnAwakeCap(PreviewCtlCase):
         self.assertIn("putting preview old-preview to sleep", r.stderr)
         self.assertTrue(self.registry()["previews"]["old-preview"]["asleep"])
         self.assertFalse(self.registry()["previews"]["new-preview"]["asleep"])
+
+    def test_when_an_older_push_was_woken_recently_then_the_next_oldest_is_put_to_sleep(self):
+        self.env["PREVIEW_MAX_AWAKE"] = "2"
+        self.deploy_be(slug="mid-preview")
+        reg = self.registry()
+        reg["previews"]["old-preview"]["last_wake"] = reg["previews"]["mid-preview"]["last_push"] + 1000
+        self.write_registry(reg)
+        self.clear_calls()
+        self.deploy_be(slug="new-preview")
+        self.assertIn("pm2 stop pv-mid-preview-crm PORT=", self.calls())
+        self.assertFalse(self.registry()["previews"]["old-preview"]["asleep"])
+        self.assertTrue(self.registry()["previews"]["mid-preview"]["asleep"])
 
     def test_when_the_same_preview_is_redeployed_then_it_does_not_evict_itself(self):
         self.deploy_be(slug="old-preview")

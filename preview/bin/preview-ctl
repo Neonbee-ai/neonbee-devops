@@ -234,8 +234,8 @@ pv_online() {
   pm2 jlist 2>/dev/null | jq -r '.[] | select(.name | startswith("pv-")) | select(.pm2_env.status == "online") | .name' 2>/dev/null || true
 }
 
-# Return 1 when the host is short on memory; put the least recently pushed
-# other preview to sleep while the awake cap is reached.
+# Return 1 when the host is short on memory; put the least recently pushed or
+# woken other preview to sleep while the awake cap is reached.
 make_room() {
   local slug=$1 pname=$2 avail victim
   if [ "$MAX_AWAKE" -gt 0 ]; then
@@ -243,7 +243,7 @@ make_room() {
       victim=$(reg_read | jq -r --arg s "$slug" '.previews | to_entries
         | map(select(.key != $s and (.value.asleep | not)
               and any(.value.components[]; .kind == "be" or .kind == "next")))
-        | sort_by(.value.last_push) | .[0].key // empty')
+        | sort_by([.value.last_push, (.value.last_wake // 0)] | max) | .[0].key // empty')
       [ -n "$victim" ] || { echo "::warning::$pname not started: $MAX_AWAKE preview backends already awake" >&2; return 1; }
       echo "::notice::putting preview $victim to sleep to stay within $MAX_AWAKE awake backends" >&2
       stop_backends "$victim"
@@ -489,6 +489,9 @@ cmd_sleep() {
 cmd_wake() {
   [ "${1:-}" = --slug ] || die "usage: wake --slug S"
   valid_slug "$2"
+  # A manual wake counts as recent use, so the awake cap evicts it last.
+  reg_apply --arg s "$2" --argjson ts "$(now)" \
+    'if .previews[$s] then .previews[$s].last_wake = $ts else . end'
   wake_backends "$2"
 }
 
@@ -703,6 +706,23 @@ EOF
   jq -r '.[] | select(.dev_host and .host) | "    sub_filter '"'"'https://\(.dev_host)'"'"' '"'"'https://\(.host)'"'"';"' <<<"$comps"
 }
 
+# Preview backends, on their pm2 port. Every static host of a preview gets
+# them, so a site's same-origin /api/<svc>/ calls reach the branch build too.
+be_locations() {
+  local name port
+  while IFS=$'\t' read -r name port; do
+    [ -n "$name" ] || continue
+    cat <<EOF
+    location ^~ /api/$name/ {
+        rewrite ^/api/$name/(.*)\$ /\$1 break;
+        proxy_pass http://127.0.0.1:$port;
+        include /etc/nginx/snippets/so360-preview-api.conf;
+        error_page 502 503 504 = @asleep;
+    }
+EOF
+  done < <(jq -r '.[] | select(.kind == "be") | [.name, .port] | @tsv' <<<"$1")
+}
+
 render_server() {
   local slug=$1 host="pr-$1.$DOMAIN" base="$ROOT/$1" comps name port spa xhost
   comps=$(reg_read | jq -c --arg s "$slug" '.previews[$s].components')
@@ -738,18 +758,7 @@ EOF
 EOF
     fi
   done < <(jq -r '.[] | select(.kind == "fe") | [.name, (.spa // false)] | @tsv' <<<"$comps")
-  # Preview backends, on their pm2 port.
-  while IFS=$'\t' read -r name port; do
-    [ -n "$name" ] || continue
-    cat <<EOF
-    location ^~ /api/$name/ {
-        rewrite ^/api/$name/(.*)\$ /\$1 break;
-        proxy_pass http://127.0.0.1:$port;
-        include /etc/nginx/snippets/so360-preview-api.conf;
-        error_page 502 503 504 = @asleep;
-    }
-EOF
-  done < <(jq -r '.[] | select(.kind == "be") | [.name, .port] | @tsv' <<<"$comps")
+  be_locations "$comps"
   # Host shell: the preview's own build, else develop's.
   if [ -n "$(jq -r '.[] | select(.kind == "shell") | .name' <<<"$comps")" ]; then
     cat <<EOF
@@ -773,8 +782,9 @@ EOF
   while IFS=$'\t' read -r name xhost; do
     [ -n "$name" ] || continue
     server_head "$slug" "$xhost" "$comps" "$xhost/api" "$xhost/cdn"
+    echo "    include /etc/nginx/snippets/so360-preview-overlay.conf;"
+    be_locations "$comps"
     cat <<EOF
-    include /etc/nginx/snippets/so360-preview-overlay.conf;
     location / {
         root $base/site/$name;
         try_files \$uri \$uri/ /index.html =404;
