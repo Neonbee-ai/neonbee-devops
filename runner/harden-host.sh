@@ -30,7 +30,8 @@ cpus=$(nproc)
 echo "host: ${mem_mb} MB RAM, ${cpus} CPUs"
 
 # Reserve for the OS, sshd, nginx and preview pm2 apps (300 MB cap each).
-pv_count=$(pm2 jlist 2>/dev/null | grep -o '"name":"pv-[^"]*"' | wc -l || echo 0)
+# grep exits 1 on zero matches; under pipefail that must not fail the pipeline.
+pv_count=$( { pm2 jlist 2>/dev/null || true; } | { grep -o '"name":"pv-[^"]*"' || true; } | wc -l | tr -d ' ')
 reserve_mb=$(( 2048 + pv_count * 300 ))
 [ "$reserve_mb" -gt $(( mem_mb / 2 )) ] && reserve_mb=$(( mem_mb / 2 ))
 runners_max_mb=$(( mem_mb - reserve_mb ))
@@ -96,7 +97,12 @@ if systemctl list-unit-files 'pm2-*.service' --no-legend | grep -q .; then
 else
   run "pm2 startup systemd -u root --hp /root >/dev/null"
 fi
-run "pm2 save --force >/dev/null"
+# Never save an empty process list over an existing dump (it would drop every app on reboot).
+if [ "$(pm2 jlist 2>/dev/null | grep -c '"name"' || true)" -gt 0 ]; then
+  run "pm2 save --force >/dev/null"
+else
+  echo "pm2 has no running apps; leaving ~/.pm2/dump.pm2 untouched"
+fi
 
 # Move runner services into the slice. A busy slot is left alone (its job would die)
 # and picks the slice up on its next restart.
