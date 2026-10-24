@@ -509,15 +509,34 @@ jobs:
 
       - name: Setup SSH
         env:
-          KEY: ${{ secrets.PREVIEW_SSH_KEY || secrets.CONTABO_SSH_KEY }}
+          # Load BOTH keys. `PREVIEW_SSH_KEY || CONTABO_SSH_KEY` picked only the
+          # first non-empty one, so a repo-level PREVIEW_SSH_KEY minted for the
+          # old runner-hosted previews (so360-command) shadowed CONTABO_SSH_KEY
+          # once PREVIEW_HOST moved to the Dev VM, which does not authorize that
+          # key: every ssh exited 255 "Permission denied (publickey)". The
+          # agent offers each identity in turn, so whichever key the host
+          # authorizes wins.
+          KEY: ${{ secrets.PREVIEW_SSH_KEY }}
+          FALLBACK_KEY: ${{ secrets.CONTABO_SSH_KEY }}
           HOST: ${{ secrets.PREVIEW_HOST }}
         run: |
           mkdir -p ~/.ssh && chmod 700 ~/.ssh
           eval "$(ssh-agent -s)"
-          echo "$KEY" | ssh-add -
+          for k in "$KEY" "$FALLBACK_KEY"; do
+            if [ -n "$k" ]; then
+              printf '%s\n' "$k" | ssh-add - || echo "::warning::an SSH key secret could not be loaded into ssh-agent"
+            fi
+          done
+          ssh-add -l >/dev/null || { echo "::error::no usable SSH key (PREVIEW_SSH_KEY / CONTABO_SSH_KEY) reaches this repo"; exit 1; }
           echo "SSH_AUTH_SOCK=$SSH_AUTH_SOCK" >> "$GITHUB_ENV"
           echo "SSH_AGENT_PID=$SSH_AGENT_PID" >> "$GITHUB_ENV"
           ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts 2>/dev/null
+          # Fail here, with the cause named, instead of as a bare exit 255 in
+          # whichever later step first touches the host.
+          ssh -o BatchMode=yes -o ConnectTimeout=20 "root@$HOST" true || {
+            echo "::error title=Preview host SSH::root@PREVIEW_HOST rejected every loaded key or is unreachable (exit $?) - authorize the CI key on the preview host or fix PREVIEW_HOST"
+            exit 1
+          }
 
       - name: Sync preview host config from secrets
         env:

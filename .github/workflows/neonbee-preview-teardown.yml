@@ -67,7 +67,9 @@ jobs:
         id: rm
         if: steps.s.outputs.run == 'true'
         env:
-          KEY: ${{ secrets.PREVIEW_SSH_KEY || secrets.CONTABO_SSH_KEY }}
+          # Both keys, as in neonbee-deploy-preview.yml Setup SSH.
+          KEY: ${{ secrets.PREVIEW_SSH_KEY }}
+          FALLBACK_KEY: ${{ secrets.CONTABO_SSH_KEY }}
           HOST: ${{ secrets.PREVIEW_HOST }}
           SLUG: ${{ steps.s.outputs.slug }}
           REPO: ${{ github.event.repository.name }}
@@ -79,7 +81,11 @@ jobs:
           [ -n "$HOST" ] || { echo "::notice::PREVIEW_HOST not set — nothing to tear down"; echo "removed=0" >> "$GITHUB_OUTPUT"; exit 0; }
           mkdir -p ~/.ssh && chmod 700 ~/.ssh
           eval "$(ssh-agent -s)"
-          echo "$KEY" | ssh-add -
+          for k in "$KEY" "$FALLBACK_KEY"; do
+            if [ -n "$k" ]; then
+              printf '%s\n' "$k" | ssh-add - || echo "::warning::an SSH key secret could not be loaded into ssh-agent"
+            fi
+          done
           ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts 2>/dev/null
           # ── host config from secrets (keep identical in all preview workflows) ──
           # PROD_SUPABASE_HOST is written empty: backend previews may use the

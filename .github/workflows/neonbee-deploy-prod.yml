@@ -14,6 +14,11 @@ name: Deploy to Production (reusable)
 on:
   workflow_call:
     inputs:
+      test_max_workers:
+        description: 'Worker cap for jest/vitest in the unit, contract and integration steps (jest --maxWorkers; vitest --maxWorkers, plus --minWorkers=1 on vitest < 4). Number or percent; 0 disables the cap.'
+        required: false
+        type: string
+        default: '2'
       # ── Required ───────────────────────────────────────────────────────────
       service_name:
         description: 'Unique deploy name e.g. crm-prod, crm-fe, command-prod'
@@ -196,6 +201,37 @@ on:
 # ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION was removed as of runner ≥ 2.335.0
 # (enforced June 16 2026); this replaces it.
 env:
+  # ── Test worker cap ──
+  # The shared runner VM has 12 vCPU and runs 8 job slots. jest and vitest
+  # default to (cores - 1) workers each, so concurrent jobs oversubscribed it
+  # roughly 9x. TEST_WORKER_FLAGS_JS prints the flags for one npm script:
+  #   jest          --maxWorkers=N
+  #   vitest 1-3    --maxWorkers=N --minWorkers=1   (max alone conflicts with
+  #                 the default minThreads: "options.minThreads and
+  #                 options.maxThreads must not conflict")
+  #   vitest >= 4   --maxWorkers=N                  (--minWorkers was removed
+  #                 and is an "Unknown option" hard error)
+  # Runner = the script text (vitest wins), else package.json deps (wrapper
+  # scripts such as `bash scripts/test.sh`). Nothing is printed when the
+  # script already pins workers or runs in band, or when the cap is 0.
+  TEST_MAX_WORKERS: ${{ inputs.test_max_workers || '2' }}
+  TEST_WORKER_FLAGS_JS: |
+    const fs = require('fs');
+    const key = process.argv[1] || 'test';
+    const n = String(process.env.TEST_MAX_WORKERS || '2').trim();
+    if (!/^[1-9][0-9]*%?$/.test(n)) process.exit(0);
+    const p = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+    const s = (p.scripts || {})[key] || '';
+    if (/--runInBand|(^|\s)-i(\s|$)|--maxWorkers|--minWorkers|--poolOptions|--no-file-parallelism/.test(s)) process.exit(0);
+    const d = Object.assign({}, p.dependencies, p.devDependencies);
+    let r = /vitest/.test(s) ? 'vitest' : /jest/.test(s) ? 'jest' : '';
+    if (!r) r = d.vitest ? 'vitest' : d.jest ? 'jest' : '';
+    if (r === 'jest') console.log('--maxWorkers=' + n);
+    if (r === 'vitest') {
+      let major = parseInt(String(d.vitest || '3').replace(/^[^0-9]*/, ''), 10) || 3;
+      try { major = parseInt(JSON.parse(fs.readFileSync('node_modules/vitest/package.json', 'utf8')).version, 10); } catch (e) {}
+      console.log(major >= 4 ? '--maxWorkers=' + n : '--maxWorkers=' + n + ' --minWorkers=1');
+    }
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
   # Contabo slots intermittently drop npm registry connections (ECONNRESET,
   # three failures across runner-07/08 on 2026-08-20/21). Retry fetches inside
@@ -465,6 +501,8 @@ jobs:
           else
             EXTRA_FLAGS="--passWithNoTests --forceExit --ci"
           fi
+          WORKER_FLAGS=$(node -e "$TEST_WORKER_FLAGS_JS" test 2>/dev/null || true); echo "Test worker cap (test): ${WORKER_FLAGS:-none}"
+          EXTRA_FLAGS="$EXTRA_FLAGS $WORKER_FLAGS"
 
           # ── Spec floor ────────────────────────────────────────────────────
           # `--passWithNoTests` above means an empty or mis-globbed suite exits
@@ -671,7 +709,8 @@ jobs:
             exit 0
           fi
           echo "Running $COUNT contract spec file(s)"
-          npm run test:contract
+          WORKER_FLAGS=$(node -e "$TEST_WORKER_FLAGS_JS" test:contract 2>/dev/null || true); echo "Test worker cap (test:contract): ${WORKER_FLAGS:-none}"
+          npm run test:contract -- $WORKER_FLAGS
 
   integration-tests:
     name: Integration Tests
@@ -771,7 +810,8 @@ jobs:
             exit 0
           fi
           echo "Running $COUNT integration spec file(s)"
-          npm run test:integration
+          WORKER_FLAGS=$(node -e "$TEST_WORKER_FLAGS_JS" test:integration 2>/dev/null || true); echo "Test worker cap (test:integration): ${WORKER_FLAGS:-none}"
+          npm run test:integration -- $WORKER_FLAGS
 
 # ═════════════════════════════════════════════════════════════════════════════
 # BUILD + DEPLOY — common setup, then branches by deploy_type
