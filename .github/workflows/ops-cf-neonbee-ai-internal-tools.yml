@@ -1,0 +1,44 @@
+name: ops-cf-neonbee-ai-internal-tools
+# One-off (2026-10-26): point neonbee.ai + www at Internal Tools VM (site already deployed + verified there).
+on:
+  push:
+    branches: [ops/cf-neonbee-ai-internal-tools]
+jobs:
+  dns:
+    runs-on: [self-hosted, runner-vm]
+    timeout-minutes: 10
+    env:
+      VM: 167.114.98.177
+      ZONE_NAME: neonbee.ai
+    steps:
+      - name: Repoint DNS
+        env:
+          T1: ${{ secrets.CF_SAAS_API_TOKEN }}
+          T2: ${{ secrets.CF_PREVIEW_API_TOKEN }}
+        run: |
+          API=https://api.cloudflare.com/client/v4
+          for T in "$T1" "$T2"; do
+            [ -n "$T" ] || continue
+            H=(-H "Authorization: Bearer $T" -H "Content-Type: application/json")
+            Z=$(curl -s "${H[@]}" "$API/zones?name=$ZONE_NAME" | jq -r '.result[0].id // empty')
+            [ -n "$Z" ] || { echo "token cannot see $ZONE_NAME, trying next"; continue; }
+            echo "== records before (rollback reference)"
+            curl -s "${H[@]}" "$API/zones/$Z/dns_records?per_page=200" | jq -c '.result[]|select(.type=="A" or .type=="CNAME" or .type=="AAAA")|{id,type,name,content,proxied}' | tee /tmp/recs.json
+            FAIL=0
+            for N in neonbee.ai www.neonbee.ai; do
+              ids=$(jq -r --arg n "$N" 'select(.name==$n and (.type=="A" or .type=="AAAA" or .type=="CNAME"))|.id' /tmp/recs.json)
+              [ -n "$ids" ] || { echo "no record for $N, creating"; curl -s -X POST "${H[@]}" "$API/zones/$Z/dns_records" -d "{\"type\":\"A\",\"name\":\"$N\",\"content\":\"$VM\",\"proxied\":true}" | jq -c '{success,errors}'; continue; }
+              first=1
+              for id in $ids; do
+                if [ $first = 1 ]; then
+                  curl -s -X PUT "${H[@]}" "$API/zones/$Z/dns_records/$id" -d "{\"type\":\"A\",\"name\":\"$N\",\"content\":\"$VM\",\"proxied\":true}" | jq -c '{success,errors,rec:{name:.result.name,content:.result.content}}' | tee /tmp/r; grep -q '"success":true' /tmp/r || FAIL=1
+                  first=0
+                else
+                  echo "extra record $id for $N left as-is"
+                fi
+              done
+            done
+            [ $FAIL = 0 ] || { echo "some DNS updates failed"; exit 1; }
+            exit 0
+          done
+          echo "no token could write $ZONE_NAME"; exit 1
