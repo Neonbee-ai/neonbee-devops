@@ -56,8 +56,11 @@ PM2_MEM_NEXT=${PREVIEW_PM2_MEM_NEXT:-600M}
 # Caps for a host shared with other workloads (the Dev VM): never start a backend
 # below MIN_AVAIL_MB of MemAvailable, and keep at most MAX_AWAKE preview pm2 apps
 # online, putting the least recently pushed preview to sleep to make room. 0 = no cap.
+# PREVIEW_PIN: space-separated slugs that are never put to sleep to make room
+# (a long-lived integration preview that AutoQA tests around the clock).
 MIN_AVAIL_MB=${PREVIEW_MIN_AVAIL_MB:-0}
 MAX_AWAKE=${PREVIEW_MAX_AWAKE:-0}
+PIN=${PREVIEW_PIN:-}
 MEMINFO=${PREVIEW_MEMINFO:-/proc/meminfo}
 # On the Dev VM develop's services already listen on their loopback ports, so
 # the loopback proxies for Next previews must not be rendered (they would clash).
@@ -240,8 +243,9 @@ make_room() {
   local slug=$1 pname=$2 avail victim
   if [ "$MAX_AWAKE" -gt 0 ]; then
     while [ "$(pv_online | grep -vxF -- "$pname" | grep -c . || true)" -ge "$MAX_AWAKE" ]; do
-      victim=$(reg_read | jq -r --arg s "$slug" '.previews | to_entries
+      victim=$(reg_read | jq -r --arg s "$slug" --arg pin "$PIN" '.previews | to_entries
         | map(select(.key != $s and (.value.asleep | not)
+              and (.key as $k | $pin | split(" ") | index($k) | not)
               and any(.value.components[]; .kind == "be" or .kind == "next")))
         | sort_by([.value.last_push, (.value.last_wake // 0)] | max) | .[0].key // empty')
       [ -n "$victim" ] || { echo "::warning::$pname not started: $MAX_AWAKE preview backends already awake" >&2; return 1; }
