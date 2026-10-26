@@ -1,0 +1,51 @@
+# One-off: storefront DO VM 167.71.226.224 is down. Repoint neonbee.store A records to the HA VM,
+# then (best effort) create a Cloudflare LB: primary = DO, fallback = HA, health /v1/storefront/health.
+name: ops-cf-neonbee-store-failover
+on:
+  push:
+    branches: [ops/cf-neonbee-store-failover]
+permissions: {}
+jobs:
+  dns:
+    runs-on: [self-hosted, runner-vm]
+    steps:
+      - name: Repoint A records + LB
+        env:
+          T1: ${{ secrets.CF_SAAS_API_TOKEN }}
+          T2: ${{ secrets.CF_PREVIEW_API_TOKEN }}
+          ZONE_NAME: neonbee.store
+          OLD_IP: 167.71.226.224
+          HA_IP: 84.247.131.148
+        run: |
+          set -euo pipefail
+          API=https://api.cloudflare.com/client/v4
+          for T in "$T1" "$T2"; do
+            [ -n "$T" ] || continue
+            H=(-H "Authorization: Bearer $T" -H "Content-Type: application/json")
+            ZJ=$(curl -s "${H[@]}" "$API/zones?name=$ZONE_NAME")
+            Z=$(echo "$ZJ" | jq -r '.result[0].id // empty'); ACC=$(echo "$ZJ" | jq -r '.result[0].account.id // empty')
+            [ -n "$Z" ] || { echo "token cannot see $ZONE_NAME, trying next"; continue; }
+            echo "== records before (rollback: set content back to $OLD_IP)"
+            RECS=$(curl -s "${H[@]}" "$API/zones/$Z/dns_records?type=A&per_page=100")
+            echo "$RECS" | jq -c '.result[] | {id, name, content, proxied}'
+            FAIL=0
+            for ID in $(echo "$RECS" | jq -r --arg o "$OLD_IP" '.result[] | select(.content==$o) | .id'); do
+              R=$(curl -s -X PATCH "${H[@]}" "$API/zones/$Z/dns_records/$ID" -d "{\"content\":\"$HA_IP\"}")
+              echo "$R" | jq -c '{success, errors, rec: (.result | {name, content, proxied})}'
+              [ "$(echo "$R" | jq -r .success)" = true ] || FAIL=1
+            done
+            [ $FAIL = 0 ] || { echo "some DNS updates failed"; exit 1; }
+            echo "== LB setup (best effort; needs Load Balancing subscription)"
+            set +e
+            M=$(curl -s -X POST "${H[@]}" "$API/accounts/$ACC/load_balancers/monitors" -d '{"type":"https","method":"GET","path":"/v1/storefront/health","header":{"Host":["api.neonbee.store"]},"expected_codes":"200","interval":60,"retries":2,"timeout":5,"allow_insecure":true,"description":"neonbee-store health"}')
+            echo "$M" | jq -c '{success, errors}'; MID=$(echo "$M" | jq -r '.result.id // empty')
+            if [ -n "$MID" ]; then
+              mk() { curl -s -X POST "${H[@]}" "$API/accounts/$ACC/load_balancers/pools" -d "{\"name\":\"$1\",\"monitor\":\"$MID\",\"origins\":[{\"name\":\"$1\",\"address\":\"$2\",\"enabled\":true}]}" | jq -r '.result.id // empty'; }
+              P1=$(mk neonbee-store-do "$OLD_IP"); P2=$(mk neonbee-store-ha "$HA_IP"); echo "pools do=$P1 ha=$P2"
+              for N in neonbee.store www.neonbee.store api.neonbee.store; do
+                curl -s -X POST "${H[@]}" "$API/zones/$Z/load_balancers" -d "{\"name\":\"$N\",\"default_pools\":[\"$P1\"],\"fallback_pool\":\"$P2\",\"proxied\":true,\"steering_policy\":\"off\"}" | jq -c "{lb:\"$N\", success, errors}"
+              done
+            fi
+            exit 0
+          done
+          echo "no token could write $ZONE_NAME"; exit 1
