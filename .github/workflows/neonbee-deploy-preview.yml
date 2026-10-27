@@ -155,6 +155,9 @@ on:
       PEOPLE_INTERNAL_KEY:         { required: false }
       PEOPLE_INTERNAL_KEY_2:       { required: false }
       SUBSCRIPTION_INTERNAL_KEY:   { required: false }
+      CORE_INTERNAL_KEY:           { required: false }
+      CORE_PARTNER_INTERNAL_KEY:   { required: false }
+      PARTNER_RESOLVE_INTERNAL_KEY: { required: false }
       CONNECT_INTERNAL_KEY:        { required: false }
       CONNECT_INTERNAL_KEYS:       { required: false }
       BUNNY_STORAGE_HOSTNAME:      { required: false }
@@ -544,6 +547,9 @@ jobs:
               echo "PEOPLE_INTERNAL_KEY=${{ secrets.PEOPLE_INTERNAL_KEY }}"
               echo "PEOPLE_INTERNAL_KEY_2=${{ secrets.PEOPLE_INTERNAL_KEY_2 }}"
               echo "SUBSCRIPTION_INTERNAL_KEY=${{ secrets.SUBSCRIPTION_INTERNAL_KEY }}"
+              echo "CORE_INTERNAL_KEY=${{ secrets.CORE_INTERNAL_KEY }}"
+              echo "CORE_PARTNER_INTERNAL_KEY=${{ secrets.CORE_PARTNER_INTERNAL_KEY }}"
+              echo "PARTNER_RESOLVE_INTERNAL_KEY=${{ secrets.PARTNER_RESOLVE_INTERNAL_KEY }}"
               echo "CONNECT_INTERNAL_KEY=${{ secrets.CONNECT_INTERNAL_KEY }}"
               echo "CONNECT_INTERNAL_KEYS=${{ secrets.CONNECT_INTERNAL_KEYS }}"
               echo "BUNNY_STORAGE_HOSTNAME=${{ secrets.BUNNY_STORAGE_HOSTNAME }}"
