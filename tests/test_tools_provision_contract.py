@@ -46,13 +46,13 @@ class GivenTheProvisionWorkflow(unittest.TestCase):
     def setUp(self):
         self.body = read(WF)
 
-    def test_then_it_is_manual_and_runs_only_on_the_contabo_runner(self):
+    def test_then_it_is_manual_and_runs_only_on_the_runner_vm(self):
         self.assertRegex(self.body, r"on:\s*\n\s*workflow_dispatch:")
         self.assertNotIn("ubuntu-latest", self.body)
         runners = re.findall(r"runs-on:\s*(.+)", self.body)
         self.assertTrue(runners)
         for r in runners:
-            self.assertEqual(r.strip(), "[self-hosted, contabo, Linux]")
+            self.assertEqual(r.strip(), "[self-hosted, runner-vm]")
 
     def test_then_it_installs_the_vhost_on_prod_and_ha(self):
         self.assertIn("nginx/tools.neonbee.app.conf", self.body)
