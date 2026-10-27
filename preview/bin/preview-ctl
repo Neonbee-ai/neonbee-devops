@@ -189,18 +189,38 @@ harden_env() {
 # deploy can't know what else the preview holds. Re-point the URLs of siblings
 # this preview does hold at their loopback port, so a branch's own services
 # talk to each other (e.g. CRM → the preview's Core for assignee email).
+# Each .env keeps a .env.links sidecar ("name port" per linked sibling), so a
+# sibling that later moves to another port is followed there, and one that
+# leaves the preview falls back to dev-api instead of a dead loopback port.
 # Backends whose .env changed are restarted, except $3 (about to be started).
 link_siblings() {
-  local slug=$1 base="$ROOT/$1/be" skip=${2:-} name port env before rows
+  local slug=$1 base="$ROOT/$1/be" skip=${2:-} name port old env before rows links
   rows=$(reg_read | jq -r --arg s "$slug" \
     '.previews[$s].components // {} | .[] | select(.kind == "be" and .port != null) | [.name, .port] | @tsv')
-  [ -n "$rows" ] || return 0
   for env in "$base"/*/.env; do
     [ -f "$env" ] || continue
     before=$(md5sum "$env")
-    while IFS=$'\t' read -r name port; do
-      sed -i -E "s#https://dev-api\.${DOMAIN_RE}/${name}([^A-Za-z0-9_-]|\$)#http://127.0.0.1:${port}\1#g" "$env"
-    done <<<"$rows"
+    links="$env.links"
+    if [ -f "$links" ]; then
+      while read -r name old; do
+        [ -n "$name" ] && [ -n "$old" ] || continue
+        port=$(awk -F'\t' -v n="$name" '$1 == n {print $2; exit}' <<<"$rows")
+        [ "$port" = "$old" ] && continue
+        if [ -n "$port" ]; then
+          sed -i -E "s#http://127\.0\.0\.1:${old}([^0-9]|\$)#http://127.0.0.1:${port}\1#g" "$env"
+        else
+          sed -i -E "s#http://127\.0\.0\.1:${old}([^0-9]|\$)#https://dev-api.${DOMAIN}/${name}\1#g" "$env"
+        fi
+      done <"$links"
+    fi
+    : >"$links.tmp"
+    if [ -n "$rows" ]; then
+      while IFS=$'\t' read -r name port; do
+        sed -i -E "s#https://dev-api\.${DOMAIN_RE}/${name}([^A-Za-z0-9_-]|\$)#http://127.0.0.1:${port}\1#g" "$env"
+        if grep -Eq "http://127\.0\.0\.1:${port}([^0-9]|\$)" "$env"; then echo "$name $port" >>"$links.tmp"; fi
+      done <<<"$rows"
+    fi
+    mv "$links.tmp" "$links"
     name=$(basename "$(dirname "$env")")
     if [ "$before" != "$(md5sum "$env")" ] && [ "$name" != "$skip" ]; then
       pm2 restart "$(pm2_name "$slug" "$name")" --update-env >/dev/null 2>&1 || true

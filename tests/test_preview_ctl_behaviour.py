@@ -575,6 +575,49 @@ class GivenSiblingBackendsInOnePreview(PreviewCtlCase):
         self.deploy_be("so360-core", "core")
         self.assertFalse(any(c.startswith("pm2 restart") for c in self.calls()))
 
+    def link_crm_to_core(self):
+        self.deploy_be("so360-core", "core")                       # core → :7100
+        self.upload_be("so360-crm-be", env_text=self.DEV_CORE)
+        self.ok(*self.deploy("so360-crm-be", "be", "crm", extra=("--lockhash", HASH)))
+        self.assertIn("CORE_BE_URL=http://127.0.0.1:7100", self.read_env("crm"))
+
+    def set_core(self, port):
+        reg = self.registry()
+        comps = reg["previews"][SLUG]["components"]
+        key = next(k for k, c in comps.items() if c.get("name") == "core")
+        if port is None:
+            del comps[key]
+        else:
+            comps[key]["port"] = port
+        self.write_registry(reg)
+
+    def test_when_a_linked_sibling_moves_port_then_existing_backends_follow_it(self):
+        self.link_crm_to_core()
+        self.set_core(7104)
+        self.clear_calls()
+        self.deploy_be("so360-people-be", "people")                # any be deploy relinks
+        lines = self.read_env("crm")
+        self.assertIn("CORE_BE_URL=http://127.0.0.1:7104", lines)
+        self.assertIn("CORE_API=http://127.0.0.1:7104/v1", lines)
+        self.assertNotIn("CORE_BE_URL=http://127.0.0.1:7100", lines)
+        self.assertTrue(any(c.startswith("pm2 restart pv-feat-crm-owner-crm") for c in self.calls()))
+
+    def test_when_a_linked_sibling_leaves_the_preview_then_backends_fall_back_to_dev_api(self):
+        self.link_crm_to_core()
+        self.set_core(None)
+        self.deploy_be("so360-people-be", "people")
+        lines = self.read_env("crm")
+        self.assertIn("CORE_BE_URL=https://dev-api.skyoffice360.com/core", lines)
+        self.assertIn("CORE_API=https://dev-api.skyoffice360.com/core/v1", lines)
+
+    def test_when_an_unrelated_loopback_port_is_in_an_env_then_it_is_left_alone(self):
+        self.deploy_be("so360-core", "core")
+        self.upload_be("so360-crm-be", env_text=self.DEV_CORE + "REDIS_URL=redis://127.0.0.1:6379\n")
+        self.ok(*self.deploy("so360-crm-be", "be", "crm", extra=("--lockhash", HASH)))
+        self.set_core(7104)
+        self.deploy_be("so360-people-be", "people")
+        self.assertIn("REDIS_URL=redis://127.0.0.1:6379", self.read_env("crm"))
+
 
 # ── Sleep / wake ─────────────────────────────────────────────────────────────
 class GivenARunningPreview(PreviewCtlCase):
