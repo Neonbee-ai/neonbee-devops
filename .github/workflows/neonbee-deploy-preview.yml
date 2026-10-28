@@ -125,6 +125,7 @@ on:
       JWT_SECRET_DEV:          { required: false }
       JWT_SECRET:              { required: false }
       ENCRYPTION_KEY:              { required: false }
+      VENDOR_BANK_ENC_KEY:         { required: false }
       PAYROLL_ENCRYPTION_KEY:      { required: false }
       STOREFRONT_JWT_SECRET:       { required: false }
       INTERNAL_SERVICE_KEY:        { required: false }
@@ -517,6 +518,7 @@ jobs:
               # Same service keys as the dev deploy so backends boot and can call
               # each other. Unset secrets become empty lines, stripped below.
               echo "ENCRYPTION_KEY=${{ secrets.ENCRYPTION_KEY }}"
+              echo "VENDOR_BANK_ENC_KEY=${{ secrets.VENDOR_BANK_ENC_KEY }}"
               echo "PAYROLL_ENCRYPTION_KEY=${{ secrets.PAYROLL_ENCRYPTION_KEY }}"
               echo "STOREFRONT_JWT_SECRET=${{ secrets.STOREFRONT_JWT_SECRET }}"
               echo "INTERNAL_SERVICE_KEY=${{ secrets.INTERNAL_SERVICE_KEY }}"
