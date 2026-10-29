@@ -94,12 +94,29 @@ class BackendDatabase(unittest.TestCase):
         for path in (DEPLOY, TEARDOWN, RECONCILE):
             self.assertIn("PROD_SUPABASE_HOST=\\n", read(path), os.path.basename(path))
 
-    def test_no_mail_keys_reach_a_preview_backend(self):
+    CONNECT_MAIL_BLOCK = re.compile(
+        r'if \[ "\$\{\{ inputs\.name \}\}" = connect \]; then\n(?:.*\n)*?\s*fi\n')
+
+    def test_no_mail_keys_reach_a_preview_backend_other_than_connect(self):
+        # Given the preview deploy workflow with the Connect-only SES block removed
         # Whole key names only: EMAIL_INTERNAL_KEY is the internal service key
         # (forwarded for dev/prod parity, #62), not a mail provider credential.
-        text = read(DEPLOY)
+        # (the optional workflow_call secret declarations only name the keys)
+        text = self.CONNECT_MAIL_BLOCK.sub("", read(DEPLOY), count=1)
+        text = re.sub(r"(?m)^\s+AWS_[A-Z_]+:\s+\{ required: false \}\n", "", text)
+        # Then no other backend preview receives a mail provider key
         for key in ("SES_", "SMTP", "AWS_SECRET", "MAIL_"):
             self.assertIsNone(re.search(r"(?<![A-Z])" + key, text), key)
+
+    def test_ses_keys_are_forwarded_to_the_connect_preview_only(self):
+        # Given the preview deploy workflow
+        text = read(DEPLOY)
+        # When the Connect-only block is located
+        block = self.CONNECT_MAIL_BLOCK.search(text)
+        # Then it exists, is gated on name == connect, and only echoes AWS keys
+        self.assertIsNotNone(block)
+        self.assertIn("AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}", block.group(0))
+        self.assertNotIn("SMTP", block.group(0))
 
     def test_the_internal_email_service_key_is_forwarded(self):
         self.assertIn("EMAIL_INTERNAL_KEY=${{ secrets.EMAIL_INTERNAL_KEY }}", read(DEPLOY))
