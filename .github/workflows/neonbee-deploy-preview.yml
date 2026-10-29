@@ -161,6 +161,23 @@ on:
       PARTNER_RESOLVE_INTERNAL_KEY: { required: false }
       CONNECT_INTERNAL_KEY:        { required: false }
       CONNECT_INTERNAL_KEYS:       { required: false }
+      CONTENTFORGE_INTEGRATION_KEY: { required: false }
+      LUMEN_INTEGRATION_KEY: { required: false }
+      INNGEST_EVENT_KEY: { required: false }
+      INNGEST_SIGNING_KEY: { required: false }
+      DATAFORSEO_LOGIN: { required: false }
+      DATAFORSEO_PASSWORD: { required: false }
+      TAVILY_API_KEY: { required: false }
+      FIRECRAWL_API_KEY: { required: false }
+      EXA_API_KEY: { required: false }
+      GOOGLE_OAUTH_CLIENT_ID: { required: false }
+      GOOGLE_OAUTH_CLIENT_SECRET: { required: false }
+      SENTRY_DSN: { required: false }
+      POSTHOG_API_KEY: { required: false }
+      LUMEN_SITE_RENDER_KEY: { required: false }
+      REVALIDATE_SECRET: { required: false }
+      WEB_SEARCH_PROVIDER: { required: false }
+      WEB_SEARCH_API_KEY: { required: false }
       BUNNY_STORAGE_HOSTNAME:      { required: false }
       BUNNY_STORAGE_ZONE:          { required: false }
       BUNNY_ACCESS_KEY:            { required: false }
@@ -558,6 +575,23 @@ jobs:
               echo "PARTNER_RESOLVE_INTERNAL_KEY=${{ secrets.PARTNER_RESOLVE_INTERNAL_KEY }}"
               echo "CONNECT_INTERNAL_KEY=${{ secrets.CONNECT_INTERNAL_KEY }}"
               echo "CONNECT_INTERNAL_KEYS=${{ secrets.CONNECT_INTERNAL_KEYS }}"
+              echo "CONTENTFORGE_INTEGRATION_KEY=${{ secrets.CONTENTFORGE_INTEGRATION_KEY }}"
+              echo "LUMEN_INTEGRATION_KEY=${{ secrets.LUMEN_INTEGRATION_KEY }}"
+              echo "INNGEST_EVENT_KEY=${{ secrets.INNGEST_EVENT_KEY }}"
+              echo "INNGEST_SIGNING_KEY=${{ secrets.INNGEST_SIGNING_KEY }}"
+              echo "DATAFORSEO_LOGIN=${{ secrets.DATAFORSEO_LOGIN }}"
+              echo "DATAFORSEO_PASSWORD=${{ secrets.DATAFORSEO_PASSWORD }}"
+              echo "TAVILY_API_KEY=${{ secrets.TAVILY_API_KEY }}"
+              echo "FIRECRAWL_API_KEY=${{ secrets.FIRECRAWL_API_KEY }}"
+              echo "EXA_API_KEY=${{ secrets.EXA_API_KEY }}"
+              echo "GOOGLE_OAUTH_CLIENT_ID=${{ secrets.GOOGLE_OAUTH_CLIENT_ID }}"
+              echo "GOOGLE_OAUTH_CLIENT_SECRET=${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}"
+              echo "SENTRY_DSN=${{ secrets.SENTRY_DSN }}"
+              echo "POSTHOG_API_KEY=${{ secrets.POSTHOG_API_KEY }}"
+              echo "LUMEN_SITE_RENDER_KEY=${{ secrets.LUMEN_SITE_RENDER_KEY }}"
+              echo "REVALIDATE_SECRET=${{ secrets.REVALIDATE_SECRET }}"
+              echo "WEB_SEARCH_PROVIDER=${{ secrets.WEB_SEARCH_PROVIDER }}"
+              echo "WEB_SEARCH_API_KEY=${{ secrets.WEB_SEARCH_API_KEY }}"
               echo "BUNNY_STORAGE_HOSTNAME=${{ secrets.BUNNY_STORAGE_HOSTNAME }}"
               echo "BUNNY_STORAGE_ZONE=${{ secrets.BUNNY_STORAGE_ZONE }}"
               echo "BUNNY_ACCESS_KEY=${{ secrets.BUNNY_ACCESS_KEY }}"
