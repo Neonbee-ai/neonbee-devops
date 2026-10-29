@@ -172,6 +172,10 @@ on:
       CF_R2_BUCKET:                { required: false }
       CF_R2_PUBLIC_URL:            { required: false }
       CF_R2_PREFIX:                { required: false }
+      # Outbound mail (SES) — forwarded to the Connect preview only.
+      AWS_ACCESS_KEY_ID:           { required: false }
+      AWS_SECRET_ACCESS_KEY:       { required: false }
+      AWS_REGION:                  { required: false }
 
 env:
   ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: true
@@ -565,9 +569,15 @@ jobs:
               echo "CF_R2_BUCKET=${{ secrets.CF_R2_BUCKET }}"
               echo "CF_R2_PUBLIC_URL=${{ secrets.CF_R2_PUBLIC_URL }}"
               echo "CF_R2_PREFIX=${{ secrets.CF_R2_PREFIX }}"
-              # No outbound-mail, push or Slack keys are passed on purpose:
-              # outbound mail from a preview fails closed instead of reaching
-              # real inboxes (it shares the production database).
+              # Outbound-mail (SES) keys go to the Connect preview only, and only
+              # when the caller passes them (user-approved 2026-10-29). Every
+              # other preview gets no mail, push or Slack keys: it shares the
+              # production database, so its outbound mail fails closed.
+              if [ "${{ inputs.name }}" = connect ]; then
+                [ -z "${{ secrets.AWS_ACCESS_KEY_ID }}" ] || echo "AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}"
+                [ -z "${{ secrets.AWS_SECRET_ACCESS_KEY }}" ] || echo "AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}"
+                [ -z "${{ secrets.AWS_REGION }}" ] || echo "AWS_REGION=${{ secrets.AWS_REGION }}"
+              fi
             } > "$OUT/app/.env"
             EXTRA='${{ inputs.extra_env }}'
             [ -n "$EXTRA" ] && printf '%s\n' "$EXTRA" >> "$OUT/app/.env"
