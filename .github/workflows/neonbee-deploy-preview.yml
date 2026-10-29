@@ -143,6 +143,7 @@ on:
       MARKETING_INTERNAL_KEY:      { required: false }
       MARKETING_TRACKING_SECRET:   { required: false }
       MAINTENANCE_INTERNAL_KEY:       { required: false }
+      SUPPORT_INTERNAL_KEY:        { required: false }
       INVENTORY_INTERNAL_KEY:      { required: false }
       FULFILLMENT_INTERNAL_KEY:    { required: false }
       TICKETING_INTERNAL_KEY:      { required: false }
@@ -536,6 +537,7 @@ jobs:
               echo "MARKETING_INTERNAL_KEY=${{ secrets.MARKETING_INTERNAL_KEY }}"
               echo "MARKETING_TRACKING_SECRET=${{ secrets.MARKETING_TRACKING_SECRET }}"
               echo "MAINTENANCE_INTERNAL_KEY=${{ secrets.MAINTENANCE_INTERNAL_KEY }}"
+              echo "SUPPORT_INTERNAL_KEY=${{ secrets.SUPPORT_INTERNAL_KEY }}"
               echo "INVENTORY_INTERNAL_KEY=${{ secrets.INVENTORY_INTERNAL_KEY }}"
               echo "FULFILLMENT_INTERNAL_KEY=${{ secrets.FULFILLMENT_INTERNAL_KEY }}"
               echo "TICKETING_INTERNAL_KEY=${{ secrets.TICKETING_INTERNAL_KEY }}"

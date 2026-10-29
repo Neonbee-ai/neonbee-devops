@@ -113,6 +113,7 @@ on:
       DOCS_INTERNAL_SERVICE_KEY:    { required: false }
       CRM_SYNC_INTERNAL_KEY:        { required: false }
       MAINTENANCE_INTERNAL_KEY:        { required: false }
+      SUPPORT_INTERNAL_KEY:         { required: false }
       PLATFORM_OPS_INTERNAL_KEY:    { required: false }
       PROJECTS_INTERNAL_KEY:        { required: false }
       MANUFACTURING_INTERNAL_KEY:   { required: false }
@@ -1101,6 +1102,7 @@ jobs:
             [ -n "${{ secrets.DOCS_INTERNAL_SERVICE_KEY }}" ]   && echo "DOCS_INTERNAL_SERVICE_KEY=${{ secrets.DOCS_INTERNAL_SERVICE_KEY }}"     >> .env.ci
             [ -n "${{ secrets.CRM_SYNC_INTERNAL_KEY }}" ]       && echo "CRM_SYNC_INTERNAL_KEY=${{ secrets.CRM_SYNC_INTERNAL_KEY }}"             >> .env.ci
             [ -n "${{ secrets.MAINTENANCE_INTERNAL_KEY }}" ]       && echo "MAINTENANCE_INTERNAL_KEY=${{ secrets.MAINTENANCE_INTERNAL_KEY }}"             >> .env.ci
+            [ -n "${{ secrets.SUPPORT_INTERNAL_KEY }}" ]           && echo "SUPPORT_INTERNAL_KEY=${{ secrets.SUPPORT_INTERNAL_KEY }}"                     >> .env.ci
             # Channel Program: HS256 secret Core signs partner delegated-access session tokens with. Absent = /access/session returns 503 and no partner can enter a client tenant.
             [ -n "${{ secrets.CHANNEL_DELEGATION_SECRET }}" ] && echo "CHANNEL_DELEGATION_SECRET=${{ secrets.CHANNEL_DELEGATION_SECRET }}" >> .env.ci
             # Channel Program: AES-256-GCM key Subscription encrypts channel payout bank details with. Absent = payout-profile writes are refused (fail-closed).
@@ -1282,6 +1284,7 @@ jobs:
             [ -n "${{ secrets.VAPID_PRIVATE_KEY }}" ]           && echo "VAPID_PRIVATE_KEY=${{ secrets.VAPID_PRIVATE_KEY }}"                     >> .env.ci
             [ -n "${{ secrets.CRM_SYNC_INTERNAL_KEY }}" ]       && echo "CRM_SYNC_INTERNAL_KEY=${{ secrets.CRM_SYNC_INTERNAL_KEY }}"             >> .env.ci
             [ -n "${{ secrets.MAINTENANCE_INTERNAL_KEY }}" ]       && echo "MAINTENANCE_INTERNAL_KEY=${{ secrets.MAINTENANCE_INTERNAL_KEY }}"             >> .env.ci
+            [ -n "${{ secrets.SUPPORT_INTERNAL_KEY }}" ]           && echo "SUPPORT_INTERNAL_KEY=${{ secrets.SUPPORT_INTERNAL_KEY }}"                     >> .env.ci
             # Channel Program: HS256 secret Core signs partner delegated-access session tokens with. Absent = /access/session returns 503 and no partner can enter a client tenant.
             [ -n "${{ secrets.CHANNEL_DELEGATION_SECRET }}" ] && echo "CHANNEL_DELEGATION_SECRET=${{ secrets.CHANNEL_DELEGATION_SECRET }}" >> .env.ci
             # Channel Program: AES-256-GCM key Subscription encrypts channel payout bank details with. Absent = payout-profile writes are refused (fail-closed).
