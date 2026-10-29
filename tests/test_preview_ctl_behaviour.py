@@ -408,6 +408,17 @@ class GivenAShellUpload(PreviewCtlCase):
         self.assertIn("try_files $uri $uri/ /index.html =404;", conf)
         self.assertNotIn("so360-preview-fallback.conf", conf)
 
+    def test_when_deployed_then_a_missing_assets_file_is_a_404_ahead_of_the_spa_fallback(self):
+        self.upload_fe("so360-shell-fe")
+        self.ok(*self.deploy("so360-shell-fe", "shell", "shell"))
+        conf = self.nginx()
+        shell_root = self.p(SLUG, "shell")
+        block = ("location ^~ /assets/ {\n"
+                 f"        root {shell_root};\n"
+                 "        try_files $uri =404;\n")
+        self.assertIn(block, conf)
+        self.assertLess(conf.index(block), conf.index(f"location / {{\n        root {shell_root};"))
+
 
 # ── Backend deploys ──────────────────────────────────────────────────────────
 class GivenABackendUpload(PreviewCtlCase):
@@ -670,6 +681,16 @@ class GivenAStaticSite(PreviewCtlCase):
         self.assertEqual(conf.count(f"sub_filter 'https://dev-sso.skyoffice360.com' 'https://{host}';"), 2)
         self.assertEqual(conf.count("include /etc/nginx/snippets/so360-preview-overlay.conf;"), 2)
         self.assertIn(f"PREVIEW_HOST_URL=https://{host}", r.stdout)
+
+    def test_when_deployed_then_the_site_host_404s_a_missing_assets_file_ahead_of_the_spa_fallback(self):
+        self.deploy_site()
+        conf = self.nginx()
+        site_root = self.p(SLUG, "site", "sso")
+        block = ("location ^~ /assets/ {\n"
+                 f"        root {site_root};\n"
+                 "        try_files $uri =404;\n")
+        self.assertIn(block, conf)
+        self.assertLess(conf.index(block), conf.index(f"location / {{\n        root {site_root};"))
 
     def test_when_the_preview_has_a_backend_then_the_site_host_routes_to_it_too(self):
         self.deploy_be()
