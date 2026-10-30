@@ -766,6 +766,12 @@ EOF
   # Host shell: the preview's own build, else develop's.
   if [ -n "$(jq -r '.[] | select(.kind == "shell") | .name' <<<"$comps")" ]; then
     cat <<EOF
+    # A missing hashed chunk must 404, never fall back to index.html (HTML as JS breaks chunk-error recovery).
+    location ^~ /assets/ {
+        root $base/shell;
+        try_files \$uri =404;
+        include /etc/nginx/snippets/so360-preview-static.conf;
+    }
     location / {
         root $base/shell;
         try_files \$uri \$uri/ /index.html =404;
@@ -789,6 +795,11 @@ EOF
     echo "    include /etc/nginx/snippets/so360-preview-overlay.conf;"
     be_locations "$comps"
     cat <<EOF
+    location ^~ /assets/ {
+        root $base/site/$name;
+        try_files \$uri =404;
+        include /etc/nginx/snippets/so360-preview-static.conf;
+    }
     location / {
         root $base/site/$name;
         try_files \$uri \$uri/ /index.html =404;
