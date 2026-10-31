@@ -1,0 +1,41 @@
+# One-off: upsert 6 SES DKIM CNAMEs (DNS only, TTL auto) in moonhive.co and neonbee.ai. Idempotent.
+name: ops-cf-dns-ses-dkim
+on:
+  push:
+    branches: [ops/cf-dns-ses-dkim]
+permissions: {}
+jobs:
+  dns:
+    runs-on: [self-hosted, runner-vm]
+    steps:
+      - name: Upsert DKIM CNAMEs
+        env:
+          T1: ${{ secrets.CF_SAAS_API_TOKEN }}
+          T2: ${{ secrets.CF_PREVIEW_API_TOKEN }}
+        run: |
+          set -uo pipefail
+          API=https://api.cloudflare.com/client/v4
+          FAIL=0
+          for PAIR in \
+            moonhive.co:tqaa5g2ukwkzhxlyesmxe5z2qc2bbjwr \
+            moonhive.co:hwwea3u3467ftlbsbkipam4tyvojfxmn \
+            moonhive.co:yrg2aoz6djlhiugyzinre44bzl3e2p7w \
+            neonbee.ai:bi3aon5iiug3mnhrkatem5xbqgi6dd5o \
+            neonbee.ai:o7xcz423ktz66rqrst7jvlx7mucp7mtr \
+            neonbee.ai:lzif2pndguayazm5tweaefnpqyuzptrq; do
+            ZN=${PAIR%%:*}; TOK=${PAIR##*:}
+            NAME="$TOK._domainkey.$ZN"; TARGET="$TOK.dkim.amazonses.com"; DONE=0
+            for T in "$T1" "$T2"; do
+              [ -n "$T" ] || continue
+              Z=$(curl -s -H "Authorization: Bearer $T" "$API/zones?name=$ZN" | jq -r '.result[0].id // empty')
+              [ -n "$Z" ] || continue
+              ID=$(curl -s -H "Authorization: Bearer $T" "$API/zones/$Z/dns_records?name=$NAME" | jq -r '.result[0].id // empty')
+              BODY=$(jq -nc --arg n "$NAME" --arg c "$TARGET" '{type:"CNAME",name:$n,content:$c,ttl:1,proxied:false,comment:"SES DKIM"}')
+              if [ -n "$ID" ]; then R=$(curl -s -X PUT -H "Authorization: Bearer $T" -H "Content-Type: application/json" "$API/zones/$Z/dns_records/$ID" -d "$BODY")
+              else R=$(curl -s -X POST -H "Authorization: Bearer $T" -H "Content-Type: application/json" "$API/zones/$Z/dns_records" -d "$BODY"); fi
+              echo "$R" | jq -c --arg n "$NAME" '{n:$n, success, errors}'
+              [ "$(echo "$R" | jq -r .success)" = true ] && { DONE=1; break; }
+            done
+            [ $DONE = 1 ] || { echo "FAILED $NAME"; FAIL=1; }
+          done
+          exit $FAIL
