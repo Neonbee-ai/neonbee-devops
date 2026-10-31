@@ -155,6 +155,8 @@ on:
       ACCOUNTING_INTERNAL_KEY_2:   { required: false }
       PEOPLE_INTERNAL_KEY:         { required: false }
       PEOPLE_INTERNAL_KEY_2:       { required: false }
+      NEURA_INTERNAL_KEY:          { required: false }
+      NEURA_INTERNAL_KEY_2:        { required: false }
       SUBSCRIPTION_INTERNAL_KEY:   { required: false }
       CORE_INTERNAL_KEY:           { required: false }
       CORE_PARTNER_INTERNAL_KEY:   { required: false }
@@ -552,6 +554,8 @@ jobs:
               echo "ACCOUNTING_INTERNAL_KEY_2=${{ secrets.ACCOUNTING_INTERNAL_KEY_2 }}"
               echo "PEOPLE_INTERNAL_KEY=${{ secrets.PEOPLE_INTERNAL_KEY }}"
               echo "PEOPLE_INTERNAL_KEY_2=${{ secrets.PEOPLE_INTERNAL_KEY_2 }}"
+              echo "NEURA_INTERNAL_KEY=${{ secrets.NEURA_INTERNAL_KEY }}"
+              echo "NEURA_INTERNAL_KEY_2=${{ secrets.NEURA_INTERNAL_KEY_2 }}"
               echo "SUBSCRIPTION_INTERNAL_KEY=${{ secrets.SUBSCRIPTION_INTERNAL_KEY }}"
               echo "CORE_INTERNAL_KEY=${{ secrets.CORE_INTERNAL_KEY }}"
               echo "CORE_PARTNER_INTERNAL_KEY=${{ secrets.CORE_PARTNER_INTERNAL_KEY }}"
