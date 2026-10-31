@@ -61,6 +61,8 @@ case "$1" in
     grep -vx -- "$2" "$on" > "$on.tmp" || true; mv "$on.tmp" "$on" ;;
   describe)
     if grep -qx -- "$2" "$on"; then echo "| status | online |"; else echo "| status | stopped |"; fi ;;
+  jlist)
+    jq -R '{name: ., pm2_env: {status: "online"}}' "$on" | jq -s . ;;
 esac
 exit 0
 ''',
@@ -70,6 +72,10 @@ a="curl $*"; echo "${a//$'\n'/ }" >> "$STUB_STATE/calls.log"
 # Cloudflare API fake (PREVIEW_CF_API=https://cf.test): -K - carries the token.
 case " $* " in *" -K - "*) cat >> "$STUB_STATE/curl_config" ;; esac
 url=""; for a in "$@"; do case "$a" in https://cf.test/*) url=$a ;; esac; done
+# cf_dns_error: the DNS create fails the way Cloudflare does (JSON body, exit 22).
+case " $* " in *" -X POST "*"/dns_records "*)
+  [ -e "$STUB_STATE/cf_dns_error" ] && { cat "$STUB_STATE/cf_dns_error"; exit 22; } ;;
+esac
 case " $* " in *" -X "*) exit 0 ;; esac
 case "$url" in
   *"/zones?name="*)       echo '{"result":[{"id":"Z1"}]}' ;;
@@ -137,6 +143,8 @@ class PreviewCtlCase(unittest.TestCase):
             "PREVIEW_CI_ENV_FILE": os.path.join(self.tmp, "etc", "ci.env"),
             "PREVIEW_CF_ENV_FILE": os.path.join(self.tmp, "etc", "cf.env"),
             "PREVIEW_CF_API": "https://cf.test",
+            "PREVIEW_NGINX_MAIN": os.path.join(self.tmp, "etc", "nginx.conf"),
+            "PREVIEW_MEMINFO": os.path.join(self.tmp, "etc", "meminfo"),
         })
         self.env = env
 
@@ -400,6 +408,17 @@ class GivenAShellUpload(PreviewCtlCase):
         self.assertIn("try_files $uri $uri/ /index.html =404;", conf)
         self.assertNotIn("so360-preview-fallback.conf", conf)
 
+    def test_when_deployed_then_a_missing_assets_file_is_a_404_ahead_of_the_spa_fallback(self):
+        self.upload_fe("so360-shell-fe")
+        self.ok(*self.deploy("so360-shell-fe", "shell", "shell"))
+        conf = self.nginx()
+        shell_root = self.p(SLUG, "shell")
+        block = ("location ^~ /assets/ {\n"
+                 f"        root {shell_root};\n"
+                 "        try_files $uri =404;\n")
+        self.assertIn(block, conf)
+        self.assertLess(conf.index(block), conf.index(f"location / {{\n        root {shell_root};"))
+
 
 # ── Backend deploys ──────────────────────────────────────────────────────────
 class GivenABackendUpload(PreviewCtlCase):
@@ -538,6 +557,36 @@ class GivenABackendEnv(PreviewCtlCase):
         self.assertFalse(any(c.startswith("pm2 start") for c in self.calls()))
 
 
+class GivenSiblingBackendsInOnePreview(PreviewCtlCase):
+    DEV_CORE = "CORE_BE_URL=https://dev-api.skyoffice360.com/core\nCORE_API=https://dev-api.skyoffice360.com/core/v1\nCOREX=https://dev-api.skyoffice360.com/corex\n"
+
+    def read_env(self, name):
+        with open(self.p(SLUG, "be", name, ".env")) as f:
+            return f.read().splitlines()
+
+    def test_when_a_sibling_is_already_in_the_preview_then_a_new_backend_calls_it_on_loopback(self):
+        self.deploy_be("so360-core", "core")                       # core → :7100
+        self.upload_be("so360-crm-be", env_text=self.DEV_CORE)
+        self.ok(*self.deploy("so360-crm-be", "be", "crm", extra=("--lockhash", HASH)))
+        lines = self.read_env("crm")
+        self.assertIn("CORE_BE_URL=http://127.0.0.1:7100", lines)
+        self.assertIn("CORE_API=http://127.0.0.1:7100/v1", lines)
+        self.assertIn("COREX=https://dev-api.skyoffice360.com/corex", lines)
+
+    def test_when_a_sibling_arrives_later_then_existing_backends_are_relinked_and_restarted(self):
+        self.upload_be("so360-crm-be", env_text=self.DEV_CORE)
+        self.ok(*self.deploy("so360-crm-be", "be", "crm", extra=("--lockhash", HASH)))  # crm → :7100
+        self.assertIn("CORE_BE_URL=https://dev-api.skyoffice360.com/core", self.read_env("crm"))
+        self.deploy_be("so360-core", "core")                       # core → :7101
+        self.assertIn("CORE_BE_URL=http://127.0.0.1:7101", self.read_env("crm"))
+        self.assertTrue(any(c.startswith("pm2 restart pv-feat-crm-owner-crm") for c in self.calls()))
+
+    def test_when_nothing_changes_then_no_sibling_is_restarted(self):
+        self.deploy_be("so360-crm-be", "crm")
+        self.deploy_be("so360-core", "core")
+        self.assertFalse(any(c.startswith("pm2 restart") for c in self.calls()))
+
+
 # ── Sleep / wake ─────────────────────────────────────────────────────────────
 class GivenARunningPreview(PreviewCtlCase):
     def setUp(self):
@@ -557,6 +606,11 @@ class GivenARunningPreview(PreviewCtlCase):
         self.ok("wake", "--slug", SLUG)
         self.assertTrue(any(c.startswith("pm2 start") for c in self.calls()))
         self.assertFalse(self.registry()["previews"][SLUG]["asleep"])
+
+    def test_when_woken_then_the_wake_time_is_recorded(self):
+        self.ok("sleep", "--slug", SLUG)
+        self.ok("wake", "--slug", SLUG)
+        self.assertIsInstance(self.registry()["previews"][SLUG]["last_wake"], int)
 
     def test_when_woken_while_already_online_then_nothing_restarts(self):
         self.ok("wake", "--slug", SLUG)
@@ -627,6 +681,24 @@ class GivenAStaticSite(PreviewCtlCase):
         self.assertEqual(conf.count(f"sub_filter 'https://dev-sso.skyoffice360.com' 'https://{host}';"), 2)
         self.assertEqual(conf.count("include /etc/nginx/snippets/so360-preview-overlay.conf;"), 2)
         self.assertIn(f"PREVIEW_HOST_URL=https://{host}", r.stdout)
+
+    def test_when_deployed_then_the_site_host_404s_a_missing_assets_file_ahead_of_the_spa_fallback(self):
+        self.deploy_site()
+        conf = self.nginx()
+        site_root = self.p(SLUG, "site", "sso")
+        block = ("location ^~ /assets/ {\n"
+                 f"        root {site_root};\n"
+                 "        try_files $uri =404;\n")
+        self.assertIn(block, conf)
+        self.assertLess(conf.index(block), conf.index(f"location / {{\n        root {site_root};"))
+
+    def test_when_the_preview_has_a_backend_then_the_site_host_routes_to_it_too(self):
+        self.deploy_be()
+        self.deploy_site()
+        conf = self.nginx()
+        site_block = conf[conf.index(f"server_name {self.site_host('sso')};"):]
+        self.assertEqual(conf.count("location ^~ /api/crm/ {"), 2)
+        self.assertIn("location ^~ /api/crm/ {", site_block)
 
     def test_when_the_host_is_missing_or_malformed_then_deploy_is_refused(self):
         for host in ("", "sso.skyoffice360.com", "pr-x.example.com", "pr-x-.skyoffice360.com",
@@ -1030,6 +1102,12 @@ class GivenCloudflareOnTheHost(PreviewCtlCase):
         self.assertEqual(len(writes), 1)
         self.assertIn("-X PUT https://cf.test/zones/Z1/dns_records/D1", writes[0])
 
+    def test_when_cloudflare_rejects_a_write_then_its_error_json_reaches_stderr(self):
+        body = '{"success":false,"errors":[{"code":81053,"message":"record already exists"}]}'
+        self.mark("cf_dns_error", body)
+        self.fails("cf-ensure", "--slug", SLUG, "--ip", "1.2.3.4", "--fqdn", MAIN_HOST,
+                   message=f"Cloudflare: {body}", code=22)
+
     def test_when_a_host_is_not_a_preview_host_then_nothing_is_touched(self):
         for bad in ("dev-api.skyoffice360.com", "pr-x.neonbee.app", "skyoffice360.com"):
             self.fails("cf-ensure", "--slug", SLUG, "--ip", "1.2.3.4", "--fqdn", bad, message="invalid host")
@@ -1053,6 +1131,102 @@ class GivenCloudflareOnTheHost(PreviewCtlCase):
         self.assertTrue(deletes[0].endswith("/zones/Z1/dns_records/D1"))
         self.assertTrue(deletes[1].endswith("/access/apps/A1"))
         self.assertIn(f"Deleted DNS {MAIN_HOST}", r.stdout)
+
+
+
+# ── Shared-host caps (Dev VM) ────────────────────────────────────────────────
+class GivenAnAwakeCap(PreviewCtlCase):
+    def setUp(self):
+        super().setUp()
+        self.env["PREVIEW_MAX_AWAKE"] = "1"
+        self.deploy_be(slug="old-preview")
+        self.clear_calls()
+
+    def test_when_another_preview_starts_then_the_least_recently_pushed_one_is_put_to_sleep(self):
+        r = self.deploy_be(slug="new-preview")
+        self.assertIn("pm2 stop pv-old-preview-crm PORT=", self.calls())
+        self.assertIn("putting preview old-preview to sleep", r.stderr)
+        self.assertTrue(self.registry()["previews"]["old-preview"]["asleep"])
+        self.assertFalse(self.registry()["previews"]["new-preview"]["asleep"])
+
+    def test_when_an_older_push_was_woken_recently_then_the_next_oldest_is_put_to_sleep(self):
+        self.env["PREVIEW_MAX_AWAKE"] = "2"
+        self.deploy_be(slug="mid-preview")
+        reg = self.registry()
+        reg["previews"]["old-preview"]["last_wake"] = reg["previews"]["mid-preview"]["last_push"] + 1000
+        self.write_registry(reg)
+        self.clear_calls()
+        self.deploy_be(slug="new-preview")
+        self.assertIn("pm2 stop pv-mid-preview-crm PORT=", self.calls())
+        self.assertFalse(self.registry()["previews"]["old-preview"]["asleep"])
+        self.assertTrue(self.registry()["previews"]["mid-preview"]["asleep"])
+
+    def test_when_the_same_preview_is_redeployed_then_it_does_not_evict_itself(self):
+        self.deploy_be(slug="old-preview")
+        self.assertFalse(any(c.startswith("pm2 stop") for c in self.calls()))
+        self.assertFalse(self.registry()["previews"]["old-preview"]["asleep"])
+
+    def test_when_no_awake_backend_preview_can_be_put_to_sleep_then_the_backend_is_not_started(self):
+        self.deploy_fe(slug="fe-only")
+        reg = self.registry()
+        reg["previews"]["old-preview"]["asleep"] = True
+        self.write_registry(reg)
+        self.clear_calls()
+        self.upload_be("so360-crm-be", slug="third")
+        self.fails(*self.deploy("so360-crm-be", "be", "crm", slug="third", extra=("--lockhash", HASH)),
+                   message="1 preview backends already awake")
+        self.assertFalse(any(c.startswith("pm2 start") for c in self.calls()))
+        self.assertFalse(self.registry()["previews"]["fe-only"].get("asleep"))
+
+
+class GivenAMemoryFloor(PreviewCtlCase):
+    def meminfo(self, mb):
+        os.makedirs(os.path.join(self.tmp, "etc"), exist_ok=True)
+        with open(self.env["PREVIEW_MEMINFO"], "w") as f:
+            f.write(f"MemTotal: 25000000 kB\nMemAvailable: {mb * 1024} kB\n")
+
+    def test_when_available_memory_is_below_the_floor_then_no_backend_starts(self):
+        self.env["PREVIEW_MIN_AVAIL_MB"] = "3072"
+        self.meminfo(2000)
+        self.upload_be("so360-crm-be")
+        self.fails(*self.deploy("so360-crm-be", "be", "crm", extra=("--lockhash", HASH)),
+                   message="2000 MB available, below the 3072 MB floor")
+        self.assertFalse(any(c.startswith("pm2 start") for c in self.calls()))
+
+    def test_when_available_memory_is_above_the_floor_then_the_backend_starts(self):
+        self.env["PREVIEW_MIN_AVAIL_MB"] = "3072"
+        self.meminfo(8000)
+        self.deploy_be()
+        self.assertTrue(any(c.startswith("pm2 start") for c in self.calls()))
+
+    def test_when_no_floor_is_set_then_meminfo_is_not_consulted(self):
+        self.meminfo(10)
+        self.deploy_be()
+        self.assertTrue(any(c.startswith("pm2 start") for c in self.calls()))
+
+
+class GivenTheHostNginxConf(PreviewCtlCase):
+    def nginx_main(self, text):
+        os.makedirs(os.path.join(self.tmp, "etc"), exist_ok=True)
+        with open(self.env["PREVIEW_NGINX_MAIN"], "w") as f:
+            f.write(text)
+
+    def test_when_nginx_conf_already_sets_the_hash_bucket_size_then_it_is_not_repeated(self):
+        self.nginx_main("http {\n    server_names_hash_bucket_size 128;\n}\n")
+        self.deploy_fe()
+        self.assertNotIn("server_names_hash_bucket_size", self.nginx())
+
+    def test_when_nginx_conf_does_not_set_it_then_the_preview_config_does(self):
+        self.nginx_main("http {\n    # server_names_hash_bucket_size 64;\n}\n")
+        self.deploy_fe()
+        self.assertIn("server_names_hash_bucket_size 128;", self.nginx())
+
+    def test_when_loopback_is_skipped_then_a_next_app_renders_no_loopback_listeners(self):
+        self.env["PREVIEW_SKIP_LOOPBACK"] = "1"
+        self.deploy_next()
+        conf = self.nginx()
+        self.assertNotIn("listen 127.0.0.1:", conf)
+        self.assertIn("proxy_pass http://127.0.0.1:7100;", conf)
 
 
 if __name__ == "__main__":

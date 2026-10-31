@@ -94,10 +94,43 @@ class BackendDatabase(unittest.TestCase):
         for path in (DEPLOY, TEARDOWN, RECONCILE):
             self.assertIn("PROD_SUPABASE_HOST=\\n", read(path), os.path.basename(path))
 
-    def test_no_mail_keys_reach_a_preview_backend(self):
-        text = read(DEPLOY)
+    CONNECT_MAIL_BLOCK = re.compile(
+        r'if \[ "\$\{\{ inputs\.name \}\}" = connect \]; then\n(?:.*\n)*?\s*fi\n')
+
+    def test_no_mail_keys_reach_a_preview_backend_other_than_connect(self):
+        # Given the preview deploy workflow with the Connect-only SES block removed
+        # Whole key names only: EMAIL_INTERNAL_KEY is the internal service key
+        # (forwarded for dev/prod parity, #62), not a mail provider credential.
+        # (the optional workflow_call secret declarations only name the keys)
+        text = self.CONNECT_MAIL_BLOCK.sub("", read(DEPLOY), count=1)
+        text = re.sub(r"(?m)^\s+AWS_[A-Z_]+:\s+\{ required: false \}\n", "", text)
+        # Then no other backend preview receives a mail provider key
         for key in ("SES_", "SMTP", "AWS_SECRET", "MAIL_"):
-            self.assertNotIn(key, text)
+            self.assertIsNone(re.search(r"(?<![A-Z])" + key, text), key)
+
+    def test_ses_keys_are_forwarded_to_the_connect_preview_only(self):
+        # Given the preview deploy workflow
+        text = read(DEPLOY)
+        # When the Connect-only block is located
+        block = self.CONNECT_MAIL_BLOCK.search(text)
+        # Then it exists, is gated on name == connect, and only echoes AWS keys
+        self.assertIsNotNone(block)
+        self.assertIn("AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}", block.group(0))
+        self.assertNotIn("SMTP", block.group(0))
+
+    def test_the_internal_email_service_key_is_forwarded(self):
+        self.assertIn("EMAIL_INTERNAL_KEY=${{ secrets.EMAIL_INTERNAL_KEY }}", read(DEPLOY))
+
+    def test_inventory_fulfillment_ticketing_internal_keys_are_declared_and_forwarded(self):
+        # Given the preview deploy workflow
+        text = read(DEPLOY)
+        for key in ("INVENTORY_INTERNAL_KEY", "FULFILLMENT_INTERNAL_KEY", "TICKETING_INTERNAL_KEY"):
+            with self.subTest(key=key):
+                # When a backend preview env is written
+                # Then the secret is declared and forwarded under the same name,
+                # so fail-closed internal guards accept their M2M callers
+                self.assertIn(f"{key}:", text)
+                self.assertIn(f"{key}=${{{{ secrets.{key} }}}}", text)
 
     def test_preview_ctl_refuses_the_production_database(self):
         text = read(CTL)
@@ -154,6 +187,50 @@ class Reconcile(unittest.TestCase):
 
     def test_api_errors_never_count_as_branch_deleted(self):
         self.assertIn('[ "$code" = 404 ] || alive=1', read(RECONCILE))
+
+    def test_ssh_inside_the_sleep_remove_loop_never_reads_the_loop_input(self):
+        # Without -n, the first sleep/remove ssh swallowed the rest of the
+        # `while read` input, so each nightly run handled one preview at most.
+        text = read(RECONCILE)
+        act = re.search(r"^\s*act\(\) \{.*$", text, re.M).group(0)
+        self.assertIn('ssh -n "root@$HOST"', act)
+
+
+class RunsOnTheRunnerVmOnly(unittest.TestCase):
+    """Preview builds stay off the Mac Minis (autonomous QA) and the Dev VM."""
+
+    def test_every_preview_job_runs_on_the_runner_vm(self):
+        text = read(DEPLOY)
+        self.assertEqual(re.findall(r"runs-on: (.*)", text), ["[self-hosted, runner-vm]"] * 2)
+
+    def test_no_job_targets_the_shared_contabo_label(self):
+        self.assertNotIn("contabo", "".join(re.findall(r"runs-on: .*", read(DEPLOY))))
+
+    def test_sed_edits_in_place_with_a_suffix_bsd_sed_accepts(self):
+        text = read(DEPLOY)
+        self.assertEqual(re.findall(r"sed -i(?!\.bak)", text), [])
+
+    def test_the_host_ip_lookup_does_not_fail_without_getent(self):
+        text = read(DEPLOY)
+        self.assertIn('{ getent ahostsv4 "$HOST" 2>/dev/null || true; }', text)
+
+
+class MfeStylesheetPath(unittest.TestCase):
+    """The federation runtime requests <base>/<file>.css, not <base>/assets/<file>.css."""
+
+    def test_an_mfe_preview_also_serves_its_stylesheet_from_the_root(self):
+        text = read(DEPLOY)
+        # Only MFE builds (kind fe + is_mfe) get the root copy.
+        self.assertIn('if [ "$KIND" = fe ] && [ "${{ inputs.is_mfe }}" = "true" ]; then', text)
+        self.assertIn("find dist/assets -maxdepth 1 -type f -name '*.css' -exec cp {} \"$OUT/app/\" \\;", text)
+
+    def test_the_root_copy_is_added_after_dist_is_staged_and_never_replaces_it(self):
+        text = read(DEPLOY)
+        stage = text.index('cp -r dist/. "$OUT/app/"')
+        css = text.index("find dist/assets -maxdepth 1")
+        self.assertLess(stage, css)
+        # assets/ stays in place — the copy is additive.
+        self.assertNotIn("mv dist/assets", text)
 
 
 if __name__ == "__main__":

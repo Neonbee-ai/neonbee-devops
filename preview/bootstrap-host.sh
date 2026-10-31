@@ -6,8 +6,10 @@
 #   DEV_ORIGIN=84.247.131.148 PROD_SUPABASE_HOST=<prod-ref>.supabase.co \
 #     bash preview/bootstrap-host.sh
 #
-# Idempotent. Native nginx + pm2 only (no Docker). Never run it on the Dev VM
-# (it hosts the Prod HA processes) or on any prod host.
+# Idempotent. Native nginx + pm2 only (no Docker). Never run it on a prod host.
+# The Dev VM (it hosts the Prod HA processes) is refused unless ALLOW_DEV_VM=1;
+# there preview.env is written with caps (awake backends, memory floor) and
+# without the loopback proxies, since develop's services own those ports.
 # =============================================================================
 set -euo pipefail
 
@@ -15,9 +17,14 @@ set -euo pipefail
 : "${PROD_SUPABASE_HOST:?set PROD_SUPABASE_HOST (preview backends refuse any .env containing it)}"
 HERE=$(cd "$(dirname "$0")" && pwd)
 
+ON_DEV_VM=0
 if [ "$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -cxF "$DEV_ORIGIN")" != 0 ]; then
-  echo "refusing: this is the Dev VM ($DEV_ORIGIN) — previews must run elsewhere" >&2
-  exit 1
+  if [ "${ALLOW_DEV_VM:-0}" != 1 ]; then
+    echo "refusing: this is the Dev VM ($DEV_ORIGIN) — previews must run elsewhere (ALLOW_DEV_VM=1 overrides, with caps)" >&2
+    exit 1
+  fi
+  ON_DEV_VM=1
+  echo "ALLOW_DEV_VM=1: preparing the Dev VM as a capped preview host" >&2
 fi
 
 command -v apt-get >/dev/null && apt-get install -y -q jq nginx rsync curl util-linux >/dev/null
@@ -45,6 +52,16 @@ PROD_SUPABASE_HOST=$PROD_SUPABASE_HOST
 # PREVIEW_PORT_MAX=7999
 # PREVIEW_PM2_MEM=300M
 EOF
+  if [ "$ON_DEV_VM" = 1 ]; then
+    cat >> /etc/so360-preview/preview.env <<EOF
+# Dev VM: shared with develop + Prod HA — keep previews small.
+PREVIEW_SKIP_LOOPBACK=1
+PREVIEW_MAX_AWAKE=${PREVIEW_MAX_AWAKE:-6}
+PREVIEW_MIN_AVAIL_MB=${PREVIEW_MIN_AVAIL_MB:-3072}
+PREVIEW_PM2_MEM=${PREVIEW_PM2_MEM:-300M}
+PREVIEW_PM2_MEM_NEXT=${PREVIEW_PM2_MEM_NEXT:-400M}
+EOF
+  fi
   chmod 600 /etc/so360-preview/preview.env
 fi
 

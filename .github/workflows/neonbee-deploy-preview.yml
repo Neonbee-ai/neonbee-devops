@@ -125,10 +125,12 @@ on:
       JWT_SECRET_DEV:          { required: false }
       JWT_SECRET:              { required: false }
       ENCRYPTION_KEY:              { required: false }
+      VENDOR_BANK_ENC_KEY:         { required: false }
       PAYROLL_ENCRYPTION_KEY:      { required: false }
       STOREFRONT_JWT_SECRET:       { required: false }
       INTERNAL_SERVICE_KEY:        { required: false }
       NOTIFICATION_INTERNAL_KEY:   { required: false }
+      EMAIL_INTERNAL_KEY:          { required: false }
       INBOX_SERVICE_KEY:           { required: false }
       GEMINI_API_KEY:              { required: false }
       OPENAI_API_KEY:              { required: false }
@@ -138,6 +140,12 @@ on:
       CHAT_INTERNAL_KEY:           { required: false }
       DOCS_INTERNAL_SERVICE_KEY:   { required: false }
       CRM_SYNC_INTERNAL_KEY:       { required: false }
+      MARKETING_INTERNAL_KEY:      { required: false }
+      MARKETING_TRACKING_SECRET:   { required: false }
+      MAINTENANCE_INTERNAL_KEY:       { required: false }
+      INVENTORY_INTERNAL_KEY:      { required: false }
+      FULFILLMENT_INTERNAL_KEY:    { required: false }
+      TICKETING_INTERNAL_KEY:      { required: false }
       CHANNEL_DELEGATION_SECRET:   { required: false }
       COMPENSATION_ENCRYPTION_KEY: { required: false }
       PLATFORM_OPS_INTERNAL_KEY:   { required: false }
@@ -147,7 +155,31 @@ on:
       ACCOUNTING_INTERNAL_KEY_2:   { required: false }
       PEOPLE_INTERNAL_KEY:         { required: false }
       PEOPLE_INTERNAL_KEY_2:       { required: false }
+      NEURA_INTERNAL_KEY:          { required: false }
+      NEURA_INTERNAL_KEY_2:        { required: false }
       SUBSCRIPTION_INTERNAL_KEY:   { required: false }
+      CORE_INTERNAL_KEY:           { required: false }
+      CORE_PARTNER_INTERNAL_KEY:   { required: false }
+      PARTNER_RESOLVE_INTERNAL_KEY: { required: false }
+      CONNECT_INTERNAL_KEY:        { required: false }
+      CONNECT_INTERNAL_KEYS:       { required: false }
+      CONTENTFORGE_INTEGRATION_KEY: { required: false }
+      LUMEN_INTEGRATION_KEY: { required: false }
+      INNGEST_EVENT_KEY: { required: false }
+      INNGEST_SIGNING_KEY: { required: false }
+      DATAFORSEO_LOGIN: { required: false }
+      DATAFORSEO_PASSWORD: { required: false }
+      TAVILY_API_KEY: { required: false }
+      FIRECRAWL_API_KEY: { required: false }
+      EXA_API_KEY: { required: false }
+      GOOGLE_OAUTH_CLIENT_ID: { required: false }
+      GOOGLE_OAUTH_CLIENT_SECRET: { required: false }
+      SENTRY_DSN: { required: false }
+      POSTHOG_API_KEY: { required: false }
+      LUMEN_SITE_RENDER_KEY: { required: false }
+      REVALIDATE_SECRET: { required: false }
+      WEB_SEARCH_PROVIDER: { required: false }
+      WEB_SEARCH_API_KEY: { required: false }
       BUNNY_STORAGE_HOSTNAME:      { required: false }
       BUNNY_STORAGE_ZONE:          { required: false }
       BUNNY_ACCESS_KEY:            { required: false }
@@ -159,6 +191,10 @@ on:
       CF_R2_BUCKET:                { required: false }
       CF_R2_PUBLIC_URL:            { required: false }
       CF_R2_PREFIX:                { required: false }
+      # Outbound mail (SES) — forwarded to the Connect preview only.
+      AWS_ACCESS_KEY_ID:           { required: false }
+      AWS_SECRET_ACCESS_KEY:       { required: false }
+      AWS_REGION:                  { required: false }
 
 env:
   ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: true
@@ -169,7 +205,7 @@ env:
 
 jobs:
   check:
-    runs-on: [self-hosted, contabo, Linux]
+    runs-on: [self-hosted, runner-vm]
     outputs:
       run:  ${{ steps.c.outputs.run }}
       slug: ${{ steps.c.outputs.slug }}
@@ -218,7 +254,9 @@ jobs:
   build-deploy:
     needs: [check]
     if: needs.check.outputs.run == 'true'
-    runs-on: [self-hosted, contabo, Linux]
+    # The runner VM only: the Mac Minis are reserved for autonomous QA and the
+    # Dev VM never builds (it only receives dist).
+    runs-on: [self-hosted, runner-vm]
     timeout-minutes: 25
     # Latest push wins: a newer push to the same branch cancels this one.
     concurrency:
@@ -296,7 +334,7 @@ jobs:
               for p in shell-context design-system event-bus formatters; do
                 if [ -d "_shell-fe/packages/$p" ]; then
                   if ! ( cd "_shell-fe/packages/$p" \
-                         && npm install --legacy-peer-deps --include=dev --no-audit --no-fund >/dev/null 2>&1 \
+                         && npm install --legacy-peer-deps --include=dev --no-audit --no-fund --prefer-offline >/dev/null 2>&1 \
                          && npm run build ); then
                     echo "::warning::could not rebuild @so360/$p — restoring its committed dist"
                     ( cd _shell-fe && git checkout -- "packages/$p/dist" ) 2>/dev/null || true
@@ -308,11 +346,88 @@ jobs:
               echo "::warning title=No PAT_TOKEN::could not clone so360-shell-fe — using .ci-stubs for @so360/*"
             fi
           fi
+          # node_modules reuse: a tree keyed on sha256(package-lock + package.json +
+          # node/npm major + install flags + omit/include env) is stored per caller repo
+          # in a host-local store shared by every runner slot. Writes go to a temp file
+          # + atomic mv, so a reader only ever sees a complete archive; a restore is
+          # extracted to a staging dir, moved in only when tar exits 0, and must pass the
+          # same binary check as a fresh install — otherwise it is discarded and npm ci
+          # runs exactly as before. Repos with root install lifecycle scripts never use it.
+          nb_nm_dir="${NB_NM_CACHE_DIR:-$HOME/.cache/neonbee-nm-cache}/${GITHUB_REPOSITORY//\//__}"
+          nb_nm_bins_ok() {
+            local b
+            [ -f node_modules/.package-lock.json ] || return 1
+            for b in $(node -e "const s=require('./package.json').scripts||{};const o=new Set();for(const k of ['test','build']){const m=String(s[k]||'').match(/\b(vitest|jest|vite|next|nest|tsc)\b/);if(m)o.add(m[1])}console.log([...o].join(' '))" 2>/dev/null); do
+              [ -x "node_modules/.bin/$b" ] || return 1
+              "node_modules/.bin/$b" --version >/dev/null 2>&1 || return 1
+            done
+            return 0
+          }
+          nb_nm_key() {
+            [ -f package-lock.json ] || return 1
+            node -e "const s=require('./package.json').scripts||{};process.exit(['preinstall','install','postinstall','prepare'].some(k=>s[k])?1:0)" 2>/dev/null || return 1
+            NB_NM_FLAGS="$1" NB_NM_NPM="$(npm -v 2>/dev/null | cut -d. -f1)" node -e "const c=require('crypto'),fs=require('fs');const h=c.createHash('sha256');for(const f of ['package-lock.json','package.json','.npmrc'])if(fs.existsSync(f))h.update(f+'\0').update(fs.readFileSync(f));const env=Object.keys(process.env).filter(k=>/^(npm_config_(omit|include|production|only|legacy_peer_deps|ignore_scripts)|NODE_ENV)$/i.test(k)).sort().map(k=>k.toLowerCase()+'='+process.env[k]);h.update(['nm-v1',process.env.NB_NM_FLAGS,process.env.NB_NM_NPM,process.versions.node.split('.')[0],process.platform,process.arch,process.cwd().slice((process.env.GITHUB_WORKSPACE||'').length),...env].join('|'));console.log(h.digest('hex').slice(0,40))"
+          }
+          nb_nm_restore() {
+            local f stage=".nb-nm-restore.$$"
+            for f in "$nb_nm_dir/$1.tar.zst" "$nb_nm_dir/$1.tar.gz"; do
+              [ -f "$f" ] || continue
+              case "$f" in *.zst) command -v zstd >/dev/null 2>&1 || continue ;; esac
+              rm -rf "$stage" node_modules && mkdir -p "$stage" || return 1
+              if ( set -o pipefail; case "$f" in *.zst) zstd -dcq "$f" ;; *) gzip -dc "$f" ;; esac | tar -xf - -C "$stage" ) && [ -d "$stage/node_modules" ]; then
+                mv "$stage/node_modules" node_modules && rm -rf "$stage"
+                if nb_nm_bins_ok; then
+                  touch "$f" 2>/dev/null || true
+                  echo "node_modules restored from runner cache (${f##*/})"
+                  return 0
+                fi
+                echo "::warning::cached node_modules failed the binary check — discarding it and running npm ci"
+              else
+                echo "::warning::cached node_modules archive unreadable — discarding it and running npm ci"
+              fi
+              rm -f "$f"; rm -rf "$stage" node_modules
+            done
+            return 1
+          }
+          nb_nm_save() {
+            local ext tmp used root total old
+            nb_nm_bins_ok || { echo "node_modules cache: fresh tree failed the binary check — not saving"; return 0; }
+            used=$(df -P "$HOME" 2>/dev/null | awk 'NR==2{gsub("%","",$5);print $5}')
+            [ "${used:-100}" -lt "${NB_NM_MAX_DISK_PCT:-85}" ] || { echo "::notice::node_modules cache: disk ${used:-?}% used — not saving"; return 0; }
+            mkdir -p "$nb_nm_dir" || return 0
+            if command -v zstd >/dev/null 2>&1; then ext=zst; else ext=gz; fi
+            tmp="$nb_nm_dir/.$1.$$.$RANDOM.tmp"
+            if ( set -o pipefail; tar -cf - node_modules | if [ "$ext" = zst ]; then zstd -q -3 -T4 -c; else gzip -1 -c; fi > "$tmp" ); then
+              mv -f "$tmp" "$nb_nm_dir/$1.tar.$ext" && echo "node_modules saved to runner cache ($1.tar.$ext)"
+            else
+              rm -f "$tmp"; echo "::warning::node_modules cache save failed — ignored"
+            fi
+            # Bound the store: stale temps, >7 days, last 3 keys per repo, 10 GB total.
+            find "$nb_nm_dir" -maxdepth 1 -name '.*.tmp' -mmin +120 -delete 2>/dev/null || true
+            find "$nb_nm_dir" -maxdepth 1 -name '*.tar.*' -mtime +7 -delete 2>/dev/null || true
+            ls -1t "$nb_nm_dir"/*.tar.* 2>/dev/null | tail -n +4 | while IFS= read -r old; do rm -f "$old"; done
+            root="${nb_nm_dir%/*}"
+            total=$(du -sk "$root" 2>/dev/null | cut -f1)
+            while [ "${total:-0}" -gt 10485760 ]; do
+              old=$(ls -1tr "$root"/*/*.tar.* 2>/dev/null | head -1)
+              [ -n "$old" ] || break
+              rm -f "$old"; total=$(du -sk "$root" 2>/dev/null | cut -f1)
+            done
+            return 0
+          }
+          nb_nm_install() {
+            local key
+            key=$(nb_nm_key "$1") || key=""
+            if [ -n "$key" ] && nb_nm_restore "$key"; then return 0; fi
+            npm_ci_retry || return 1
+            if [ -n "$key" ]; then nb_nm_save "$key"; fi
+            return 0
+          }
           npm_ci_retry() {
             local attempt rc
             for attempt in 1 2 3; do
               rm -rf node_modules
-              npm ci --legacy-peer-deps --include=dev && return 0
+              npm ci --legacy-peer-deps --include=dev --prefer-offline --no-audit --no-fund && return 0
               rc=$?
               if [ $attempt -lt 3 ]; then
                 echo "::warning::npm ci failed (exit $rc) on attempt $attempt — retrying after cache clean"
@@ -323,7 +438,7 @@ jobs:
             echo "::error::npm ci failed on every attempt"
             return 1
           }
-          npm_ci_retry
+          nb_nm_install "--legacy-peer-deps --include=dev"
           if [ "$KIND" = fe ] || [ "$KIND" = shell ] || [ "$KIND" = site ]; then
             if [ -d _shell-fe ] && [ "${{ inputs.is_shell }}" != "true" ]; then
               mkdir -p node_modules/@so360
@@ -363,7 +478,7 @@ jobs:
               echo "NEXT_PUBLIC_SUPABASE_URL=${{ secrets.SUPABASE_URL_DEV || secrets.SUPABASE_URL }}"
               echo "NEXT_PUBLIC_SUPABASE_ANON_KEY=${{ secrets.SUPABASE_ANON_KEY_DEV || secrets.SUPABASE_ANON_KEY }}"
             } >> .env.local
-            sed -i '/=$/d; /^$/d' .env.local
+            sed -i.bak '/=$/d; /^$/d' .env.local && rm -f .env.local.bak
             npm run build
             exit 0
           fi
@@ -378,8 +493,8 @@ jobs:
             > .env
           EXTRA_VITE='${{ inputs.vite_env }}'
           [ -n "$EXTRA_VITE" ] && printf '%s\n' "$EXTRA_VITE" >> .env
-          sed -i '/^$/d' .env
-          [ -f .env.production ] && sed -i '/neonbee\.app/d' .env.production
+          sed -i.bak '/^$/d' .env && rm -f .env.bak
+          if [ -f .env.production ]; then sed -i.bak '/neonbee\.app/d' .env.production && rm -f .env.production.bak; fi
           cp .env .env.production.local
           # Some MFEs @import the shell theme by relative path
           # (../../../so360-shell-fe/packages/theme). Link the sibling for this
@@ -426,10 +541,12 @@ jobs:
               # Same service keys as the dev deploy so backends boot and can call
               # each other. Unset secrets become empty lines, stripped below.
               echo "ENCRYPTION_KEY=${{ secrets.ENCRYPTION_KEY }}"
+              echo "VENDOR_BANK_ENC_KEY=${{ secrets.VENDOR_BANK_ENC_KEY }}"
               echo "PAYROLL_ENCRYPTION_KEY=${{ secrets.PAYROLL_ENCRYPTION_KEY }}"
               echo "STOREFRONT_JWT_SECRET=${{ secrets.STOREFRONT_JWT_SECRET }}"
               echo "INTERNAL_SERVICE_KEY=${{ secrets.INTERNAL_SERVICE_KEY }}"
               echo "NOTIFICATION_INTERNAL_KEY=${{ secrets.NOTIFICATION_INTERNAL_KEY }}"
+              echo "EMAIL_INTERNAL_KEY=${{ secrets.EMAIL_INTERNAL_KEY }}"
               echo "INBOX_SERVICE_KEY=${{ secrets.INBOX_SERVICE_KEY }}"
               echo "GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}"
               echo "OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}"
@@ -439,6 +556,12 @@ jobs:
               echo "CHAT_INTERNAL_KEY=${{ secrets.CHAT_INTERNAL_KEY }}"
               echo "DOCS_INTERNAL_SERVICE_KEY=${{ secrets.DOCS_INTERNAL_SERVICE_KEY }}"
               echo "CRM_SYNC_INTERNAL_KEY=${{ secrets.CRM_SYNC_INTERNAL_KEY }}"
+              echo "MARKETING_INTERNAL_KEY=${{ secrets.MARKETING_INTERNAL_KEY }}"
+              echo "MARKETING_TRACKING_SECRET=${{ secrets.MARKETING_TRACKING_SECRET }}"
+              echo "MAINTENANCE_INTERNAL_KEY=${{ secrets.MAINTENANCE_INTERNAL_KEY }}"
+              echo "INVENTORY_INTERNAL_KEY=${{ secrets.INVENTORY_INTERNAL_KEY }}"
+              echo "FULFILLMENT_INTERNAL_KEY=${{ secrets.FULFILLMENT_INTERNAL_KEY }}"
+              echo "TICKETING_INTERNAL_KEY=${{ secrets.TICKETING_INTERNAL_KEY }}"
               echo "CHANNEL_DELEGATION_SECRET=${{ secrets.CHANNEL_DELEGATION_SECRET }}"
               echo "COMPENSATION_ENCRYPTION_KEY=${{ secrets.COMPENSATION_ENCRYPTION_KEY }}"
               echo "PLATFORM_OPS_INTERNAL_KEY=${{ secrets.PLATFORM_OPS_INTERNAL_KEY }}"
@@ -448,7 +571,31 @@ jobs:
               echo "ACCOUNTING_INTERNAL_KEY_2=${{ secrets.ACCOUNTING_INTERNAL_KEY_2 }}"
               echo "PEOPLE_INTERNAL_KEY=${{ secrets.PEOPLE_INTERNAL_KEY }}"
               echo "PEOPLE_INTERNAL_KEY_2=${{ secrets.PEOPLE_INTERNAL_KEY_2 }}"
+              echo "NEURA_INTERNAL_KEY=${{ secrets.NEURA_INTERNAL_KEY }}"
+              echo "NEURA_INTERNAL_KEY_2=${{ secrets.NEURA_INTERNAL_KEY_2 }}"
               echo "SUBSCRIPTION_INTERNAL_KEY=${{ secrets.SUBSCRIPTION_INTERNAL_KEY }}"
+              echo "CORE_INTERNAL_KEY=${{ secrets.CORE_INTERNAL_KEY }}"
+              echo "CORE_PARTNER_INTERNAL_KEY=${{ secrets.CORE_PARTNER_INTERNAL_KEY }}"
+              echo "PARTNER_RESOLVE_INTERNAL_KEY=${{ secrets.PARTNER_RESOLVE_INTERNAL_KEY }}"
+              echo "CONNECT_INTERNAL_KEY=${{ secrets.CONNECT_INTERNAL_KEY }}"
+              echo "CONNECT_INTERNAL_KEYS=${{ secrets.CONNECT_INTERNAL_KEYS }}"
+              echo "CONTENTFORGE_INTEGRATION_KEY=${{ secrets.CONTENTFORGE_INTEGRATION_KEY }}"
+              echo "LUMEN_INTEGRATION_KEY=${{ secrets.LUMEN_INTEGRATION_KEY }}"
+              echo "INNGEST_EVENT_KEY=${{ secrets.INNGEST_EVENT_KEY }}"
+              echo "INNGEST_SIGNING_KEY=${{ secrets.INNGEST_SIGNING_KEY }}"
+              echo "DATAFORSEO_LOGIN=${{ secrets.DATAFORSEO_LOGIN }}"
+              echo "DATAFORSEO_PASSWORD=${{ secrets.DATAFORSEO_PASSWORD }}"
+              echo "TAVILY_API_KEY=${{ secrets.TAVILY_API_KEY }}"
+              echo "FIRECRAWL_API_KEY=${{ secrets.FIRECRAWL_API_KEY }}"
+              echo "EXA_API_KEY=${{ secrets.EXA_API_KEY }}"
+              echo "GOOGLE_OAUTH_CLIENT_ID=${{ secrets.GOOGLE_OAUTH_CLIENT_ID }}"
+              echo "GOOGLE_OAUTH_CLIENT_SECRET=${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}"
+              echo "SENTRY_DSN=${{ secrets.SENTRY_DSN }}"
+              echo "POSTHOG_API_KEY=${{ secrets.POSTHOG_API_KEY }}"
+              echo "LUMEN_SITE_RENDER_KEY=${{ secrets.LUMEN_SITE_RENDER_KEY }}"
+              echo "REVALIDATE_SECRET=${{ secrets.REVALIDATE_SECRET }}"
+              echo "WEB_SEARCH_PROVIDER=${{ secrets.WEB_SEARCH_PROVIDER }}"
+              echo "WEB_SEARCH_API_KEY=${{ secrets.WEB_SEARCH_API_KEY }}"
               echo "BUNNY_STORAGE_HOSTNAME=${{ secrets.BUNNY_STORAGE_HOSTNAME }}"
               echo "BUNNY_STORAGE_ZONE=${{ secrets.BUNNY_STORAGE_ZONE }}"
               echo "BUNNY_ACCESS_KEY=${{ secrets.BUNNY_ACCESS_KEY }}"
@@ -460,9 +607,15 @@ jobs:
               echo "CF_R2_BUCKET=${{ secrets.CF_R2_BUCKET }}"
               echo "CF_R2_PUBLIC_URL=${{ secrets.CF_R2_PUBLIC_URL }}"
               echo "CF_R2_PREFIX=${{ secrets.CF_R2_PREFIX }}"
-              # No outbound-mail, push or Slack keys are passed on purpose:
-              # outbound mail from a preview fails closed instead of reaching
-              # real inboxes (it shares the production database).
+              # Outbound-mail (SES) keys go to the Connect preview only, and only
+              # when the caller passes them (user-approved 2026-10-29). Every
+              # other preview gets no mail, push or Slack keys: it shares the
+              # production database, so its outbound mail fails closed.
+              if [ "${{ inputs.name }}" = connect ]; then
+                [ -z "${{ secrets.AWS_ACCESS_KEY_ID }}" ] || echo "AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}"
+                [ -z "${{ secrets.AWS_SECRET_ACCESS_KEY }}" ] || echo "AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}"
+                [ -z "${{ secrets.AWS_REGION }}" ] || echo "AWS_REGION=${{ secrets.AWS_REGION }}"
+              fi
             } > "$OUT/app/.env"
             EXTRA='${{ inputs.extra_env }}'
             [ -n "$EXTRA" ] && printf '%s\n' "$EXTRA" >> "$OUT/app/.env"
@@ -474,10 +627,11 @@ jobs:
                        timesheet:6012 people:6015 inbox:6017 neura:6018 storefront:6020 flow:6021 \
                        insight:6023 subscription:6026 forms:6027 dailystore:6029 fulfillment:6032 \
                        support:6033 manufacturing:6034 chat:6036 documents:6037 sign:6038 \
-                       mobility:6040 folio:6044 connect:6048 signal:6049; do
-              sed -i -E "s#https?://(127\.0\.0\.1|localhost):${svc##*:}([^0-9]|\$)#https://dev-api.skyoffice360.com/${svc%%:*}\2#g" "$OUT/app/.env"
+                       mobility:6040 folio:6044 connect:6048 signal:6049 marketing:6056 maintenance:6058 \
+                       platform-help:6052 contentforge:6053 lumen:6054; do
+              sed -i.bak -E "s#https?://(127\.0\.0\.1|localhost):${svc##*:}([^0-9]|\$)#https://dev-api.skyoffice360.com/${svc%%:*}\2#g" "$OUT/app/.env" && rm -f "$OUT/app/.env.bak"
             done
-            sed -i '/=$/d' "$OUT/app/.env"
+            sed -i.bak '/=$/d' "$OUT/app/.env" && rm -f "$OUT/app/.env.bak"
           elif [ "$KIND" = next ]; then
             cp -r .next "$OUT/app/.next"
             rm -rf "$OUT/app/.next/cache"
@@ -494,20 +648,49 @@ jobs:
             fi
           else
             cp -r dist/. "$OUT/app/"
+            # @originjs/vite-plugin-federation loads a remote's stylesheet from
+            # <vite base>/<file>.css — WITHOUT the assets/ segment (the remoteEntry
+            # carries `new base + css file`, never assetsDir). Dev serves the CSS at
+            # that root path too; a preview serves /cdn/<name>/ straight from this
+            # tree, where the build keeps the CSS under assets/, so every MFE
+            # rendered on a preview without its stylesheet (404 on
+            # /cdn/<name>/style-*.css). Keep a copy at the root as well.
+            if [ "$KIND" = fe ] && [ "${{ inputs.is_mfe }}" = "true" ]; then
+              find dist/assets -maxdepth 1 -type f -name '*.css' -exec cp {} "$OUT/app/" \;
+            fi
           fi
           echo "out=$OUT" >> "$GITHUB_OUTPUT"
 
       - name: Setup SSH
         env:
-          KEY: ${{ secrets.PREVIEW_SSH_KEY || secrets.CONTABO_SSH_KEY }}
+          # Load BOTH keys. `PREVIEW_SSH_KEY || CONTABO_SSH_KEY` picked only the
+          # first non-empty one, so a repo-level PREVIEW_SSH_KEY minted for the
+          # old runner-hosted previews (so360-command) shadowed CONTABO_SSH_KEY
+          # once PREVIEW_HOST moved to the Dev VM, which does not authorize that
+          # key: every ssh exited 255 "Permission denied (publickey)". The
+          # agent offers each identity in turn, so whichever key the host
+          # authorizes wins.
+          KEY: ${{ secrets.PREVIEW_SSH_KEY }}
+          FALLBACK_KEY: ${{ secrets.CONTABO_SSH_KEY }}
           HOST: ${{ secrets.PREVIEW_HOST }}
         run: |
           mkdir -p ~/.ssh && chmod 700 ~/.ssh
           eval "$(ssh-agent -s)"
-          echo "$KEY" | ssh-add -
+          for k in "$KEY" "$FALLBACK_KEY"; do
+            if [ -n "$k" ]; then
+              printf '%s\n' "$k" | ssh-add - || echo "::warning::an SSH key secret could not be loaded into ssh-agent"
+            fi
+          done
+          ssh-add -l >/dev/null || { echo "::error::no usable SSH key (PREVIEW_SSH_KEY / CONTABO_SSH_KEY) reaches this repo"; exit 1; }
           echo "SSH_AUTH_SOCK=$SSH_AUTH_SOCK" >> "$GITHUB_ENV"
           echo "SSH_AGENT_PID=$SSH_AGENT_PID" >> "$GITHUB_ENV"
           ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts 2>/dev/null
+          # Fail here, with the cause named, instead of as a bare exit 255 in
+          # whichever later step first touches the host.
+          ssh -o BatchMode=yes -o ConnectTimeout=20 "root@$HOST" true || {
+            echo "::error title=Preview host SSH::root@PREVIEW_HOST rejected every loaded key or is unreachable (exit $?) - authorize the CI key on the preview host or fix PREVIEW_HOST"
+            exit 1
+          }
 
       - name: Sync preview host config from secrets
         env:
@@ -537,7 +720,7 @@ jobs:
           HOST: ${{ secrets.PREVIEW_HOST }}
         run: |
           set -euo pipefail
-          IP=$(getent ahostsv4 "$HOST" | awk 'NR==1{print $1}')
+          IP=$( { getent ahostsv4 "$HOST" 2>/dev/null || true; } | awk 'NR==1{print $1}')
           [ -n "$IP" ] || IP=$HOST
           FQDNS="--fqdn 'pr-$SLUG.$PREVIEW_DOMAIN'"
           [ -n "$APP_HOST" ] && FQDNS="$FQDNS --fqdn '$APP_HOST'"
@@ -569,7 +752,7 @@ jobs:
               DEPS="$RUNNER_TEMP/preview-deps"
               rm -rf "$DEPS" && mkdir -p "$DEPS"
               cp package.json package-lock.json "$DEPS/"
-              (cd "$DEPS" && npm ci --omit=dev --legacy-peer-deps)
+              (cd "$DEPS" && npm ci --omit=dev --legacy-peer-deps --prefer-offline --no-audit --no-fund)
               ssh "root@$HOST" "mkdir -p '$INC/_deps/$REPO/$LOCKHASH'"
               rsync -az --delete "$DEPS/node_modules" "root@$HOST:$INC/_deps/$REPO/$LOCKHASH/"
             fi

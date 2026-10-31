@@ -201,6 +201,26 @@ class GivenTheDevVm(BootstrapCase):
         r = self.run_script()
         self.assertEqual(r.returncode, 0, r.stderr)
 
+    def test_when_allow_dev_vm_is_set_then_it_proceeds_and_writes_capped_preview_env(self):
+        with open(os.path.join(self.state, "ips"), "w") as f:
+            f.write(f"{DEV_ORIGIN}\n")
+        self.certs()
+        r = self.run_script(ALLOW_DEV_VM="1")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("preparing the Dev VM as a capped preview host", r.stderr)
+        with open(self.env_file()) as f:
+            env = f.read()
+        for line in ("PREVIEW_SKIP_LOOPBACK=1", "PREVIEW_MAX_AWAKE=6", "PREVIEW_MIN_AVAIL_MB=3072",
+                     "PREVIEW_PM2_MEM=300M", "PREVIEW_PM2_MEM_NEXT=400M"):
+            self.assertIn(line + "\n", env)
+
+    def test_when_allow_dev_vm_is_set_on_another_host_then_no_caps_are_written(self):
+        self.certs()
+        r = self.run_script(ALLOW_DEV_VM="1")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        with open(self.env_file()) as f:
+            self.assertNotIn("PREVIEW_SKIP_LOOPBACK", f.read())
+
 
 class GivenNoNode(BootstrapCase):
     def test_when_node_bin_has_no_node_then_it_asks_for_node_22_and_writes_nothing(self):
