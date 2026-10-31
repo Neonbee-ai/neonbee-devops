@@ -155,6 +155,8 @@ on:
       ACCOUNTING_INTERNAL_KEY_2:   { required: false }
       PEOPLE_INTERNAL_KEY:         { required: false }
       PEOPLE_INTERNAL_KEY_2:       { required: false }
+      NEURA_INTERNAL_KEY:          { required: false }
+      NEURA_INTERNAL_KEY_2:        { required: false }
       SUBSCRIPTION_INTERNAL_KEY:   { required: false }
       CORE_INTERNAL_KEY:           { required: false }
       CORE_PARTNER_INTERNAL_KEY:   { required: false }
@@ -569,6 +571,8 @@ jobs:
               echo "ACCOUNTING_INTERNAL_KEY_2=${{ secrets.ACCOUNTING_INTERNAL_KEY_2 }}"
               echo "PEOPLE_INTERNAL_KEY=${{ secrets.PEOPLE_INTERNAL_KEY }}"
               echo "PEOPLE_INTERNAL_KEY_2=${{ secrets.PEOPLE_INTERNAL_KEY_2 }}"
+              echo "NEURA_INTERNAL_KEY=${{ secrets.NEURA_INTERNAL_KEY }}"
+              echo "NEURA_INTERNAL_KEY_2=${{ secrets.NEURA_INTERNAL_KEY_2 }}"
               echo "SUBSCRIPTION_INTERNAL_KEY=${{ secrets.SUBSCRIPTION_INTERNAL_KEY }}"
               echo "CORE_INTERNAL_KEY=${{ secrets.CORE_INTERNAL_KEY }}"
               echo "CORE_PARTNER_INTERNAL_KEY=${{ secrets.CORE_PARTNER_INTERNAL_KEY }}"
@@ -623,7 +627,8 @@ jobs:
                        timesheet:6012 people:6015 inbox:6017 neura:6018 storefront:6020 flow:6021 \
                        insight:6023 subscription:6026 forms:6027 dailystore:6029 fulfillment:6032 \
                        support:6033 manufacturing:6034 chat:6036 documents:6037 sign:6038 \
-                       mobility:6040 folio:6044 connect:6048 signal:6049 marketing:6056 maintenance:6058; do
+                       mobility:6040 folio:6044 connect:6048 signal:6049 marketing:6056 maintenance:6058 \
+                       platform-help:6052 contentforge:6053 lumen:6054; do
               sed -i.bak -E "s#https?://(127\.0\.0\.1|localhost):${svc##*:}([^0-9]|\$)#https://dev-api.skyoffice360.com/${svc%%:*}\2#g" "$OUT/app/.env" && rm -f "$OUT/app/.env.bak"
             done
             sed -i.bak '/=$/d' "$OUT/app/.env" && rm -f "$OUT/app/.env.bak"
