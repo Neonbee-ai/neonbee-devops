@@ -1752,7 +1752,7 @@ jobs:
           fi
 
           if [ -d "_shell-fe" ]; then
-            for pkg in shell-context design-system event-bus formatters theme; do
+            for pkg in shell-context design-system event-bus formatters cross-link theme; do
               # Re-ensure @so360 dir before every copy — a previous package's
               # inner `npm install` can hoist/reorganise deps and silently remove
               # the parent scoped directory, causing the next cp to fail with
