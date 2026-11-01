@@ -586,6 +586,55 @@ class GivenSiblingBackendsInOnePreview(PreviewCtlCase):
         self.deploy_be("so360-core", "core")
         self.assertFalse(any(c.startswith("pm2 restart") for c in self.calls()))
 
+    def move_port(self, repo, port):
+        reg = self.registry()
+        reg["previews"][SLUG]["components"][repo]["port"] = port
+        self.write_registry(reg)
+
+    def linked_crm(self):
+        self.deploy_be("so360-core", "core")                       # core → :7100
+        self.upload_be("so360-crm-be", env_text=self.DEV_CORE)
+        self.ok(*self.deploy("so360-crm-be", "be", "crm", extra=("--lockhash", HASH)))
+        self.clear_calls()
+
+    def test_when_a_sibling_moves_to_a_new_port_then_dependents_follow_and_restart(self):
+        self.linked_crm()
+        self.move_port("so360-core", 7104)
+        self.deploy_be("so360-core", "core")
+        lines = self.read_env("crm")
+        self.assertIn("CORE_BE_URL=http://127.0.0.1:7104", lines)
+        self.assertIn("CORE_API=http://127.0.0.1:7104/v1", lines)
+        self.assertIn("COREX=https://dev-api.skyoffice360.com/corex", lines)
+        restarts = [c for c in self.calls() if c.startswith("pm2 restart")]
+        self.assertEqual(len(restarts), 1)
+        self.assertTrue(restarts[0].startswith("pm2 restart pv-feat-crm-owner-crm "))
+
+    def test_when_relinked_twice_then_the_env_is_unchanged_and_nothing_restarts(self):
+        self.linked_crm()
+        before = self.read_env("crm")
+        self.deploy_be("so360-core", "core")
+        self.assertEqual(self.read_env("crm"), before)
+        self.assertFalse(any(c.startswith("pm2 restart") for c in self.calls()))
+
+    def test_when_an_unmarked_loopback_url_is_stale_then_it_is_matched_by_var_name(self):
+        self.linked_crm()
+        with open(self.p(SLUG, "be", "crm", ".env"), "w") as f:     # pre-marker link
+            f.write("CORE_BE_URL=http://127.0.0.1:7199/v1\nAPP_URL=http://127.0.0.1:7199\n")
+        self.deploy_be("so360-core", "core")
+        lines = self.read_env("crm")
+        self.assertIn("CORE_BE_URL=http://127.0.0.1:7100/v1", lines)
+        self.assertIn("APP_URL=http://127.0.0.1:7199", lines)
+        self.assertTrue(any(c.startswith("pm2 restart pv-feat-crm-owner-crm ") for c in self.calls()))
+
+    def test_when_a_linked_sibling_leaves_then_the_url_falls_back_to_dev_api(self):
+        self.linked_crm()
+        reg = self.registry()
+        del reg["previews"][SLUG]["components"]["so360-core"]
+        self.write_registry(reg)
+        self.upload_be("so360-crm-be", env_text="CORE_BE_URL=http://127.0.0.1:7100\n# preview-link CORE_BE_URL=core\n")
+        self.ok(*self.deploy("so360-crm-be", "be", "crm", extra=("--lockhash", HASH)))
+        self.assertIn("CORE_BE_URL=https://dev-api.skyoffice360.com/core", self.read_env("crm"))
+
 
 # ── Sleep / wake ─────────────────────────────────────────────────────────────
 class GivenARunningPreview(PreviewCtlCase):
