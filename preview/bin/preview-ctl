@@ -61,6 +61,11 @@ PM2_MEM_NEXT=${PREVIEW_PM2_MEM_NEXT:-600M}
 MIN_AVAIL_MB=${PREVIEW_MIN_AVAIL_MB:-0}
 MAX_AWAKE=${PREVIEW_MAX_AWAKE:-0}
 PIN=${PREVIEW_PIN:-}
+# PREVIEW_PM2_MEM_OVERRIDES: space-separated name=size pairs for backends that
+# need more than PM2_MEM (e.g. "core=600M"); applies to every slug.
+MEM_OVERRIDES=${PREVIEW_PM2_MEM_OVERRIDES:-}
+is_pinned() { [[ " $PIN " == *" $1 "* ]]; }
+be_mem() { local p; for p in $MEM_OVERRIDES; do [ "${p%%=*}" = "$1" ] && { echo "${p#*=}"; return; }; done; echo "$PM2_MEM"; }
 MEMINFO=${PREVIEW_MEMINFO:-/proc/meminfo}
 # On the Dev VM develop's services already listen on their loopback ports, so
 # the loopback proxies for Next previews must not be rendered (they would clash).
@@ -283,7 +288,7 @@ start_backend() {
     main=$(find "$dir/dist" -name main.js -not -path '*/node_modules/*' | head -1)
     [ -n "$main" ] || die "no dist/**/main.js in $dir"
     PORT=$port pm2 start "$main" --name "$pname" --cwd "$dir" --instances 1 \
-      --max-memory-restart "$PM2_MEM" --time --update-env >/dev/null
+      --max-memory-restart "$(be_mem "$name")" --time --update-env >/dev/null
   fi
   local i
   for i in $(seq 1 30); do
@@ -443,6 +448,13 @@ cmd_remove() {
     esac
   done
   valid_slug "$slug"
+  # A pinned long-lived preview (PREVIEW_PIN) survives merge/branch teardown and
+  # the reconcile idle sweep; PREVIEW_FORCE_REMOVE=1 removes it anyway.
+  if is_pinned "$slug" && [ "${PREVIEW_FORCE_REMOVE:-0}" != 1 ]; then
+    echo "::notice::preview $slug is pinned (PREVIEW_PIN); not removed (PREVIEW_FORCE_REMOVE=1 overrides)" >&2
+    echo "REMOVED_PREVIEW=0"
+    return 0
+  fi
   local base="$ROOT/$slug"
   if [ -n "$repo" ]; then
     valid_repo "$repo"
