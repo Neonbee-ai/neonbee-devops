@@ -1,0 +1,46 @@
+# One-off: prod primary VM 68.183.86.248 is down. Repoint neonbee.app A records to the HA VM
+# (proxied, HA serves a self-signed origin cert) and disable prod-vm in the HA failover pool if the token can.
+name: ops-cf-neonbee-app-ha
+on:
+  push:
+    branches: [ops/cf-neonbee-app-ha]
+  workflow_dispatch:
+permissions: {}
+jobs:
+  dns:
+    runs-on: [self-hosted, runner-vm]
+    steps:
+      - name: Repoint A records to HA
+        env:
+          T1: ${{ secrets.CF_SAAS_API_TOKEN }}
+          T2: ${{ secrets.CF_PREVIEW_API_TOKEN }}
+          ZONE_NAME: neonbee.app
+          OLD_IP: 68.183.86.248
+          HA_IP: 84.247.131.148
+          POOL_ID: 04a6202eccaff3bff1ce2e222fa247ef
+        run: |
+          set -euo pipefail
+          API=https://api.cloudflare.com/client/v4
+          for T in "$T1" "$T2"; do
+            [ -n "$T" ] || continue
+            H=(-H "Authorization: Bearer $T" -H "Content-Type: application/json")
+            ZJ=$(curl -s "${H[@]}" "$API/zones?name=$ZONE_NAME")
+            Z=$(echo "$ZJ" | jq -r '.result[0].id // empty'); ACC=$(echo "$ZJ" | jq -r '.result[0].account.id // empty')
+            [ -n "$Z" ] || { echo "token cannot see $ZONE_NAME, trying next"; continue; }
+            echo "== records on $OLD_IP before (rollback: set content back to $OLD_IP)"
+            RECS=$(curl -s "${H[@]}" "$API/zones/$Z/dns_records?type=A&per_page=500")
+            echo "$RECS" | jq -c --arg o "$OLD_IP" '.result[] | select(.content==$o) | {id, name, content, proxied}'
+            FAIL=0
+            for ID in $(echo "$RECS" | jq -r --arg o "$OLD_IP" '.result[] | select(.content==$o) | .id'); do
+              R=$(curl -s -X PATCH "${H[@]}" "$API/zones/$Z/dns_records/$ID" -d "{\"content\":\"$HA_IP\",\"proxied\":true}")
+              echo "$R" | jq -c '{success, errors, rec: (.result | {name, content, proxied})}'
+              [ "$(echo "$R" | jq -r .success)" = true ] || FAIL=1
+            done
+            echo "== LB pool: disable prod-vm (best effort)"
+            curl -s "${H[@]}" "$API/accounts/$ACC/load_balancers/pools/$POOL_ID" | jq -c '{success, errors, origins: [.result.origins[]? | {name, address, enabled}]}' || true
+            curl -s -X PATCH "${H[@]}" "$API/accounts/$ACC/load_balancers/pools/$POOL_ID" \
+              -d "{\"origins\":[{\"name\":\"prod-vm\",\"address\":\"$OLD_IP\",\"enabled\":false},{\"name\":\"ha-vm\",\"address\":\"$HA_IP\",\"enabled\":true}]}" | jq -c '{success, errors}' || true
+            [ $FAIL = 0 ] || { echo "some DNS updates failed"; exit 1; }
+            exit 0
+          done
+          echo "no token could write $ZONE_NAME"; exit 1
