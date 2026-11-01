@@ -1616,16 +1616,21 @@ jobs:
       # without the Comb classes while CI stayed GREEN. Rebuild it from source
       # here and FAIL on a build error or a stale/missing dist/.src-hash stamp
       # (shell-fe scripts/src-hash.cjs, the same check withComb.cjs runs).
-      - name: Rebuild design system (fail on stale dist)
+      - name: Rebuild shared shell packages (fail on stale dist)
         if: inputs.deploy_type == 'vite-mfe' && !inputs.is_shell && inputs.needs_shell_packages
         run: |
-          DS="$GITHUB_WORKSPACE/_shell-fe/packages/design-system"
-          [ -d "$DS" ] || { echo "::error::_shell-fe/packages/design-system missing"; exit 1; }
-          cd "$DS"
-          npm install --legacy-peer-deps --include=dev --prefer-offline --no-audit --no-fund \
-            || { echo "::error::npm install failed in @so360/design-system"; exit 1; }
-          npm run build || { echo "::error::@so360/design-system build failed — refusing to ship MFE CSS from a stale dist"; exit 1; }
-          node scripts/src-hash.cjs --check || { echo "::error::@so360/design-system dist is stale after rebuild"; exit 1; }
+          # Committed dists go stale (shell-context since 2026-10-17 lacked
+          # useDatasetSchema → MFE tsc RED). Build every shared package from
+          # source, same order as the dev lane, and fail on any error.
+          PKGS="$GITHUB_WORKSPACE/_shell-fe/packages"
+          for p in shell-context design-system event-bus formatters; do
+            [ -d "$PKGS/$p" ] || { echo "::error::_shell-fe/packages/$p missing"; exit 1; }
+            ( cd "$PKGS/$p" \
+              && npm install --legacy-peer-deps --include=dev --prefer-offline --no-audit --no-fund \
+              && npm run build ) || { echo "::error::@so360/$p build failed — refusing to ship from a stale dist"; exit 1; }
+          done
+          ( cd "$PKGS/design-system" && node scripts/src-hash.cjs --check ) \
+            || { echo "::error::@so360/design-system dist is stale after rebuild"; exit 1; }
 
       - name: Build (vite-mfe)
         if: inputs.deploy_type == 'vite-mfe' && !inputs.is_shell
