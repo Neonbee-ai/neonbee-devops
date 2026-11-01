@@ -102,6 +102,23 @@ on:
       NEURA_INTERNAL_KEY_2:         { required: false }
       CONNECT_INTERNAL_KEY:         { required: false }
       CONNECT_INTERNAL_KEYS:        { required: false }
+      CONTENTFORGE_INTEGRATION_KEY: { required: false }
+      LUMEN_INTEGRATION_KEY: { required: false }
+      INNGEST_EVENT_KEY: { required: false }
+      INNGEST_SIGNING_KEY: { required: false }
+      DATAFORSEO_LOGIN: { required: false }
+      DATAFORSEO_PASSWORD: { required: false }
+      TAVILY_API_KEY: { required: false }
+      FIRECRAWL_API_KEY: { required: false }
+      EXA_API_KEY: { required: false }
+      GOOGLE_OAUTH_CLIENT_ID: { required: false }
+      GOOGLE_OAUTH_CLIENT_SECRET: { required: false }
+      SENTRY_DSN: { required: false }
+      POSTHOG_API_KEY: { required: false }
+      LUMEN_SITE_RENDER_KEY: { required: false }
+      REVALIDATE_SECRET: { required: false }
+      WEB_SEARCH_PROVIDER: { required: false }
+      WEB_SEARCH_API_KEY: { required: false }
       MARKETING_INTERNAL_KEY:       { required: false }
       MARKETING_TRACKING_SECRET:    { required: false }
       FLOW_INTERNAL_KEY:           { required: false }
@@ -1090,6 +1107,23 @@ jobs:
             [ -n "${{ secrets.NEURA_INTERNAL_KEY_2 }}" ]  && echo "NEURA_INTERNAL_KEY_2=${{ secrets.NEURA_INTERNAL_KEY_2 }}"                    >> .env.ci
             [ -n "${{ secrets.CONNECT_INTERNAL_KEY }}" ]  && echo "CONNECT_INTERNAL_KEY=${{ secrets.CONNECT_INTERNAL_KEY }}"                    >> .env.ci
             [ -n "${{ secrets.CONNECT_INTERNAL_KEYS }}" ] && echo "CONNECT_INTERNAL_KEYS=${{ secrets.CONNECT_INTERNAL_KEYS }}"                   >> .env.ci
+            [ -n "${{ secrets.CONTENTFORGE_INTEGRATION_KEY }}" ] && echo "CONTENTFORGE_INTEGRATION_KEY=${{ secrets.CONTENTFORGE_INTEGRATION_KEY }}" >> .env.ci
+            [ -n "${{ secrets.LUMEN_INTEGRATION_KEY }}" ] && echo "LUMEN_INTEGRATION_KEY=${{ secrets.LUMEN_INTEGRATION_KEY }}" >> .env.ci
+            [ -n "${{ secrets.INNGEST_EVENT_KEY }}" ] && echo "INNGEST_EVENT_KEY=${{ secrets.INNGEST_EVENT_KEY }}" >> .env.ci
+            [ -n "${{ secrets.INNGEST_SIGNING_KEY }}" ] && echo "INNGEST_SIGNING_KEY=${{ secrets.INNGEST_SIGNING_KEY }}" >> .env.ci
+            [ -n "${{ secrets.DATAFORSEO_LOGIN }}" ] && echo "DATAFORSEO_LOGIN=${{ secrets.DATAFORSEO_LOGIN }}" >> .env.ci
+            [ -n "${{ secrets.DATAFORSEO_PASSWORD }}" ] && echo "DATAFORSEO_PASSWORD=${{ secrets.DATAFORSEO_PASSWORD }}" >> .env.ci
+            [ -n "${{ secrets.TAVILY_API_KEY }}" ] && echo "TAVILY_API_KEY=${{ secrets.TAVILY_API_KEY }}" >> .env.ci
+            [ -n "${{ secrets.FIRECRAWL_API_KEY }}" ] && echo "FIRECRAWL_API_KEY=${{ secrets.FIRECRAWL_API_KEY }}" >> .env.ci
+            [ -n "${{ secrets.EXA_API_KEY }}" ] && echo "EXA_API_KEY=${{ secrets.EXA_API_KEY }}" >> .env.ci
+            [ -n "${{ secrets.GOOGLE_OAUTH_CLIENT_ID }}" ] && echo "GOOGLE_OAUTH_CLIENT_ID=${{ secrets.GOOGLE_OAUTH_CLIENT_ID }}" >> .env.ci
+            [ -n "${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}" ] && echo "GOOGLE_OAUTH_CLIENT_SECRET=${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}" >> .env.ci
+            [ -n "${{ secrets.SENTRY_DSN }}" ] && echo "SENTRY_DSN=${{ secrets.SENTRY_DSN }}" >> .env.ci
+            [ -n "${{ secrets.POSTHOG_API_KEY }}" ] && echo "POSTHOG_API_KEY=${{ secrets.POSTHOG_API_KEY }}" >> .env.ci
+            [ -n "${{ secrets.LUMEN_SITE_RENDER_KEY }}" ] && echo "LUMEN_SITE_RENDER_KEY=${{ secrets.LUMEN_SITE_RENDER_KEY }}" >> .env.ci
+            [ -n "${{ secrets.REVALIDATE_SECRET }}" ] && echo "REVALIDATE_SECRET=${{ secrets.REVALIDATE_SECRET }}" >> .env.ci
+            [ -n "${{ secrets.WEB_SEARCH_PROVIDER }}" ] && echo "WEB_SEARCH_PROVIDER=${{ secrets.WEB_SEARCH_PROVIDER }}" >> .env.ci
+            [ -n "${{ secrets.WEB_SEARCH_API_KEY }}" ] && echo "WEB_SEARCH_API_KEY=${{ secrets.WEB_SEARCH_API_KEY }}" >> .env.ci
             [ -n "${{ secrets.MARKETING_INTERNAL_KEY }}" ] && echo "MARKETING_INTERNAL_KEY=${{ secrets.MARKETING_INTERNAL_KEY }}"                  >> .env.ci
             [ -n "${{ secrets.MARKETING_TRACKING_SECRET }}" ] && echo "MARKETING_TRACKING_SECRET=${{ secrets.MARKETING_TRACKING_SECRET }}"               >> .env.ci
             [ -n "${{ secrets.GEMINI_API_KEY }}" ]              && echo "GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}"                           >> .env.ci
@@ -1271,6 +1305,23 @@ jobs:
             [ -n "${{ secrets.NEURA_INTERNAL_KEY_2 }}" ]  && echo "NEURA_INTERNAL_KEY_2=${{ secrets.NEURA_INTERNAL_KEY_2 }}"                    >> .env.ci
             [ -n "${{ secrets.CONNECT_INTERNAL_KEY }}" ]  && echo "CONNECT_INTERNAL_KEY=${{ secrets.CONNECT_INTERNAL_KEY }}"                    >> .env.ci
             [ -n "${{ secrets.CONNECT_INTERNAL_KEYS }}" ] && echo "CONNECT_INTERNAL_KEYS=${{ secrets.CONNECT_INTERNAL_KEYS }}"                   >> .env.ci
+            [ -n "${{ secrets.CONTENTFORGE_INTEGRATION_KEY }}" ] && echo "CONTENTFORGE_INTEGRATION_KEY=${{ secrets.CONTENTFORGE_INTEGRATION_KEY }}" >> .env.ci
+            [ -n "${{ secrets.LUMEN_INTEGRATION_KEY }}" ] && echo "LUMEN_INTEGRATION_KEY=${{ secrets.LUMEN_INTEGRATION_KEY }}" >> .env.ci
+            [ -n "${{ secrets.INNGEST_EVENT_KEY }}" ] && echo "INNGEST_EVENT_KEY=${{ secrets.INNGEST_EVENT_KEY }}" >> .env.ci
+            [ -n "${{ secrets.INNGEST_SIGNING_KEY }}" ] && echo "INNGEST_SIGNING_KEY=${{ secrets.INNGEST_SIGNING_KEY }}" >> .env.ci
+            [ -n "${{ secrets.DATAFORSEO_LOGIN }}" ] && echo "DATAFORSEO_LOGIN=${{ secrets.DATAFORSEO_LOGIN }}" >> .env.ci
+            [ -n "${{ secrets.DATAFORSEO_PASSWORD }}" ] && echo "DATAFORSEO_PASSWORD=${{ secrets.DATAFORSEO_PASSWORD }}" >> .env.ci
+            [ -n "${{ secrets.TAVILY_API_KEY }}" ] && echo "TAVILY_API_KEY=${{ secrets.TAVILY_API_KEY }}" >> .env.ci
+            [ -n "${{ secrets.FIRECRAWL_API_KEY }}" ] && echo "FIRECRAWL_API_KEY=${{ secrets.FIRECRAWL_API_KEY }}" >> .env.ci
+            [ -n "${{ secrets.EXA_API_KEY }}" ] && echo "EXA_API_KEY=${{ secrets.EXA_API_KEY }}" >> .env.ci
+            [ -n "${{ secrets.GOOGLE_OAUTH_CLIENT_ID }}" ] && echo "GOOGLE_OAUTH_CLIENT_ID=${{ secrets.GOOGLE_OAUTH_CLIENT_ID }}" >> .env.ci
+            [ -n "${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}" ] && echo "GOOGLE_OAUTH_CLIENT_SECRET=${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}" >> .env.ci
+            [ -n "${{ secrets.SENTRY_DSN }}" ] && echo "SENTRY_DSN=${{ secrets.SENTRY_DSN }}" >> .env.ci
+            [ -n "${{ secrets.POSTHOG_API_KEY }}" ] && echo "POSTHOG_API_KEY=${{ secrets.POSTHOG_API_KEY }}" >> .env.ci
+            [ -n "${{ secrets.LUMEN_SITE_RENDER_KEY }}" ] && echo "LUMEN_SITE_RENDER_KEY=${{ secrets.LUMEN_SITE_RENDER_KEY }}" >> .env.ci
+            [ -n "${{ secrets.REVALIDATE_SECRET }}" ] && echo "REVALIDATE_SECRET=${{ secrets.REVALIDATE_SECRET }}" >> .env.ci
+            [ -n "${{ secrets.WEB_SEARCH_PROVIDER }}" ] && echo "WEB_SEARCH_PROVIDER=${{ secrets.WEB_SEARCH_PROVIDER }}" >> .env.ci
+            [ -n "${{ secrets.WEB_SEARCH_API_KEY }}" ] && echo "WEB_SEARCH_API_KEY=${{ secrets.WEB_SEARCH_API_KEY }}" >> .env.ci
             [ -n "${{ secrets.MARKETING_INTERNAL_KEY }}" ] && echo "MARKETING_INTERNAL_KEY=${{ secrets.MARKETING_INTERNAL_KEY }}"                  >> .env.ci
             [ -n "${{ secrets.MARKETING_TRACKING_SECRET }}" ] && echo "MARKETING_TRACKING_SECRET=${{ secrets.MARKETING_TRACKING_SECRET }}"               >> .env.ci
             [ -n "${{ secrets.GEMINI_API_KEY }}" ]              && echo "GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}"                           >> .env.ci
