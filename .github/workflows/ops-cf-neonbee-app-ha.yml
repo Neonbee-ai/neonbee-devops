@@ -28,7 +28,9 @@ jobs:
             Z=$(echo "$ZJ" | jq -r '.result[0].id // empty'); ACC=$(echo "$ZJ" | jq -r '.result[0].account.id // empty')
             [ -n "$Z" ] || { echo "token cannot see $ZONE_NAME, trying next"; continue; }
             echo "== records on $OLD_IP before (rollback: set content back to $OLD_IP)"
-            RECS=$(curl -s "${H[@]}" "$API/zones/$Z/dns_records?type=A&per_page=500")
+            RECS=$(curl -s "${H[@]}" "$API/zones/$Z/dns_records?content=$OLD_IP&per_page=100")
+            echo "$RECS" | jq -c "{success, errors, count: (.result|length?)}"
+            [ "$(echo "$RECS" | jq -r .success)" = true ] || { echo "token cannot read DNS, trying next"; continue; }
             echo "$RECS" | jq -c --arg o "$OLD_IP" '.result[] | select(.content==$o) | {id, name, content, proxied}'
             FAIL=0
             for ID in $(echo "$RECS" | jq -r --arg o "$OLD_IP" '.result[] | select(.content==$o) | .id'); do
