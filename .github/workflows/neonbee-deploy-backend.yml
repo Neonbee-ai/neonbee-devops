@@ -130,6 +130,7 @@ on:
       DOCS_INTERNAL_SERVICE_KEY:    { required: false }
       CRM_SYNC_INTERNAL_KEY:        { required: false }
       MAINTENANCE_INTERNAL_KEY:        { required: false }
+      SUPPORT_INTERNAL_KEY:         { required: false }
       PLATFORM_OPS_INTERNAL_KEY:    { required: false }
       PROJECTS_INTERNAL_KEY:        { required: false }
       MANUFACTURING_INTERNAL_KEY:   { required: false }
@@ -195,7 +196,7 @@ jobs:
 
   # ── Gate: single merged job ────────────────────────────────────────────────
   gate:
-    runs-on: [self-hosted, runner-vm, lane-dev]  # TEMP release lane — revert after release
+    runs-on: [self-hosted, runner-vm]
     steps:
       - uses: actions/checkout@v4.3.1
         with:
@@ -475,7 +476,7 @@ jobs:
   # ── Parallel (both need gate) ──────────────────────────────────────────────
   contract-tests:
     name: API Contract Tests
-    runs-on: [self-hosted, runner-vm, lane-dev]  # TEMP release lane — revert after release
+    runs-on: [self-hosted, runner-vm]
     needs: [gate]
     steps:
       - uses: actions/checkout@v4.3.1
@@ -660,7 +661,7 @@ jobs:
 
   integration-tests:
     name: Integration Tests
-    runs-on: [self-hosted, runner-vm, lane-dev]  # TEMP release lane — revert after release
+    runs-on: [self-hosted, runner-vm]
     needs: [gate]
     steps:
       - uses: actions/checkout@v4.3.1
@@ -853,7 +854,7 @@ jobs:
     needs: [gate, contract-tests, integration-tests]
     # Linux only: the Mac Mini gate runners also carry `contabo` (they run the
     # gate), but this job builds + rsyncs to the VMs and assumes a Linux host.
-    runs-on: [self-hosted, runner-vm, lane-dev]  # TEMP release lane — revert after release
+    runs-on: [self-hosted, runner-vm]
     timeout-minutes: 20
     concurrency:
       group: neonbee-deploy-${{ inputs.service_name }}-${{ github.ref_name }}
@@ -1135,6 +1136,7 @@ jobs:
             [ -n "${{ secrets.DOCS_INTERNAL_SERVICE_KEY }}" ]   && echo "DOCS_INTERNAL_SERVICE_KEY=${{ secrets.DOCS_INTERNAL_SERVICE_KEY }}"     >> .env.ci
             [ -n "${{ secrets.CRM_SYNC_INTERNAL_KEY }}" ]       && echo "CRM_SYNC_INTERNAL_KEY=${{ secrets.CRM_SYNC_INTERNAL_KEY }}"             >> .env.ci
             [ -n "${{ secrets.MAINTENANCE_INTERNAL_KEY }}" ]       && echo "MAINTENANCE_INTERNAL_KEY=${{ secrets.MAINTENANCE_INTERNAL_KEY }}"             >> .env.ci
+            [ -n "${{ secrets.SUPPORT_INTERNAL_KEY }}" ]           && echo "SUPPORT_INTERNAL_KEY=${{ secrets.SUPPORT_INTERNAL_KEY }}"                     >> .env.ci
             # Channel Program: HS256 secret Core signs partner delegated-access session tokens with. Absent = /access/session returns 503 and no partner can enter a client tenant.
             [ -n "${{ secrets.CHANNEL_DELEGATION_SECRET }}" ] && echo "CHANNEL_DELEGATION_SECRET=${{ secrets.CHANNEL_DELEGATION_SECRET }}" >> .env.ci
             # Channel Program: AES-256-GCM key Subscription encrypts channel payout bank details with. Absent = payout-profile writes are refused (fail-closed).
@@ -1333,6 +1335,7 @@ jobs:
             [ -n "${{ secrets.VAPID_PRIVATE_KEY }}" ]           && echo "VAPID_PRIVATE_KEY=${{ secrets.VAPID_PRIVATE_KEY }}"                     >> .env.ci
             [ -n "${{ secrets.CRM_SYNC_INTERNAL_KEY }}" ]       && echo "CRM_SYNC_INTERNAL_KEY=${{ secrets.CRM_SYNC_INTERNAL_KEY }}"             >> .env.ci
             [ -n "${{ secrets.MAINTENANCE_INTERNAL_KEY }}" ]       && echo "MAINTENANCE_INTERNAL_KEY=${{ secrets.MAINTENANCE_INTERNAL_KEY }}"             >> .env.ci
+            [ -n "${{ secrets.SUPPORT_INTERNAL_KEY }}" ]           && echo "SUPPORT_INTERNAL_KEY=${{ secrets.SUPPORT_INTERNAL_KEY }}"                     >> .env.ci
             # Channel Program: HS256 secret Core signs partner delegated-access session tokens with. Absent = /access/session returns 503 and no partner can enter a client tenant.
             [ -n "${{ secrets.CHANNEL_DELEGATION_SECRET }}" ] && echo "CHANNEL_DELEGATION_SECRET=${{ secrets.CHANNEL_DELEGATION_SECRET }}" >> .env.ci
             # Channel Program: AES-256-GCM key Subscription encrypts channel payout bank details with. Absent = payout-profile writes are refused (fail-closed).
@@ -1440,7 +1443,7 @@ jobs:
     name: Notify Teams
     needs: [gate, contract-tests, integration-tests, build-deploy]
     if: always()
-    runs-on: [self-hosted, runner-vm, lane-dev]  # TEMP release lane — revert after release
+    runs-on: [self-hosted, runner-vm]
     steps:
       - name: Post pipeline result to Teams
         env:
