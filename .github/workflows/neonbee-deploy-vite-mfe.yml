@@ -495,11 +495,22 @@ jobs:
                 if ! ( cd "$GITHUB_WORKSPACE/_shell-fe/packages/$p" \
                        && npm install --legacy-peer-deps --include=dev --no-audit --no-fund --prefer-offline >/dev/null 2>&1 \
                        && npm run build ); then
+                  # MFE Tailwind CSS is generated from the DS dist: a stale one
+                  # ships MFEs without the Comb classes while CI stays GREEN.
+                  if [ "$p" = design-system ]; then
+                    echo "::error::@so360/design-system build failed — refusing to ship MFE CSS from a stale dist"
+                    exit 1
+                  fi
                   echo "::warning::could not rebuild @so360/$p — restoring its committed dist"
                   ( cd "$GITHUB_WORKSPACE/_shell-fe" && git checkout -- "packages/$p/dist" ) 2>/dev/null || true
                 fi
               fi
             done
+            # Same freshness check withComb.cjs runs (shell-fe scripts/src-hash.cjs).
+            if [ -d "$GITHUB_WORKSPACE/_shell-fe/packages/design-system" ]; then
+              node "$GITHUB_WORKSPACE/_shell-fe/packages/design-system/scripts/src-hash.cjs" --check \
+                || { echo "::error::@so360/design-system dist is stale or unstamped"; exit 1; }
+            fi
           else
             # Guard: never remove a path that CONTAINS the live checkout — for
             # the shell-fe repo that path is the PARENT of $GITHUB_WORKSPACE.
@@ -728,11 +739,22 @@ jobs:
                 if ! ( cd "$GITHUB_WORKSPACE/_shell-fe/packages/$p" \
                        && npm install --legacy-peer-deps --include=dev --no-audit --no-fund --prefer-offline >/dev/null 2>&1 \
                        && npm run build ); then
+                  # MFE Tailwind CSS is generated from the DS dist: a stale one
+                  # ships MFEs without the Comb classes while CI stays GREEN.
+                  if [ "$p" = design-system ]; then
+                    echo "::error::@so360/design-system build failed — refusing to ship MFE CSS from a stale dist"
+                    exit 1
+                  fi
                   echo "::warning::could not rebuild @so360/$p — restoring its committed dist"
                   ( cd "$GITHUB_WORKSPACE/_shell-fe" && git checkout -- "packages/$p/dist" ) 2>/dev/null || true
                 fi
               fi
             done
+            # Same freshness check withComb.cjs runs (shell-fe scripts/src-hash.cjs).
+            if [ -d "$GITHUB_WORKSPACE/_shell-fe/packages/design-system" ]; then
+              node "$GITHUB_WORKSPACE/_shell-fe/packages/design-system/scripts/src-hash.cjs" --check \
+                || { echo "::error::@so360/design-system dist is stale or unstamped"; exit 1; }
+            fi
           else
             # Guard: never remove a path that CONTAINS the live checkout — for
             # the shell-fe repo that path is the PARENT of $GITHUB_WORKSPACE.

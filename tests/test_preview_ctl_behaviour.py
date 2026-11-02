@@ -1278,5 +1278,48 @@ class GivenTheHostNginxConf(PreviewCtlCase):
         self.assertIn("proxy_pass http://127.0.0.1:7100;", conf)
 
 
+class GivenAPerServiceMemoryOverride(PreviewCtlCase):
+    def setUp(self):
+        super().setUp()
+        self.env["PREVIEW_PM2_MEM_OVERRIDES"] = "core=600M other=450M"
+
+    def test_when_an_overridden_backend_starts_then_it_gets_its_own_memory_cap(self):
+        self.deploy_be("so360-core-be", "core")
+        start = [c for c in self.calls() if c.startswith("pm2 start")]
+        self.assertIn("--max-memory-restart 600M", start[-1])
+
+    def test_when_a_backend_without_override_starts_then_it_keeps_the_default_cap(self):
+        self.deploy_be()
+        start = [c for c in self.calls() if c.startswith("pm2 start")]
+        self.assertIn("--max-memory-restart 300M", start[-1])
+
+
+class GivenAPinnedPreview(PreviewCtlCase):
+    def setUp(self):
+        super().setUp()
+        self.env["PREVIEW_PIN"] = "other-slug " + SLUG
+        self.deploy_fe("so360-crm-fe", "crm")
+        self.deploy_be("so360-crm-be", "crm")
+        self.clear_calls()
+
+    def test_when_a_component_is_removed_then_it_is_kept(self):
+        r = self.ok("remove", "--slug", SLUG, "--repo", "so360-crm-be")
+        self.assertEqual(r.stdout.strip().splitlines()[-1], "REMOVED_PREVIEW=0")
+        self.assertIn("is pinned", r.stderr)
+        self.assertNotIn("pm2 delete pv-feat-crm-owner-crm PORT=", self.calls())
+        self.assertIn("so360-crm-be", self.registry()["previews"][SLUG]["components"])
+
+    def test_when_the_whole_preview_is_removed_then_it_is_kept(self):
+        r = self.ok("remove", "--slug", SLUG)
+        self.assertEqual(r.stdout.strip().splitlines()[-1], "REMOVED_PREVIEW=0")
+        self.assertNotIn("REMOVED_HOST=", r.stdout)
+        self.assertIn(SLUG, self.registry()["previews"])
+
+    def test_when_removal_is_forced_then_the_pinned_preview_goes(self):
+        r = self.ok("remove", "--slug", SLUG, env={"PREVIEW_FORCE_REMOVE": "1"})
+        self.assertEqual(r.stdout.strip().splitlines()[-1], "REMOVED_PREVIEW=1")
+        self.assertNotIn(SLUG, self.registry()["previews"])
+
+
 if __name__ == "__main__":
     unittest.main()
