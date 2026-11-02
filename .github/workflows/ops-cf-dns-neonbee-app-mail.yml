@@ -1,0 +1,40 @@
+# One-off: SES custom MAIL FROM (mail.neonbee.app) + DMARC for neonbee.app, so Outlook
+# stops flagging noreply@neonbee.app. DNS only, TTL auto. Idempotent.
+name: ops-cf-dns-neonbee-app-mail
+on:
+  push:
+    branches: [ops/cf-dns-neonbee-app-mail]
+permissions: {}
+jobs:
+  dns:
+    runs-on: [self-hosted, runner-vm]
+    steps:
+      - name: Upsert MAIL FROM MX/SPF and DMARC
+        env:
+          T1: ${{ secrets.CF_SAAS_API_TOKEN }}
+          T2: ${{ secrets.CF_PREVIEW_API_TOKEN }}
+        run: |
+          set -uo pipefail
+          API=https://api.cloudflare.com/client/v4
+          ZN=neonbee.app
+          FAIL=0
+          upsert() { # type name content [priority]
+            local TYPE=$1 NAME=$2 CONTENT=$3 PRIO=${4:-} DONE=0
+            for T in "$T1" "$T2"; do
+              [ -n "$T" ] || continue
+              Z=$(curl -s -H "Authorization: Bearer $T" "$API/zones?name=$ZN" | jq -r '.result[0].id // empty')
+              [ -n "$Z" ] || continue
+              ID=$(curl -s -H "Authorization: Bearer $T" "$API/zones/$Z/dns_records?type=$TYPE&name=$NAME" | jq -r '.result[0].id // empty')
+              BODY=$(jq -nc --arg t "$TYPE" --arg n "$NAME" --arg c "$CONTENT" --arg p "$PRIO" \
+                '{type:$t,name:$n,content:$c,ttl:1,comment:"SES mail auth"} + (if $p=="" then {} else {priority:($p|tonumber)} end)')
+              if [ -n "$ID" ]; then R=$(curl -s -X PUT -H "Authorization: Bearer $T" -H "Content-Type: application/json" "$API/zones/$Z/dns_records/$ID" -d "$BODY")
+              else R=$(curl -s -X POST -H "Authorization: Bearer $T" -H "Content-Type: application/json" "$API/zones/$Z/dns_records" -d "$BODY"); fi
+              echo "$R" | jq -c --arg n "$TYPE $NAME" '{n:$n, success, errors}'
+              [ "$(echo "$R" | jq -r .success)" = true ] && { DONE=1; break; }
+            done
+            [ $DONE = 1 ] || { echo "FAILED $TYPE $NAME"; FAIL=1; }
+          }
+          upsert MX  mail.neonbee.app   feedback-smtp.ap-south-1.amazonses.com 10
+          upsert TXT mail.neonbee.app   '"v=spf1 include:amazonses.com ~all"'
+          upsert TXT _dmarc.neonbee.app '"v=DMARC1; p=none; adkim=r; aspf=r"'
+          exit $FAIL
