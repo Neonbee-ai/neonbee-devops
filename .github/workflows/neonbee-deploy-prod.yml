@@ -1640,6 +1640,21 @@ jobs:
             rm -rf "$RUNNER_PARENT/so360-shell-fe"
             ln -s "$GITHUB_WORKSPACE/_shell-fe" "$RUNNER_PARENT/so360-shell-fe"
             (cd "$GITHUB_WORKSPACE/_shell-fe" && npm install --legacy-peer-deps --prefer-offline --no-audit --no-fund 2>/dev/null || true)
+            # The packages' committed dist/ drifts from src (2026-11-01: the
+            # design-system dist lacked FillPane/KpiGrid/CountUp → TS2305 on
+            # every comb MFE's main build). Rebuild from source, as the dev
+            # workflow does — but FAIL HARD: falling back to the stale
+            # committed dist would ship a GREEN build against old exports.
+            # shell-fe is not an npm workspace root, so install inside each
+            # package first (else "tsc: not found").
+            for p in shell-context design-system event-bus formatters; do
+              if [ -d "$GITHUB_WORKSPACE/_shell-fe/packages/$p" ]; then
+                ( cd "$GITHUB_WORKSPACE/_shell-fe/packages/$p" \
+                  && npm install --legacy-peer-deps --include=dev --no-audit --no-fund --prefer-offline >/dev/null 2>&1 \
+                  && npm run build ) \
+                  || { echo "::error::could not rebuild @so360/$p from so360-shell-fe source — refusing to build against its stale committed dist"; exit 1; }
+              fi
+            done
           fi
 
           rm -rf node_modules
