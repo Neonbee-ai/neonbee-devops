@@ -267,8 +267,50 @@ env:
 # ═════════════════════════════════════════════════════════════════════════════
 jobs:
 
+  # Lane pick (see scripts/gcp-burst.sh in SO360 V.2): Contabo by default; GCP burst while org variable
+  # NB_BURST is plan|auto — except re-runs and re-pushes after a failed run, which stay on Contabo.
+  route:
+    runs-on: [self-hosted, nb-route]
+    timeout-minutes: 3
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      runs_on: ${{ steps.r.outputs.runs_on }}
+    steps:
+      - id: r
+        env:
+          MODE: ${{ vars.NB_BURST }}
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ github.head_ref || github.ref_name }}
+          ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          lane='["self-hosted","runner-vm"]'; why="NB_BURST=${MODE:-off}"
+          if [ "$ATTEMPT" != 1 ]; then why="re-run attempt $ATTEMPT"
+          elif [ "${MODE:-off}" != off ]; then
+            api="$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions"
+            auth=(-H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json")
+            # Resolve the caller's workflow from this run itself: inside a reusable workflow github.workflow
+            # and github.workflow_ref describe the reusable file, not the caller repo's copy.
+            wid=$(curl -fsS -m 10 "${auth[@]}" "$api/runs/$GITHUB_RUN_ID" | jq -r '.workflow_id // empty' 2>/dev/null) || wid=
+            last=unknown
+            if [ -n "$wid" ]; then
+              b=$(jq -rn --arg b "$BRANCH" '$b|@uri')
+              last=$(curl -fsS -m 10 "${auth[@]}" "$api/workflows/$wid/runs?branch=$b&status=completed&per_page=3" |
+                jq -r --arg id "$GITHUB_RUN_ID" '[.workflow_runs[]|select((.id|tostring)!=$id)][0].conclusion // "none"' 2>/dev/null) || last=unknown
+            fi
+            case "$last" in
+              failure) why="previous run of this workflow on $BRANCH failed" ;;
+              unknown) why="run history unavailable - staying on Contabo" ;;
+              *)       lane='["self-hosted","lane-burst"]' ;;
+            esac
+          fi
+          echo "runs_on=$lane" >> "$GITHUB_OUTPUT"
+          echo "lane: $lane ($why)" >> "$GITHUB_STEP_SUMMARY"
+
   gate:
-    runs-on: [self-hosted, runner-vm]
+    needs: [route]
+    runs-on: ${{ fromJSON(needs.route.outputs.runs_on) }}
     # Shell's suite (~230s alone) blew the 900s UT ceiling on the shared
     # runner while other deploys ran; it gets 1800s UT / 40 min job.
     timeout-minutes: ${{ inputs.is_shell && 40 || 20 }}
@@ -722,8 +764,8 @@ jobs:
   contract-tests:
     name: API Contract Tests
     if: inputs.deploy_type == 'backend'
-    needs: [gate]
-    runs-on: [self-hosted, runner-vm]
+    needs: [route, gate]
+    runs-on: ${{ fromJSON(needs.route.outputs.runs_on) }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4.3.1
@@ -895,8 +937,8 @@ jobs:
   integration-tests:
     name: Integration Tests
     if: inputs.deploy_type == 'backend'
-    needs: [gate]
-    runs-on: [self-hosted, runner-vm]
+    needs: [route, gate]
+    runs-on: ${{ fromJSON(needs.route.outputs.runs_on) }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4.3.1
@@ -1075,7 +1117,7 @@ jobs:
 # ═════════════════════════════════════════════════════════════════════════════
 
   build-deploy:
-    needs: [gate, contract-tests, integration-tests]
+    needs: [route, gate, contract-tests, integration-tests]
     # contract/integration are skipped for vite-mfe and nextjs deploys. A
     # skipped `needs` would normally skip this job too, so the result is
     # matched explicitly: proceed on success or skipped, never on failure.
@@ -1086,7 +1128,7 @@ jobs:
       && needs.integration-tests.result != 'failure'
     # Linux only: the Mac Mini gate runners also carry `contabo` (they run the
     # gate), but this job builds + rsyncs to the VMs and assumes a Linux host.
-    runs-on: [self-hosted, runner-vm]
+    runs-on: ${{ fromJSON(needs.route.outputs.runs_on) }}
     timeout-minutes: 20
     concurrency:
       group: neonbee-prod-${{ inputs.service_name }}

@@ -205,6 +205,47 @@ env:
   PREVIEW_DOMAIN: skyoffice360.com
 
 jobs:
+  # Lane pick (see scripts/gcp-burst.sh in SO360 V.2): Contabo by default; GCP burst while org variable
+  # NB_BURST is plan|auto — except re-runs and re-pushes after a failed run, which stay on Contabo.
+  route:
+    runs-on: [self-hosted, nb-route]
+    timeout-minutes: 3
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      runs_on: ${{ steps.r.outputs.runs_on }}
+    steps:
+      - id: r
+        env:
+          MODE: ${{ vars.NB_BURST }}
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ github.head_ref || github.ref_name }}
+          ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          lane='["self-hosted","runner-vm"]'; why="NB_BURST=${MODE:-off}"
+          if [ "$ATTEMPT" != 1 ]; then why="re-run attempt $ATTEMPT"
+          elif [ "${MODE:-off}" != off ]; then
+            api="$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions"
+            auth=(-H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json")
+            # Resolve the caller's workflow from this run itself: inside a reusable workflow github.workflow
+            # and github.workflow_ref describe the reusable file, not the caller repo's copy.
+            wid=$(curl -fsS -m 10 "${auth[@]}" "$api/runs/$GITHUB_RUN_ID" | jq -r '.workflow_id // empty' 2>/dev/null) || wid=
+            last=unknown
+            if [ -n "$wid" ]; then
+              b=$(jq -rn --arg b "$BRANCH" '$b|@uri')
+              last=$(curl -fsS -m 10 "${auth[@]}" "$api/workflows/$wid/runs?branch=$b&status=completed&per_page=3" |
+                jq -r --arg id "$GITHUB_RUN_ID" '[.workflow_runs[]|select((.id|tostring)!=$id)][0].conclusion // "none"' 2>/dev/null) || last=unknown
+            fi
+            case "$last" in
+              failure) why="previous run of this workflow on $BRANCH failed" ;;
+              unknown) why="run history unavailable - staying on Contabo" ;;
+              *)       lane='["self-hosted","lane-burst"]' ;;
+            esac
+          fi
+          echo "runs_on=$lane" >> "$GITHUB_OUTPUT"
+          echo "lane: $lane ($why)" >> "$GITHUB_STEP_SUMMARY"
+
   check:
     runs-on: [self-hosted, runner-vm]
     outputs:
@@ -253,11 +294,11 @@ jobs:
           fi
 
   build-deploy:
-    needs: [check]
+    needs: [route, check]
     if: needs.check.outputs.run == 'true'
     # The runner VM only: the Mac Minis are reserved for autonomous QA and the
     # Dev VM never builds (it only receives dist).
-    runs-on: [self-hosted, runner-vm]
+    runs-on: ${{ fromJSON(needs.route.outputs.runs_on) }}
     timeout-minutes: 25
     # Latest push wins: a newer push to the same branch cancels this one.
     concurrency:
