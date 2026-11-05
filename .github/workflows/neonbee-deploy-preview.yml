@@ -213,9 +213,6 @@ jobs:
   route:
     runs-on: [self-hosted, nb-route]
     timeout-minutes: 3
-    permissions:
-      actions: read
-      contents: read
     outputs:
       runs_on: ${{ steps.r.outputs.runs_on }}
     steps:
