@@ -238,6 +238,11 @@ jobs:
 
   gate:
     needs: [route]
+    # Superseded runs on the same branch cancel here (never on main); build-deploy keeps its own
+    # non-cancelling group so an in-flight deploy is never cut off.
+    concurrency:
+      group: nb-${{ github.workflow }}-${{ inputs.service_name }}-${{ github.ref }}-gate
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
     runs-on: ${{ fromJSON(needs.route.outputs.runs_on) }}
     steps:
       - uses: actions/checkout@v4.3.1
@@ -418,6 +423,8 @@ jobs:
         env:
           CI: 'true'
         run: |
+          # Lint runs alongside the unit tests instead of as a serial step; both must pass.
+          ( npm run lint --if-present > "$RUNNER_TEMP/lint.log" 2>&1 ) & LINT_PID=$!
           # `--passWithNoTests` makes an empty or mis-globbed suite exit 0.
           # Assert a floor first so "0 tests" fails loudly with a name attached
           # instead of reading as a pass.
@@ -437,8 +444,39 @@ jobs:
           else
             npm test -- --passWithNoTests --forceExit --ci $WORKER_FLAGS
           fi
-      - name: Lint
-        run: npm run lint --if-present
+          LINT_RC=0; wait "$LINT_PID" || LINT_RC=$?
+          cat "$RUNNER_TEMP/lint.log"
+          [ "$LINT_RC" -eq 0 ] || { echo "::error::Lint failed (exit $LINT_RC)"; exit "$LINT_RC"; }
+      - name: Check dependency licenses
+        run: >-
+          npx license-checker
+          --failOn "GPL-2.0;GPL-3.0;AGPL-3.0;LGPL-2.0;LGPL-2.1;LGPL-3.0"
+          --excludePrivatePackages
+  # ── Security (parallel with gate; build-deploy needs both to pass) ───────
+  security:
+    needs: [route]
+    runs-on: ${{ fromJSON(needs.route.outputs.runs_on) }}
+    timeout-minutes: 15
+    # Superseded runs on the same branch cancel here (never on main); build-deploy keeps its own
+    # non-cancelling group so an in-flight deploy is never cut off.
+    concurrency:
+      group: nb-${{ github.workflow }}-${{ inputs.service_name }}-${{ github.ref }}-security
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@v4.3.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4.4.0
+        with:
+          node-version: ${{ inputs.node_version }}
+      # npm audit reads package-lock.json only, so this job needs no install.
+      # Same scoped-registry config the gate had before audit moved here (parity).
+      - name: Configure private package registry
+        run: |
+          npm config set @so360:registry https://npm.pkg.github.com --global
+          npm config set //npm.pkg.github.com/:_authToken "${PAT_TOKEN}" --global
+        env:
+          PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
       - name: Security audit
         env:
           NB_EVENT: ${{ github.event_name }}
@@ -472,11 +510,6 @@ jobs:
             echo "$AUDIT_OUT" | tail -40
           fi
           exit $AUDIT_EXIT
-      - name: Check dependency licenses
-        run: >-
-          npx license-checker
-          --failOn "GPL-2.0;GPL-3.0;AGPL-3.0;LGPL-2.0;LGPL-2.1;LGPL-3.0"
-          --excludePrivatePackages
       - name: Scan for secrets
         run: |
           rm -rf dist/ coverage/
@@ -515,11 +548,17 @@ jobs:
             run_gitleaks /tmp/gitleaks
           fi
 
-  # ── Parallel (both need gate) ──────────────────────────────────────────────
+
+  # ── Parallel with gate (build-deploy needs all) ──────────────────────────────────────────────
   contract-tests:
     name: API Contract Tests
     runs-on: ${{ fromJSON(needs.route.outputs.runs_on) }}
-    needs: [route, gate]
+    needs: [route]
+    # Superseded runs on the same branch cancel here (never on main); build-deploy keeps its own
+    # non-cancelling group so an in-flight deploy is never cut off.
+    concurrency:
+      group: nb-${{ github.workflow }}-${{ inputs.service_name }}-${{ github.ref }}-contract-tests
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
     steps:
       - uses: actions/checkout@v4.3.1
       - uses: actions/setup-node@v4.4.0
@@ -704,7 +743,12 @@ jobs:
   integration-tests:
     name: Integration Tests
     runs-on: ${{ fromJSON(needs.route.outputs.runs_on) }}
-    needs: [route, gate]
+    needs: [route]
+    # Superseded runs on the same branch cancel here (never on main); build-deploy keeps its own
+    # non-cancelling group so an in-flight deploy is never cut off.
+    concurrency:
+      group: nb-${{ github.workflow }}-${{ inputs.service_name }}-${{ github.ref }}-integration-tests
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
     steps:
       - uses: actions/checkout@v4.3.1
       - uses: actions/setup-node@v4.4.0
@@ -893,7 +937,7 @@ jobs:
 
   # ── Build + Deploy (ALL gates must pass) ───────────────────────────────────
   build-deploy:
-    needs: [route, gate, contract-tests, integration-tests]
+    needs: [route, gate, security, contract-tests, integration-tests]
     # Linux only: the Mac Mini gate runners also carry `contabo` (they run the
     # gate), but this job builds + rsyncs to the VMs and assumes a Linux host.
     runs-on: ${{ fromJSON(needs.route.outputs.runs_on) }}
@@ -1483,7 +1527,7 @@ jobs:
   # No-ops silently when NOTIFY_WEBHOOK_URL is unset; never fails the pipeline.
   notify:
     name: Notify Teams
-    needs: [gate, contract-tests, integration-tests, build-deploy]
+    needs: [gate, security, contract-tests, integration-tests, build-deploy]
     if: always()
     runs-on: [self-hosted, runner-vm]
     steps:

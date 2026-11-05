@@ -144,6 +144,11 @@ jobs:
 
   gate:
     needs: [route]
+    # Superseded runs on the same branch cancel here (never on main); build-deploy keeps its own
+    # non-cancelling group so an in-flight deploy is never cut off.
+    concurrency:
+      group: nb-${{ github.workflow }}-${{ inputs.service_name }}-${{ github.ref }}-gate
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
     runs-on: ${{ fromJSON(needs.route.outputs.runs_on) }}
     steps:
       - uses: actions/checkout@v4.3.1
@@ -328,6 +333,29 @@ jobs:
           fi
           WORKER_FLAGS=$(node -e "$TEST_WORKER_FLAGS_JS" test 2>/dev/null || true); echo "Test worker cap (test): ${WORKER_FLAGS:-none}"
           npm test -- --passWithNoTests $WORKER_FLAGS
+      - name: Check dependency licenses
+        run: >-
+          npx license-checker
+          --failOn "GPL-2.0;GPL-3.0;AGPL-3.0;LGPL-2.0;LGPL-2.1;LGPL-3.0"
+          --excludePrivatePackages
+  # ── Security (parallel with gate; build-deploy needs both to pass) ───────
+  security:
+    needs: [route]
+    runs-on: ${{ fromJSON(needs.route.outputs.runs_on) }}
+    timeout-minutes: 15
+    # Superseded runs on the same branch cancel here (never on main); build-deploy keeps its own
+    # non-cancelling group so an in-flight deploy is never cut off.
+    concurrency:
+      group: nb-${{ github.workflow }}-${{ inputs.service_name }}-${{ github.ref }}-security
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@v4.3.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4.4.0
+        with:
+          node-version: ${{ inputs.node_version }}
+      # npm audit reads package-lock.json only, so this job needs no install.
       - name: Security audit
         env:
           NB_EVENT: ${{ github.event_name }}
@@ -361,11 +389,6 @@ jobs:
             echo "$AUDIT_OUT" | tail -40
           fi
           exit $AUDIT_EXIT
-      - name: Check dependency licenses
-        run: >-
-          npx license-checker
-          --failOn "GPL-2.0;GPL-3.0;AGPL-3.0;LGPL-2.0;LGPL-2.1;LGPL-3.0"
-          --excludePrivatePackages
       - name: Scan for secrets
         run: |
           rm -rf .next/ out/
@@ -404,9 +427,10 @@ jobs:
             run_gitleaks /tmp/gitleaks
           fi
 
+
   # ── Build + Deploy (gate must pass) ───────────────────────────────────────
   build-deploy:
-    needs: [route, gate]
+    needs: [route, gate, security]
     # Linux only: the Mac Mini gate runners also carry `contabo` (they run the
     # gate), but this job builds + rsyncs to the VMs and assumes a Linux host.
     runs-on: ${{ fromJSON(needs.route.outputs.runs_on) }}
@@ -785,7 +809,7 @@ jobs:
   # No-ops silently when NOTIFY_WEBHOOK_URL is unset; never fails the pipeline.
   notify:
     name: Notify Teams
-    needs: [gate, build-deploy]
+    needs: [gate, security, build-deploy]
     if: always()
     runs-on: [self-hosted, runner-vm]
     steps:
