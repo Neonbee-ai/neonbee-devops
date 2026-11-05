@@ -103,6 +103,8 @@ jobs:
   # ── Gate: single merged job ────────────────────────────────────────────────
   # Lane pick (see scripts/gcp-burst.sh in SO360 V.2): Contabo by default; GCP burst while org variable
   # NB_BURST is plan|auto — except re-runs and re-pushes after a failed run, which stay on Contabo.
+  # NB_BURST=batch (big one-shot batch): every run incl. re-runs goes to lane-burst and queues there;
+  # gcp-burst.sh watch flips it to off when org active jobs drop below the threshold.
   route:
     runs-on: [self-hosted, nb-route]
     timeout-minutes: 3
@@ -120,7 +122,8 @@ jobs:
           ATTEMPT: ${{ github.run_attempt }}
         run: |
           lane='["self-hosted","runner-vm"]'; why="NB_BURST=${MODE:-off}"
-          if [ "$ATTEMPT" != 1 ]; then why="re-run attempt $ATTEMPT"
+          if [ "${MODE:-off}" = batch ]; then lane='["self-hosted","lane-burst"]'; why="NB_BURST=batch - burst-only, attempt $ATTEMPT"
+          elif [ "$ATTEMPT" != 1 ]; then why="re-run attempt $ATTEMPT"
           elif [ "${MODE:-off}" != off ]; then
             api="$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions"
             auth=(-H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json")

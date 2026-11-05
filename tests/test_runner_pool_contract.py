@@ -65,9 +65,18 @@ class GivenTheOrgWorkflows(unittest.TestCase):
             if ROUTED not in text:
                 continue
             with self.subTest(workflow=os.path.basename(path)):
-                self.assertIn('if [ "$ATTEMPT" != 1 ]; then why="re-run attempt $ATTEMPT"', text)
+                self.assertIn('elif [ "$ATTEMPT" != 1 ]; then why="re-run attempt $ATTEMPT"', text)
                 self.assertIn('failure) why="previous run of this workflow on $BRANCH failed"', text)
                 self.assertIn("lane='[\"self-hosted\",\"runner-vm\"]'; why=", text)
+
+    def test_given_nb_burst_batch_then_every_attempt_routes_to_burst_before_the_rerun_check(self):
+        for path in WORKFLOWS:
+            text = open(path).read()
+            if ROUTED not in text:
+                continue
+            with self.subTest(workflow=os.path.basename(path)):
+                batch = text.index('if [ "${MODE:-off}" = batch ]; then lane=\'["self-hosted","lane-burst"]\'')
+                self.assertLess(batch, text.index('elif [ "$ATTEMPT" != 1 ]'))
 
     def test_given_the_run_history_cannot_be_read_then_the_router_keeps_contabo(self):
         for path in WORKFLOWS:
