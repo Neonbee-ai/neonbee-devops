@@ -17,7 +17,8 @@ EVERY_RUNNER = {"cleanup-runner-workspace.yml"}
 RUNNER_VM = "[self-hosted, runner-vm]"
 ROUTER = "[self-hosted, nb-route]"
 ROUTED = "${{ fromJSON(needs.route.outputs.runs_on) }}"
-LANES = {'["self-hosted","runner-vm"]', '["self-hosted","lane-burst"]'}
+# nb-pool: label on Contabo runner-vm + burst runners, used only for NB_BURST=batch re-runs (either lane).
+LANES = {'["self-hosted","runner-vm"]', '["self-hosted","lane-burst"]', '["self-hosted","nb-pool"]'}
 
 
 def runs_on(path):
@@ -69,14 +70,16 @@ class GivenTheOrgWorkflows(unittest.TestCase):
                 self.assertIn('failure) why="previous run of this workflow on $BRANCH failed"', text)
                 self.assertIn("lane='[\"self-hosted\",\"runner-vm\"]'; why=", text)
 
-    def test_given_nb_burst_batch_then_every_attempt_routes_to_burst_before_the_rerun_check(self):
+    def test_given_nb_burst_batch_then_first_runs_go_to_burst_and_reruns_to_the_shared_pool(self):
         for path in WORKFLOWS:
             text = open(path).read()
             if ROUTED not in text:
                 continue
             with self.subTest(workflow=os.path.basename(path)):
-                batch = text.index('if [ "${MODE:-off}" = batch ]; then lane=\'["self-hosted","lane-burst"]\'')
-                self.assertLess(batch, text.index('elif [ "$ATTEMPT" != 1 ]'))
+                first = text.index('if [ "${MODE:-off}" = batch ] && [ "$ATTEMPT" = 1 ]; then lane=\'["self-hosted","lane-burst"]\'')
+                rerun = text.index('elif [ "${MODE:-off}" = batch ]; then lane=\'["self-hosted","nb-pool"]\'')
+                self.assertLess(first, rerun)
+                self.assertLess(rerun, text.index('elif [ "$ATTEMPT" != 1 ]'))
 
     def test_given_the_run_history_cannot_be_read_then_the_router_keeps_contabo(self):
         for path in WORKFLOWS:

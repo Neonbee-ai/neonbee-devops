@@ -123,8 +123,9 @@ jobs:
 
   # Lane pick (see scripts/gcp-burst.sh in SO360 V.2): Contabo by default; GCP burst while org variable
   # NB_BURST is plan|auto — except re-runs and re-pushes after a failed run, which stay on Contabo.
-  # NB_BURST=batch (big one-shot batch): every run incl. re-runs goes to lane-burst and queues there;
-  # gcp-burst.sh watch flips it to off when org active jobs drop below the threshold.
+  # NB_BURST=batch (bulk run, Contabo + burst together): first runs go to lane-burst; re-runs go to nb-pool,
+  # a label on both Contabo runner-vm and burst runners, so whichever is free first takes them.
+  # gcp-burst.sh watch flips NB_BURST to off when org active jobs drop below the threshold.
   route:
     runs-on: [self-hosted, nb-route]
     timeout-minutes: 3
@@ -142,7 +143,8 @@ jobs:
           ATTEMPT: ${{ github.run_attempt }}
         run: |
           lane='["self-hosted","runner-vm"]'; why="NB_BURST=${MODE:-off}"
-          if [ "${MODE:-off}" = batch ]; then lane='["self-hosted","lane-burst"]'; why="NB_BURST=batch - burst-only, attempt $ATTEMPT"
+          if [ "${MODE:-off}" = batch ] && [ "$ATTEMPT" = 1 ]; then lane='["self-hosted","lane-burst"]'; why="NB_BURST=batch - first run on burst"
+          elif [ "${MODE:-off}" = batch ]; then lane='["self-hosted","nb-pool"]'; why="NB_BURST=batch - re-run $ATTEMPT on first free Contabo or burst runner"
           elif [ "$ATTEMPT" != 1 ]; then why="re-run attempt $ATTEMPT"
           elif [ "${MODE:-off}" != off ]; then
             api="$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions"
