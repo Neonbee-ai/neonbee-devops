@@ -1,4 +1,3 @@
-"""Every CI job builds on the runner VM or, when routed, on GCP burst runners.
 
 The Mac Minis are reserved for autonomous QA, and the Dev VM (dev-vm-01 also
 carries the `contabo` label) only receives dist — it never builds.
@@ -99,13 +98,14 @@ class GivenTheOrgWorkflows(unittest.TestCase):
                 self.assertIn('.workflow_id', text)
                 self.assertNotIn('${{ github.workflow_ref }}', text)
 
-    def test_when_the_router_reads_run_history_then_it_can_read_actions(self):
+    def test_when_a_caller_grants_no_permissions_then_the_router_asks_for_none(self):
         for path in WORKFLOWS:
             text = open(path).read()
             if ROUTED not in text:
                 continue
             with self.subTest(workflow=os.path.basename(path)):
-                self.assertRegex(text, r"  route:\n(?:.*\n)*?    permissions:\n      actions: read\n")
+                route = re.search(r"\n  route:\n((?:    .*\n|\n)*)", text).group(1)
+                self.assertNotIn("permissions:", route)  # extra scopes → startup_failure in callers
 
     def test_when_a_job_picks_a_runner_then_it_never_uses_the_shared_contabo_label(self):
         for path in WORKFLOWS:
