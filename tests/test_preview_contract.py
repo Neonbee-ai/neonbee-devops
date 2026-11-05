@@ -199,9 +199,11 @@ class Reconcile(unittest.TestCase):
 class RunsOnTheRunnerVmOnly(unittest.TestCase):
     """Preview builds stay off the Mac Minis (autonomous QA) and the Dev VM."""
 
-    def test_every_preview_job_runs_on_the_runner_vm(self):
+    def test_every_preview_job_runs_on_the_runner_vm_or_its_routed_lane(self):
         text = read(DEPLOY)
-        self.assertEqual(re.findall(r"runs-on: (.*)", text), ["[self-hosted, runner-vm]"] * 2)
+        self.assertEqual(re.findall(r"runs-on: (.*)", text), [
+            "[self-hosted, nb-route]", "[self-hosted, runner-vm]",
+            "${{ fromJSON(needs.route.outputs.runs_on) }}"])
 
     def test_no_job_targets_the_shared_contabo_label(self):
         self.assertNotIn("contabo", "".join(re.findall(r"runs-on: .*", read(DEPLOY))))
