@@ -1,3 +1,4 @@
+"""Every CI job builds on the runner VM or, when routed, on GCP burst runners.
 
 The Mac Minis are reserved for autonomous QA, and the Dev VM (dev-vm-01 also
 carries the `contabo` label) only receives dist — it never builds.
