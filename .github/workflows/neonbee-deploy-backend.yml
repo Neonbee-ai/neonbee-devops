@@ -119,6 +119,13 @@ on:
       REVALIDATE_SECRET: { required: false }
       WEB_SEARCH_PROVIDER: { required: false }
       WEB_SEARCH_API_KEY: { required: false }
+      # Webhook verification + WS fan-out (storefront-api campaign/back-in-stock, inbox SNS + Redis, subscription Stripe/PayPal)
+      CAMPAIGN_WEBHOOK_SECRET: { required: false }
+      BACK_IN_STOCK_TOKEN_SECRET: { required: false }
+      SNS_ALLOWED_TOPIC_ARNS: { required: false }
+      REDIS_URL: { required: false }
+      STRIPE_WEBHOOK_SECRET: { required: false }
+      PAYPAL_WEBHOOK_ID: { required: false }
       MARKETING_INTERNAL_KEY:       { required: false }
       ANTHROPIC_API_KEY_DEV:        { required: false }  # Dev/Staging use a separate key so test spend is apart from prod
       MARKETING_TRACKING_SECRET:    { required: false }
@@ -1214,6 +1221,12 @@ jobs:
             [ -n "${{ secrets.REVALIDATE_SECRET }}" ] && echo "REVALIDATE_SECRET=${{ secrets.REVALIDATE_SECRET }}" >> .env.ci
             [ -n "${{ secrets.WEB_SEARCH_PROVIDER }}" ] && echo "WEB_SEARCH_PROVIDER=${{ secrets.WEB_SEARCH_PROVIDER }}" >> .env.ci
             [ -n "${{ secrets.WEB_SEARCH_API_KEY }}" ] && echo "WEB_SEARCH_API_KEY=${{ secrets.WEB_SEARCH_API_KEY }}" >> .env.ci
+            [ -n "${{ secrets.CAMPAIGN_WEBHOOK_SECRET }}" ] && echo "CAMPAIGN_WEBHOOK_SECRET=${{ secrets.CAMPAIGN_WEBHOOK_SECRET }}" >> .env.ci
+            [ -n "${{ secrets.BACK_IN_STOCK_TOKEN_SECRET }}" ] && echo "BACK_IN_STOCK_TOKEN_SECRET=${{ secrets.BACK_IN_STOCK_TOKEN_SECRET }}" >> .env.ci
+            [ -n "${{ secrets.SNS_ALLOWED_TOPIC_ARNS }}" ] && echo "SNS_ALLOWED_TOPIC_ARNS=${{ secrets.SNS_ALLOWED_TOPIC_ARNS }}" >> .env.ci
+            [ -n "${{ secrets.REDIS_URL }}" ] && echo "REDIS_URL=${{ secrets.REDIS_URL }}" >> .env.ci
+            [ -n "${{ secrets.STRIPE_WEBHOOK_SECRET }}" ] && echo "STRIPE_WEBHOOK_SECRET=${{ secrets.STRIPE_WEBHOOK_SECRET }}" >> .env.ci
+            [ -n "${{ secrets.PAYPAL_WEBHOOK_ID }}" ] && echo "PAYPAL_WEBHOOK_ID=${{ secrets.PAYPAL_WEBHOOK_ID }}" >> .env.ci
             [ -n "${{ secrets.MARKETING_INTERNAL_KEY }}" ] && echo "MARKETING_INTERNAL_KEY=${{ secrets.MARKETING_INTERNAL_KEY }}"                  >> .env.ci
             [ -n "${{ secrets.MARKETING_TRACKING_SECRET }}" ] && echo "MARKETING_TRACKING_SECRET=${{ secrets.MARKETING_TRACKING_SECRET }}"               >> .env.ci
             [ -n "${{ secrets.GEMINI_API_KEY }}" ]              && echo "GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}"                           >> .env.ci
@@ -1413,6 +1426,12 @@ jobs:
             [ -n "${{ secrets.REVALIDATE_SECRET }}" ] && echo "REVALIDATE_SECRET=${{ secrets.REVALIDATE_SECRET }}" >> .env.ci
             [ -n "${{ secrets.WEB_SEARCH_PROVIDER }}" ] && echo "WEB_SEARCH_PROVIDER=${{ secrets.WEB_SEARCH_PROVIDER }}" >> .env.ci
             [ -n "${{ secrets.WEB_SEARCH_API_KEY }}" ] && echo "WEB_SEARCH_API_KEY=${{ secrets.WEB_SEARCH_API_KEY }}" >> .env.ci
+            [ -n "${{ secrets.CAMPAIGN_WEBHOOK_SECRET }}" ] && echo "CAMPAIGN_WEBHOOK_SECRET=${{ secrets.CAMPAIGN_WEBHOOK_SECRET }}" >> .env.ci
+            [ -n "${{ secrets.BACK_IN_STOCK_TOKEN_SECRET }}" ] && echo "BACK_IN_STOCK_TOKEN_SECRET=${{ secrets.BACK_IN_STOCK_TOKEN_SECRET }}" >> .env.ci
+            [ -n "${{ secrets.SNS_ALLOWED_TOPIC_ARNS }}" ] && echo "SNS_ALLOWED_TOPIC_ARNS=${{ secrets.SNS_ALLOWED_TOPIC_ARNS }}" >> .env.ci
+            [ -n "${{ secrets.REDIS_URL }}" ] && echo "REDIS_URL=${{ secrets.REDIS_URL }}" >> .env.ci
+            [ -n "${{ secrets.STRIPE_WEBHOOK_SECRET }}" ] && echo "STRIPE_WEBHOOK_SECRET=${{ secrets.STRIPE_WEBHOOK_SECRET }}" >> .env.ci
+            [ -n "${{ secrets.PAYPAL_WEBHOOK_ID }}" ] && echo "PAYPAL_WEBHOOK_ID=${{ secrets.PAYPAL_WEBHOOK_ID }}" >> .env.ci
             [ -n "${{ secrets.MARKETING_INTERNAL_KEY }}" ] && echo "MARKETING_INTERNAL_KEY=${{ secrets.MARKETING_INTERNAL_KEY }}"                  >> .env.ci
             [ -n "${{ secrets.MARKETING_TRACKING_SECRET }}" ] && echo "MARKETING_TRACKING_SECRET=${{ secrets.MARKETING_TRACKING_SECRET }}"               >> .env.ci
             [ -n "${{ secrets.GEMINI_API_KEY }}" ]              && echo "GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}"                           >> .env.ci
