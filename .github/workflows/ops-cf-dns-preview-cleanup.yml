@@ -1,0 +1,68 @@
+# One-off: clean stale preview DNS records from skyoffice360.com (CF error 81045 quota).
+# Mode comes from ops/cf-dns-preview-cleanup/mode (dry|delete). Delete removes ONLY the
+# reviewed ids in ops/cf-dns-preview-cleanup/stale.json, after a full zone backup.
+name: ops-cf-dns-preview-cleanup
+on:
+  workflow_dispatch:
+  push:
+    branches: [ops/cf-dns-preview-cleanup]
+permissions:
+  contents: read
+concurrency: { group: ops-cf-dns-preview-cleanup, cancel-in-progress: false }
+jobs:
+  dns:
+    runs-on: [self-hosted, runner-vm]
+    env:
+      ZONE_NAME: skyoffice360.com
+    steps:
+      - uses: actions/checkout@v4
+      - name: Export records (and delete reviewed stale list in delete mode)
+        env:
+          CFT: ${{ secrets.CF_PREVIEW_API_TOKEN }}
+          OUT: ${{ runner.temp }}/cf-dns-out
+        run: |
+          set -euo pipefail
+          [ -n "$CFT" ] || { echo "::error::CF_PREVIEW_API_TOKEN missing"; exit 1; }
+          MODE=$(tr -d '[:space:]' < ops/cf-dns-preview-cleanup/mode)
+          API=https://api.cloudflare.com/client/v4
+          cf() { curl -fsS -H "Authorization: Bearer $CFT" -H "Content-Type: application/json" "$@"; }
+          rm -rf "$OUT"; mkdir -p "$OUT"
+          ZONE=$(cf "$API/zones?name=$ZONE_NAME" | jq -r '.result[0].id // empty')
+          [ -n "$ZONE" ] || { echo "::error::token cannot see $ZONE_NAME"; exit 1; }
+          dump() {
+            local p=1 tp=1; : > "$1.tmp"
+            while [ "$p" -le "$tp" ]; do
+              R=$(cf "$API/zones/$ZONE/dns_records?per_page=500&page=$p")
+              echo "$R" | jq -c '.result[]' >> "$1.tmp"
+              tp=$(echo "$R" | jq -r '.result_info.total_pages // 1'); p=$((p+1))
+            done
+            jq -s 'sort_by(.name)' "$1.tmp" > "$1"; rm -f "$1.tmp"
+          }
+          dump "$OUT/records-before.json"
+          echo "mode=$MODE records_before=$(jq length "$OUT/records-before.json")"
+          if [ "$MODE" = delete ]; then
+            cp "$OUT/records-before.json" "$OUT/zone-backup.json"
+            cp ops/cf-dns-preview-cleanup/stale.json "$OUT/stale-executed.json"
+            n=0; skip=0
+            while IFS=$'\t' read -r id name; do
+              cur=$(jq -r --arg id "$id" '.[] | select(.id==$id) | .name' "$OUT/records-before.json")
+              # Safety: only ids that still exist with the same name, pr-* preview hosts, never the two kept previews.
+              if [ "$cur" != "$name" ] || ! [[ "$name" =~ ^pr-[a-z0-9-]+\.skyoffice360\.com$ ]] \
+                 || [[ "$name" =~ ^pr-(feat-comb-adoption|fix-pulse-hotfixes)(--|\.) ]]; then
+                echo "skip $name"; skip=$((skip+1)); continue
+              fi
+              cf -X DELETE "$API/zones/$ZONE/dns_records/$id" >/dev/null && n=$((n+1)) && echo "deleted $name"
+            done < <(jq -r '.[] | [.id,.name] | @tsv' ops/cf-dns-preview-cleanup/stale.json)
+            echo "deleted=$n skipped=$skip"
+            dump "$OUT/records-after.json"
+            echo "records_after=$(jq length "$OUT/records-after.json")"
+            for h in pr-feat-comb-adoption pr-fix-pulse-hotfixes; do
+              echo "$h: records=$(jq --arg h "$h.$ZONE_NAME" '[.[]|select(.name==$h)]|length' "$OUT/records-after.json") resolve=$(getent ahosts "$h.$ZONE_NAME" | head -1 | awk '{print $1}')"
+            done
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: cf-dns-preview-cleanup-${{ github.run_id }}
+          path: ${{ runner.temp }}/cf-dns-out
+          retention-days: 30
