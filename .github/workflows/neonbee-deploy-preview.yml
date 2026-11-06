@@ -182,6 +182,13 @@ on:
       REVALIDATE_SECRET: { required: false }
       WEB_SEARCH_PROVIDER: { required: false }
       WEB_SEARCH_API_KEY: { required: false }
+      # Webhook verification + WS fan-out (storefront-api campaign/back-in-stock, inbox SNS + Redis, subscription Stripe/PayPal)
+      CAMPAIGN_WEBHOOK_SECRET: { required: false }
+      BACK_IN_STOCK_TOKEN_SECRET: { required: false }
+      SNS_ALLOWED_TOPIC_ARNS: { required: false }
+      REDIS_URL: { required: false }
+      STRIPE_WEBHOOK_SECRET: { required: false }
+      PAYPAL_WEBHOOK_ID: { required: false }
       BUNNY_STORAGE_HOSTNAME:      { required: false }
       BUNNY_STORAGE_ZONE:          { required: false }
       BUNNY_ACCESS_KEY:            { required: false }
@@ -642,6 +649,12 @@ jobs:
               echo "REVALIDATE_SECRET=${{ secrets.REVALIDATE_SECRET }}"
               echo "WEB_SEARCH_PROVIDER=${{ secrets.WEB_SEARCH_PROVIDER }}"
               echo "WEB_SEARCH_API_KEY=${{ secrets.WEB_SEARCH_API_KEY }}"
+              echo "CAMPAIGN_WEBHOOK_SECRET=${{ secrets.CAMPAIGN_WEBHOOK_SECRET }}"
+              echo "BACK_IN_STOCK_TOKEN_SECRET=${{ secrets.BACK_IN_STOCK_TOKEN_SECRET }}"
+              echo "SNS_ALLOWED_TOPIC_ARNS=${{ secrets.SNS_ALLOWED_TOPIC_ARNS }}"
+              echo "REDIS_URL=${{ secrets.REDIS_URL }}"
+              echo "STRIPE_WEBHOOK_SECRET=${{ secrets.STRIPE_WEBHOOK_SECRET }}"
+              echo "PAYPAL_WEBHOOK_ID=${{ secrets.PAYPAL_WEBHOOK_ID }}"
               echo "BUNNY_STORAGE_HOSTNAME=${{ secrets.BUNNY_STORAGE_HOSTNAME }}"
               echo "BUNNY_STORAGE_ZONE=${{ secrets.BUNNY_STORAGE_ZONE }}"
               echo "BUNNY_ACCESS_KEY=${{ secrets.BUNNY_ACCESS_KEY }}"
