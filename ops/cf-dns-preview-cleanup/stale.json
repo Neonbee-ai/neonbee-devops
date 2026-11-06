@@ -1,1 +1,114 @@
-[]
+[
+  {
+    "id": "3ef1491a50bf352a41579ab917e0a3f6",
+    "name": "pr-feat-signal-kanban-modal-move-to.skyoffice360.com"
+  },
+  {
+    "id": "6ff4210f83f917a94e0369952a2b5539",
+    "name": "pr-feat-signal-kanban-modal-step-inputs.skyoffice360.com"
+  },
+  {
+    "id": "3e8a5daf1172e9316539f984cd69b661",
+    "name": "pr-feat-vendor-bank-details-main.skyoffice360.com"
+  },
+  {
+    "id": "2d3b5eaccd6e703de03807b6d17d3f74",
+    "name": "pr-fix-comb-drawer-portal--tools.skyoffice360.com"
+  },
+  {
+    "id": "004ba3b000618a2bac6e5bf640cc6952",
+    "name": "pr-fix-comb-drawer-portal.skyoffice360.com"
+  },
+  {
+    "id": "0c8270048c8ffe4fa36f06ae9f1d6eaa",
+    "name": "pr-fix-comb-marketing-prod-port.skyoffice360.com"
+  },
+  {
+    "id": "4fac810035a4179a7a6607b713140bdc",
+    "name": "pr-fix-comb-segmented-radius--tools.skyoffice360.com"
+  },
+  {
+    "id": "ffb7506d5ce540d4e64cfedc2383b38d",
+    "name": "pr-fix-comb-segmented-radius.skyoffice360.com"
+  },
+  {
+    "id": "080e3b8d64fb36d713ed1df84f2fc4f0",
+    "name": "pr-fix-dl-spec-row-main.skyoffice360.com"
+  },
+  {
+    "id": "1510c13f99dd253c1048b8fbe43f8d2d",
+    "name": "pr-fix-dompurify-main-20261027.skyoffice360.com"
+  },
+  {
+    "id": "120110e74df9ca036101e2825dcef0d8",
+    "name": "pr-fix-fitment-custom-attributes-main.skyoffice360.com"
+  },
+  {
+    "id": "e1ab8ceab659ac997303c10f3c345a2f",
+    "name": "pr-fix-get-tenant-rls-client-main.skyoffice360.com"
+  },
+  {
+    "id": "2f34673438014fe6a8907345d0920528",
+    "name": "pr-fix-maintenance-fe-federation-css-root.skyoffice360.com"
+  },
+  {
+    "id": "ab5d74608ea9c94fe84855c80465794d",
+    "name": "pr-fix-marketing-nonblocking-registration.skyoffice360.com"
+  },
+  {
+    "id": "c7268df7d468fa3b7950a1a746a182ab",
+    "name": "pr-fix-shell-drawer-zindex--tools.skyoffice360.com"
+  },
+  {
+    "id": "88115c18b3d917b6cf75b7ae7415fc0f",
+    "name": "pr-fix-shell-drawer-zindex.skyoffice360.com"
+  },
+  {
+    "id": "185a31b47b51530f1661c85037311a33",
+    "name": "pr-fix-shell-mfe-double-padding--tools.skyoffice360.com"
+  },
+  {
+    "id": "233b4d28e745ba6c3b204029a719d9b1",
+    "name": "pr-fix-shell-mfe-double-padding.skyoffice360.com"
+  },
+  {
+    "id": "4f9bf5f40a77148a94342a86d0a08fde",
+    "name": "pr-fix-signal-aqa-findings.skyoffice360.com"
+  },
+  {
+    "id": "efdc037c3c1c8ce0acfe560ed872407a",
+    "name": "pr-fix-signal-fe-comb-test-mocks.skyoffice360.com"
+  },
+  {
+    "id": "c6914f89c75267e5b88686309e135bf9",
+    "name": "pr-fix-signal-fe-unit-tests.skyoffice360.com"
+  },
+  {
+    "id": "372f22c72001d8019a88d76cc332fdc2",
+    "name": "pr-fix-signal-kanban-card-modal.skyoffice360.com"
+  },
+  {
+    "id": "1c7076e2593c227b7dc32214887e925c",
+    "name": "pr-fix-signal-kanban-empty-picker.skyoffice360.com"
+  },
+  {
+    "id": "d45bf96ca110ea4dd5e4262cfe0dd8cb",
+    "name": "pr-fix-signal-kanban-manual-won.skyoffice360.com"
+  },
+  {
+    "id": "6ed12a9ab983ef490798db0e3138b723",
+    "name": "pr-fix-signal-kanban-moveto-skip-locked.skyoffice360.com"
+  },
+  {
+    "id": "77afe18e79fc837539fc160a4ef3ee22",
+    "name": "pr-fix-taxdecl-spec-flake-20261027.skyoffice360.com"
+  },
+  {
+    "id": "34edc4bce21e618e87860dee85b7cecc",
+    "name": "pr-fix-untrack-env-local-main--store.skyoffice360.com"
+  },
+  {
+    "id": "be34e9ccbd6e34895f4659d7511f6424",
+    "name": "pr-fix-untrack-env-local-main.skyoffice360.com"
+  }
+]
