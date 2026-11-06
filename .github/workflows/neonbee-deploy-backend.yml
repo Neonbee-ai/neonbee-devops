@@ -119,7 +119,15 @@ on:
       REVALIDATE_SECRET: { required: false }
       WEB_SEARCH_PROVIDER: { required: false }
       WEB_SEARCH_API_KEY: { required: false }
+      # Webhook verification + WS fan-out (storefront-api campaign/back-in-stock, inbox SNS + Redis, subscription Stripe/PayPal)
+      CAMPAIGN_WEBHOOK_SECRET: { required: false }
+      BACK_IN_STOCK_TOKEN_SECRET: { required: false }
+      SNS_ALLOWED_TOPIC_ARNS: { required: false }
+      REDIS_URL: { required: false }
+      STRIPE_WEBHOOK_SECRET: { required: false }
+      PAYPAL_WEBHOOK_ID: { required: false }
       MARKETING_INTERNAL_KEY:       { required: false }
+      ANTHROPIC_API_KEY_DEV:        { required: false }  # Dev/Staging use a separate key so test spend is apart from prod
       MARKETING_TRACKING_SECRET:    { required: false }
       FLOW_INTERNAL_KEY:           { required: false }
       EMAIL_INTERNAL_KEY:           { required: false }
@@ -130,6 +138,7 @@ on:
       DOCS_INTERNAL_SERVICE_KEY:    { required: false }
       CRM_SYNC_INTERNAL_KEY:        { required: false }
       MAINTENANCE_INTERNAL_KEY:        { required: false }
+      SUPPORT_INTERNAL_KEY:         { required: false }
       PLATFORM_OPS_INTERNAL_KEY:    { required: false }
       PROJECTS_INTERNAL_KEY:        { required: false }
       MANUFACTURING_INTERNAL_KEY:   { required: false }
@@ -194,8 +203,57 @@ env:
 jobs:
 
   # ── Gate: single merged job ────────────────────────────────────────────────
+  # Lane pick (see scripts/gcp-burst.sh in SO360 V.2): Contabo by default; GCP burst while org variable
+  # NB_BURST is plan|auto — except re-runs and re-pushes after a failed run, which stay on Contabo.
+  # NB_BURST=batch (bulk run, Contabo + burst together): first runs go to lane-burst; re-runs go to nb-pool,
+  # a label on both Contabo runner-vm and burst runners, so whichever is free first takes them.
+  # gcp-burst.sh watch flips NB_BURST to off when org active jobs drop below the threshold.
+  route:
+    runs-on: [self-hosted, nb-route]
+    timeout-minutes: 3
+    outputs:
+      runs_on: ${{ steps.r.outputs.runs_on }}
+    steps:
+      - id: r
+        env:
+          MODE: ${{ vars.NB_BURST }}
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ github.head_ref || github.ref_name }}
+          ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          lane='["self-hosted","runner-vm"]'; why="NB_BURST=${MODE:-off}"
+          if [ "${MODE:-off}" = batch ] && [ "$ATTEMPT" = 1 ]; then lane='["self-hosted","lane-burst"]'; why="NB_BURST=batch - first run on burst"
+          elif [ "${MODE:-off}" = batch ]; then lane='["self-hosted","nb-pool"]'; why="NB_BURST=batch - re-run $ATTEMPT on first free Contabo or burst runner"
+          elif [ "$ATTEMPT" != 1 ]; then why="re-run attempt $ATTEMPT"
+          elif [ "${MODE:-off}" != off ]; then
+            api="$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions"
+            auth=(-H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json")
+            # Resolve the caller's workflow from this run itself: inside a reusable workflow github.workflow
+            # and github.workflow_ref describe the reusable file, not the caller repo's copy.
+            wid=$(curl -fsS -m 10 "${auth[@]}" "$api/runs/$GITHUB_RUN_ID" | jq -r '.workflow_id // empty' 2>/dev/null) || wid=
+            last=unknown
+            if [ -n "$wid" ]; then
+              b=$(jq -rn --arg b "$BRANCH" '$b|@uri')
+              last=$(curl -fsS -m 10 "${auth[@]}" "$api/workflows/$wid/runs?branch=$b&status=completed&per_page=3" |
+                jq -r --arg id "$GITHUB_RUN_ID" '[.workflow_runs[]|select((.id|tostring)!=$id)][0].conclusion // "none"' 2>/dev/null) || last=unknown
+            fi
+            case "$last" in
+              failure) why="previous run of this workflow on $BRANCH failed" ;;
+              unknown) why="run history unavailable - staying on Contabo" ;;
+              *)       lane='["self-hosted","lane-burst"]' ;;
+            esac
+          fi
+          echo "runs_on=$lane" >> "$GITHUB_OUTPUT"
+          echo "lane: $lane ($why)" >> "$GITHUB_STEP_SUMMARY"
+
   gate:
-    runs-on: [self-hosted, runner-vm, lane-dev]  # TEMP release lane — revert after release
+    needs: [route]
+    # Superseded runs on the same branch cancel here (never on main); build-deploy keeps its own
+    # non-cancelling group so an in-flight deploy is never cut off.
+    concurrency:
+      group: nb-${{ github.workflow }}-${{ inputs.service_name }}-${{ github.ref }}-gate
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    runs-on: ${{ fromJSON(needs.route.outputs.runs_on) }}
     steps:
       - uses: actions/checkout@v4.3.1
         with:
@@ -375,6 +433,8 @@ jobs:
         env:
           CI: 'true'
         run: |
+          # Lint runs alongside the unit tests instead of as a serial step; both must pass.
+          ( npm run lint --if-present > "$RUNNER_TEMP/lint.log" 2>&1 ) & LINT_PID=$!
           # `--passWithNoTests` makes an empty or mis-globbed suite exit 0.
           # Assert a floor first so "0 tests" fails loudly with a name attached
           # instead of reading as a pass.
@@ -394,8 +454,39 @@ jobs:
           else
             npm test -- --passWithNoTests --forceExit --ci $WORKER_FLAGS
           fi
-      - name: Lint
-        run: npm run lint --if-present
+          LINT_RC=0; wait "$LINT_PID" || LINT_RC=$?
+          cat "$RUNNER_TEMP/lint.log"
+          [ "$LINT_RC" -eq 0 ] || { echo "::error::Lint failed (exit $LINT_RC)"; exit "$LINT_RC"; }
+      - name: Check dependency licenses
+        run: >-
+          npx license-checker
+          --failOn "GPL-2.0;GPL-3.0;AGPL-3.0;LGPL-2.0;LGPL-2.1;LGPL-3.0"
+          --excludePrivatePackages
+  # ── Security (parallel with gate; build-deploy needs both to pass) ───────
+  security:
+    needs: [route]
+    runs-on: ${{ fromJSON(needs.route.outputs.runs_on) }}
+    timeout-minutes: 15
+    # Superseded runs on the same branch cancel here (never on main); build-deploy keeps its own
+    # non-cancelling group so an in-flight deploy is never cut off.
+    concurrency:
+      group: nb-${{ github.workflow }}-${{ inputs.service_name }}-${{ github.ref }}-security
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@v4.3.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4.4.0
+        with:
+          node-version: ${{ inputs.node_version }}
+      # npm audit reads package-lock.json only, so this job needs no install.
+      # Same scoped-registry config the gate had before audit moved here (parity).
+      - name: Configure private package registry
+        run: |
+          npm config set @so360:registry https://npm.pkg.github.com --global
+          npm config set //npm.pkg.github.com/:_authToken "${PAT_TOKEN}" --global
+        env:
+          PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
       - name: Security audit
         env:
           NB_EVENT: ${{ github.event_name }}
@@ -429,11 +520,6 @@ jobs:
             echo "$AUDIT_OUT" | tail -40
           fi
           exit $AUDIT_EXIT
-      - name: Check dependency licenses
-        run: >-
-          npx license-checker
-          --failOn "GPL-2.0;GPL-3.0;AGPL-3.0;LGPL-2.0;LGPL-2.1;LGPL-3.0"
-          --excludePrivatePackages
       - name: Scan for secrets
         run: |
           rm -rf dist/ coverage/
@@ -472,11 +558,17 @@ jobs:
             run_gitleaks /tmp/gitleaks
           fi
 
-  # ── Parallel (both need gate) ──────────────────────────────────────────────
+
+  # ── Parallel with gate (build-deploy needs all) ──────────────────────────────────────────────
   contract-tests:
     name: API Contract Tests
-    runs-on: [self-hosted, runner-vm, lane-dev]  # TEMP release lane — revert after release
-    needs: [gate]
+    runs-on: ${{ fromJSON(needs.route.outputs.runs_on) }}
+    needs: [route]
+    # Superseded runs on the same branch cancel here (never on main); build-deploy keeps its own
+    # non-cancelling group so an in-flight deploy is never cut off.
+    concurrency:
+      group: nb-${{ github.workflow }}-${{ inputs.service_name }}-${{ github.ref }}-contract-tests
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
     steps:
       - uses: actions/checkout@v4.3.1
       - uses: actions/setup-node@v4.4.0
@@ -660,8 +752,13 @@ jobs:
 
   integration-tests:
     name: Integration Tests
-    runs-on: [self-hosted, runner-vm, lane-dev]  # TEMP release lane — revert after release
-    needs: [gate]
+    runs-on: ${{ fromJSON(needs.route.outputs.runs_on) }}
+    needs: [route]
+    # Superseded runs on the same branch cancel here (never on main); build-deploy keeps its own
+    # non-cancelling group so an in-flight deploy is never cut off.
+    concurrency:
+      group: nb-${{ github.workflow }}-${{ inputs.service_name }}-${{ github.ref }}-integration-tests
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
     steps:
       - uses: actions/checkout@v4.3.1
       - uses: actions/setup-node@v4.4.0
@@ -850,10 +947,10 @@ jobs:
 
   # ── Build + Deploy (ALL gates must pass) ───────────────────────────────────
   build-deploy:
-    needs: [gate, contract-tests, integration-tests]
+    needs: [route, gate, security, contract-tests, integration-tests]
     # Linux only: the Mac Mini gate runners also carry `contabo` (they run the
     # gate), but this job builds + rsyncs to the VMs and assumes a Linux host.
-    runs-on: [self-hosted, runner-vm, lane-dev]  # TEMP release lane — revert after release
+    runs-on: ${{ fromJSON(needs.route.outputs.runs_on) }}
     timeout-minutes: 20
     concurrency:
       group: neonbee-deploy-${{ inputs.service_name }}-${{ github.ref_name }}
@@ -1124,17 +1221,24 @@ jobs:
             [ -n "${{ secrets.REVALIDATE_SECRET }}" ] && echo "REVALIDATE_SECRET=${{ secrets.REVALIDATE_SECRET }}" >> .env.ci
             [ -n "${{ secrets.WEB_SEARCH_PROVIDER }}" ] && echo "WEB_SEARCH_PROVIDER=${{ secrets.WEB_SEARCH_PROVIDER }}" >> .env.ci
             [ -n "${{ secrets.WEB_SEARCH_API_KEY }}" ] && echo "WEB_SEARCH_API_KEY=${{ secrets.WEB_SEARCH_API_KEY }}" >> .env.ci
+            [ -n "${{ secrets.CAMPAIGN_WEBHOOK_SECRET }}" ] && echo "CAMPAIGN_WEBHOOK_SECRET=${{ secrets.CAMPAIGN_WEBHOOK_SECRET }}" >> .env.ci
+            [ -n "${{ secrets.BACK_IN_STOCK_TOKEN_SECRET }}" ] && echo "BACK_IN_STOCK_TOKEN_SECRET=${{ secrets.BACK_IN_STOCK_TOKEN_SECRET }}" >> .env.ci
+            [ -n "${{ secrets.SNS_ALLOWED_TOPIC_ARNS }}" ] && echo "SNS_ALLOWED_TOPIC_ARNS=${{ secrets.SNS_ALLOWED_TOPIC_ARNS }}" >> .env.ci
+            [ -n "${{ secrets.REDIS_URL }}" ] && echo "REDIS_URL=${{ secrets.REDIS_URL }}" >> .env.ci
+            [ -n "${{ secrets.STRIPE_WEBHOOK_SECRET }}" ] && echo "STRIPE_WEBHOOK_SECRET=${{ secrets.STRIPE_WEBHOOK_SECRET }}" >> .env.ci
+            [ -n "${{ secrets.PAYPAL_WEBHOOK_ID }}" ] && echo "PAYPAL_WEBHOOK_ID=${{ secrets.PAYPAL_WEBHOOK_ID }}" >> .env.ci
             [ -n "${{ secrets.MARKETING_INTERNAL_KEY }}" ] && echo "MARKETING_INTERNAL_KEY=${{ secrets.MARKETING_INTERNAL_KEY }}"                  >> .env.ci
             [ -n "${{ secrets.MARKETING_TRACKING_SECRET }}" ] && echo "MARKETING_TRACKING_SECRET=${{ secrets.MARKETING_TRACKING_SECRET }}"               >> .env.ci
             [ -n "${{ secrets.GEMINI_API_KEY }}" ]              && echo "GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}"                           >> .env.ci
             [ -n "${{ secrets.OPENAI_API_KEY }}" ]              && echo "OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}"                           >> .env.ci
-            [ -n "${{ secrets.ANTHROPIC_API_KEY }}" ]           && echo "ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}"                     >> .env.ci
+            [ -n "${{ secrets.ANTHROPIC_API_KEY_DEV || secrets.ANTHROPIC_API_KEY }}" ] && echo "ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY_DEV || secrets.ANTHROPIC_API_KEY }}"                     >> .env.ci
             [ -n "${{ secrets.STOREFRONT_INTERNAL_OPS_KEY }}" ] && echo "STOREFRONT_INTERNAL_OPS_KEY=${{ secrets.STOREFRONT_INTERNAL_OPS_KEY }}" >> .env.ci
             [ -n "${{ secrets.MOBILITY_INTERNAL_KEY }}" ]       && echo "MOBILITY_INTERNAL_KEY=${{ secrets.MOBILITY_INTERNAL_KEY }}"             >> .env.ci
             [ -n "${{ secrets.CHAT_INTERNAL_KEY }}" ]           && echo "CHAT_INTERNAL_KEY=${{ secrets.CHAT_INTERNAL_KEY }}"                     >> .env.ci
             [ -n "${{ secrets.DOCS_INTERNAL_SERVICE_KEY }}" ]   && echo "DOCS_INTERNAL_SERVICE_KEY=${{ secrets.DOCS_INTERNAL_SERVICE_KEY }}"     >> .env.ci
             [ -n "${{ secrets.CRM_SYNC_INTERNAL_KEY }}" ]       && echo "CRM_SYNC_INTERNAL_KEY=${{ secrets.CRM_SYNC_INTERNAL_KEY }}"             >> .env.ci
             [ -n "${{ secrets.MAINTENANCE_INTERNAL_KEY }}" ]       && echo "MAINTENANCE_INTERNAL_KEY=${{ secrets.MAINTENANCE_INTERNAL_KEY }}"             >> .env.ci
+            [ -n "${{ secrets.SUPPORT_INTERNAL_KEY }}" ]           && echo "SUPPORT_INTERNAL_KEY=${{ secrets.SUPPORT_INTERNAL_KEY }}"                     >> .env.ci
             # Channel Program: HS256 secret Core signs partner delegated-access session tokens with. Absent = /access/session returns 503 and no partner can enter a client tenant.
             [ -n "${{ secrets.CHANNEL_DELEGATION_SECRET }}" ] && echo "CHANNEL_DELEGATION_SECRET=${{ secrets.CHANNEL_DELEGATION_SECRET }}" >> .env.ci
             # Channel Program: AES-256-GCM key Subscription encrypts channel payout bank details with. Absent = payout-profile writes are refused (fail-closed).
@@ -1322,17 +1426,24 @@ jobs:
             [ -n "${{ secrets.REVALIDATE_SECRET }}" ] && echo "REVALIDATE_SECRET=${{ secrets.REVALIDATE_SECRET }}" >> .env.ci
             [ -n "${{ secrets.WEB_SEARCH_PROVIDER }}" ] && echo "WEB_SEARCH_PROVIDER=${{ secrets.WEB_SEARCH_PROVIDER }}" >> .env.ci
             [ -n "${{ secrets.WEB_SEARCH_API_KEY }}" ] && echo "WEB_SEARCH_API_KEY=${{ secrets.WEB_SEARCH_API_KEY }}" >> .env.ci
+            [ -n "${{ secrets.CAMPAIGN_WEBHOOK_SECRET }}" ] && echo "CAMPAIGN_WEBHOOK_SECRET=${{ secrets.CAMPAIGN_WEBHOOK_SECRET }}" >> .env.ci
+            [ -n "${{ secrets.BACK_IN_STOCK_TOKEN_SECRET }}" ] && echo "BACK_IN_STOCK_TOKEN_SECRET=${{ secrets.BACK_IN_STOCK_TOKEN_SECRET }}" >> .env.ci
+            [ -n "${{ secrets.SNS_ALLOWED_TOPIC_ARNS }}" ] && echo "SNS_ALLOWED_TOPIC_ARNS=${{ secrets.SNS_ALLOWED_TOPIC_ARNS }}" >> .env.ci
+            [ -n "${{ secrets.REDIS_URL }}" ] && echo "REDIS_URL=${{ secrets.REDIS_URL }}" >> .env.ci
+            [ -n "${{ secrets.STRIPE_WEBHOOK_SECRET }}" ] && echo "STRIPE_WEBHOOK_SECRET=${{ secrets.STRIPE_WEBHOOK_SECRET }}" >> .env.ci
+            [ -n "${{ secrets.PAYPAL_WEBHOOK_ID }}" ] && echo "PAYPAL_WEBHOOK_ID=${{ secrets.PAYPAL_WEBHOOK_ID }}" >> .env.ci
             [ -n "${{ secrets.MARKETING_INTERNAL_KEY }}" ] && echo "MARKETING_INTERNAL_KEY=${{ secrets.MARKETING_INTERNAL_KEY }}"                  >> .env.ci
             [ -n "${{ secrets.MARKETING_TRACKING_SECRET }}" ] && echo "MARKETING_TRACKING_SECRET=${{ secrets.MARKETING_TRACKING_SECRET }}"               >> .env.ci
             [ -n "${{ secrets.GEMINI_API_KEY }}" ]              && echo "GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}"                           >> .env.ci
             [ -n "${{ secrets.OPENAI_API_KEY }}" ]              && echo "OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}"                           >> .env.ci
-            [ -n "${{ secrets.ANTHROPIC_API_KEY }}" ]           && echo "ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}"                     >> .env.ci
+            [ -n "${{ secrets.ANTHROPIC_API_KEY_DEV || secrets.ANTHROPIC_API_KEY }}" ] && echo "ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY_DEV || secrets.ANTHROPIC_API_KEY }}"                     >> .env.ci
             [ -n "${{ secrets.STOREFRONT_INTERNAL_OPS_KEY }}" ] && echo "STOREFRONT_INTERNAL_OPS_KEY=${{ secrets.STOREFRONT_INTERNAL_OPS_KEY }}" >> .env.ci
             [ -n "${{ secrets.MOBILITY_INTERNAL_KEY }}" ]       && echo "MOBILITY_INTERNAL_KEY=${{ secrets.MOBILITY_INTERNAL_KEY }}"             >> .env.ci
             [ -n "${{ secrets.VAPID_PUBLIC_KEY }}" ]            && echo "VAPID_PUBLIC_KEY=${{ secrets.VAPID_PUBLIC_KEY }}"                       >> .env.ci
             [ -n "${{ secrets.VAPID_PRIVATE_KEY }}" ]           && echo "VAPID_PRIVATE_KEY=${{ secrets.VAPID_PRIVATE_KEY }}"                     >> .env.ci
             [ -n "${{ secrets.CRM_SYNC_INTERNAL_KEY }}" ]       && echo "CRM_SYNC_INTERNAL_KEY=${{ secrets.CRM_SYNC_INTERNAL_KEY }}"             >> .env.ci
             [ -n "${{ secrets.MAINTENANCE_INTERNAL_KEY }}" ]       && echo "MAINTENANCE_INTERNAL_KEY=${{ secrets.MAINTENANCE_INTERNAL_KEY }}"             >> .env.ci
+            [ -n "${{ secrets.SUPPORT_INTERNAL_KEY }}" ]           && echo "SUPPORT_INTERNAL_KEY=${{ secrets.SUPPORT_INTERNAL_KEY }}"                     >> .env.ci
             # Channel Program: HS256 secret Core signs partner delegated-access session tokens with. Absent = /access/session returns 503 and no partner can enter a client tenant.
             [ -n "${{ secrets.CHANNEL_DELEGATION_SECRET }}" ] && echo "CHANNEL_DELEGATION_SECRET=${{ secrets.CHANNEL_DELEGATION_SECRET }}" >> .env.ci
             # Channel Program: AES-256-GCM key Subscription encrypts channel payout bank details with. Absent = payout-profile writes are refused (fail-closed).
@@ -1438,9 +1549,9 @@ jobs:
   # No-ops silently when NOTIFY_WEBHOOK_URL is unset; never fails the pipeline.
   notify:
     name: Notify Teams
-    needs: [gate, contract-tests, integration-tests, build-deploy]
+    needs: [gate, security, contract-tests, integration-tests, build-deploy]
     if: always()
-    runs-on: [self-hosted, runner-vm, lane-dev]  # TEMP release lane — revert after release
+    runs-on: [self-hosted, runner-vm]
     steps:
       - name: Post pipeline result to Teams
         env:
