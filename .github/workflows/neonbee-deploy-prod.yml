@@ -15,7 +15,7 @@ on:
   workflow_call:
     inputs:
       test_max_workers:
-        description: 'Worker cap for jest/vitest in the unit, contract and integration steps (jest --maxWorkers; vitest --maxWorkers, plus --minWorkers=1 on vitest < 4). Number or percent; 0 disables the cap. Empty = jest 2, vitest 4.'
+        description: 'Worker cap for jest/vitest in the unit, contract and integration steps (jest --maxWorkers; vitest --maxWorkers, plus --minWorkers=1 on vitest < 4). Number or percent; 0 disables the cap. Empty = jest 2, vitest 2 (so360-shell-fe 4).'
         required: false
         type: string
         default: ''
@@ -241,9 +241,13 @@ env:
   # Runner = the script text (vitest wins), else package.json deps (wrapper
   # scripts such as `bash scripts/test.sh`). Nothing is printed when the
   # script already pins workers or runs in band, or when the cap is 0.
-  # Empty = per-runner default: jest 2, vitest 4. jsdom vitest suites are
-  # far heavier per file; so360-command's gate hit its 20-min limit at 2.
-  TEST_MAX_WORKERS: ${{ inputs.test_max_workers || '' }}
+  # Empty = jest 2, vitest 2 (so360-shell-fe 4). A vitest fork reached 3.6G RSS
+  # and earlyoom fired 28x/30min at 4; repos needing more pass test_max_workers.
+  TEST_MAX_WORKERS: ${{ inputs.test_max_workers || (github.repository == 'Neonbee-ai/so360-shell-fe' && '4') || '' }}
+  # V8 heap ceilings (MB). Job-wide for build/tsc/lint; per worker for tests.
+  # Repo/org variables override without a workflow change.
+  NB_HEAP_MB: ${{ vars.NB_HEAP_MB || '3072' }}
+  NB_TEST_HEAP_MB: ${{ vars.NB_TEST_HEAP_MB || '2048' }}
   TEST_WORKER_FLAGS_JS: |
     const fs = require('fs');
     const key = process.argv[1] || 'test';
@@ -253,7 +257,7 @@ env:
     const d = Object.assign({}, p.dependencies, p.devDependencies);
     let r = /vitest/.test(s) ? 'vitest' : /jest/.test(s) ? 'jest' : '';
     if (!r) r = d.vitest ? 'vitest' : d.jest ? 'jest' : '';
-    const n = String(process.env.TEST_MAX_WORKERS || (r === 'vitest' ? '4' : '2')).trim();
+    const n = String(process.env.TEST_MAX_WORKERS || '2').trim();
     if (!/^[1-9][0-9]*%?$/.test(n)) process.exit(0);
     if (r === 'jest') console.log('--maxWorkers=' + n);
     if (r === 'vitest') {
@@ -281,10 +285,59 @@ jobs:
   # gcp-burst.sh watch flips NB_BURST to off when org active jobs drop below the threshold.
   route:
     runs-on: [self-hosted, nb-route]
-    timeout-minutes: 3
+    timeout-minutes: 5
     outputs:
       runs_on: ${{ steps.r.outputs.runs_on }}
+      # 'true' only when this exact tree already passed gate + security (and, for
+      # backend, contract + integration) in a develop push run. See step 'prior'.
+      prior_pass: ${{ steps.prior.outputs.prior_pass || 'false' }}
     steps:
+      # ── Gate reuse on develop -> main promotion ─────────────────────────
+      # Main's tree is usually byte-identical to a develop commit whose push
+      # run already passed the same unit/contract/integration tiers. Reuse that
+      # result instead of re-running them. Fails closed: any API or jq error,
+      # a missing job, or a job that is not 'success' leaves prior_pass=false.
+      # A develop run still in progress is not waited for (no reuse).
+      # Kill switch: repo/org variable NB_GATE_REUSE=off. Re-runs never reuse.
+      - id: prior
+        if: >-
+          github.run_attempt == 1 && vars.NB_GATE_REUSE != 'off'
+          && ((github.event_name == 'push' && github.ref == 'refs/heads/main')
+          || (github.event_name == 'pull_request' && github.base_ref == 'main'))
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          KIND: ${{ inputs.deploy_type }}
+        run: |
+          set +e
+          out=false; why="no completed develop push run with a passing gate for this tree"
+          api="$GITHUB_API_URL/repos/$GITHUB_REPOSITORY"
+          auth=(-H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json")
+          get() { curl -fsS -m 10 "${auth[@]}" "$api/$1"; }
+          need='["gate","security"]'
+          [ "$KIND" = backend ] && need='["gate","security","API Contract Tests","Integration Tests"]'
+          c=$(get "commits/$SHA"); tree=$(jq -r '.commit.tree.sha // empty' <<<"$c" 2>/dev/null)
+          if [ -z "$tree" ]; then why="commit lookup failed"; else
+            # Candidates: this commit, its parents (merge commit / PR merge ref) and the PR head.
+            cands=$( { jq -r '.sha, .parents[].sha' <<<"$c" 2>/dev/null; [ -n "$PR_HEAD" ] && echo "$PR_HEAD"; } | awk 'NF && !x[$0]++')
+            for s in $cands; do
+              if [ "$s" != "$SHA" ]; then
+                t=$(get "commits/$s" | jq -r '.commit.tree.sha // empty' 2>/dev/null)
+                [ -n "$t" ] && [ "$t" = "$tree" ] || continue
+              fi
+              ids=$(get "actions/runs?head_sha=$s&branch=develop&event=push&status=completed&per_page=20" | jq -r '.workflow_runs[].id' 2>/dev/null)
+              for id in $ids; do
+                # Called-job names read "<caller job> / <job>"; every needed job must exist and be 'success'.
+                ok=$(get "actions/runs/$id/jobs?filter=latest&per_page=100" | jq -r --argjson need "$need" '
+                  [.jobs[] | {n: (.name | sub("^.* / "; "")), c: .conclusion}] as $j
+                  | [$need[] as $x | [$j[] | select(.n == $x)] | (length > 0 and all(.c == "success"))] | all' 2>/dev/null)
+                if [ "$ok" = true ]; then out=true; why="develop run $id passed $(jq -r 'join(", ")' <<<"$need") on $s (tree $tree)"; break 2; fi
+              done
+            done
+          fi
+          echo "prior_pass=$out" >> "$GITHUB_OUTPUT"
+          echo "gate reuse: $out ($why)" >> "$GITHUB_STEP_SUMMARY"
       - id: r
         env:
           MODE: ${{ vars.NB_BURST }}
@@ -355,7 +408,11 @@ jobs:
         # per-slot cache dir here — before npm ci — to keep the isolation that
         # stops shared _cacache races on Contabo hosts.
         shell: bash
-        run: echo "NPM_CONFIG_CACHE=$RUNNER_TEMP/npm-cache" >> "$GITHUB_ENV"
+        run: |
+          echo "NPM_CONFIG_CACHE=$RUNNER_TEMP/npm-cache" >> "$GITHUB_ENV"
+          # Job-wide V8 heap ceiling (build, tsc, lint) so one node process cannot
+          # take the host; a --max-old-space-size the caller already set wins.
+          case " ${NODE_OPTIONS:-} " in *--max-old-space-size*) ;; *) echo "NODE_OPTIONS=${NODE_OPTIONS:+$NODE_OPTIONS }--max-old-space-size=${NB_HEAP_MB:-3072}" >> "$GITHUB_ENV" ;; esac
 
       - uses: actions/cache@v4.3.0
         if: runner.os == 'Linux'
@@ -551,6 +608,7 @@ jobs:
           # AUDIT_LEVEL. Comma-separate further IDs here if ever needed.
           AUDIT_LEVEL: 'critical'
           AUDIT_IGNORE_IDS: 'GHSA-qwww-vcr4-c8h2'
+          PRIOR_PASS: ${{ needs.route.outputs.prior_pass }}
         run: |
           cat > "$RUNNER_TEMP/audit-check.js" <<'AUDIT_CHECK_JS'
           const fs = require('fs');
@@ -654,6 +712,10 @@ jobs:
             EXTRA_FLAGS="--passWithNoTests --forceExit --ci"
           fi
           WORKER_FLAGS=$(node -e "$TEST_WORKER_FLAGS_JS" test 2>/dev/null || true); echo "Test worker cap (test): ${WORKER_FLAGS:-none}"
+          # Per-worker heap cap (inherited by jest workers and vitest forks/threads);
+          # replaces the job-wide ceiling, keeps other flags (e.g. --experimental-vm-modules).
+          NB_NO=$(printf '%s' "${NODE_OPTIONS:-}" | sed -E 's/--max-old-space-size=[0-9]+//g')
+          export NODE_OPTIONS="$NB_NO --max-old-space-size=${NB_TEST_HEAP_MB:-2048}"
           EXTRA_FLAGS="$EXTRA_FLAGS $WORKER_FLAGS"
 
           # ── Spec floor ────────────────────────────────────────────────────
@@ -703,7 +765,11 @@ jobs:
             fi
           }
           TEST_RC=0
-          run_tests_with_timeout || TEST_RC=$?
+          if [ "${PRIOR_PASS:-}" = true ]; then
+            echo "::notice::Unit tests skipped: this tree already passed them on develop (route job summary has the run id). Audit, licenses and secrets still run."
+          else
+            run_tests_with_timeout || TEST_RC=$?
+          fi
           # A suite that never finishes is NOT a pass. This previously reset
           # RC=0 on timeout, so a hung run shipped straight to production with
           # nothing but a warning annotation — the gate's single largest trust
@@ -772,10 +838,10 @@ jobs:
 
   contract-tests:
     name: API Contract Tests
-    if: inputs.deploy_type == 'backend'
+    if: inputs.deploy_type == 'backend' && needs.route.outputs.prior_pass != 'true'
     needs: [route]
     runs-on: ${{ fromJSON(needs.route.outputs.runs_on) }}
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4.3.1
       - uses: actions/setup-node@v4.4.0
@@ -783,7 +849,11 @@ jobs:
           node-version: ${{ inputs.node_version }}
       - name: Isolate npm cache per job
         shell: bash
-        run: echo "NPM_CONFIG_CACHE=$RUNNER_TEMP/npm-cache" >> "$GITHUB_ENV"
+        run: |
+          echo "NPM_CONFIG_CACHE=$RUNNER_TEMP/npm-cache" >> "$GITHUB_ENV"
+          # Job-wide V8 heap ceiling (build, tsc, lint) so one node process cannot
+          # take the host; a --max-old-space-size the caller already set wins.
+          case " ${NODE_OPTIONS:-} " in *--max-old-space-size*) ;; *) echo "NODE_OPTIONS=${NODE_OPTIONS:+$NODE_OPTIONS }--max-old-space-size=${NB_HEAP_MB:-3072}" >> "$GITHUB_ENV" ;; esac
       - name: Configure private package registry
         # Idempotent (npm config set, not an append) since this runs on a
         # persistent self-hosted runner shared across jobs. Harmless when a
@@ -941,11 +1011,15 @@ jobs:
           fi
           echo "Running $COUNT contract spec file(s)"
           WORKER_FLAGS=$(node -e "$TEST_WORKER_FLAGS_JS" test:contract 2>/dev/null || true); echo "Test worker cap (test:contract): ${WORKER_FLAGS:-none}"
+          # Per-worker heap cap (inherited by jest workers and vitest forks/threads);
+          # replaces the job-wide ceiling, keeps other flags (e.g. --experimental-vm-modules).
+          NB_NO=$(printf '%s' "${NODE_OPTIONS:-}" | sed -E 's/--max-old-space-size=[0-9]+//g')
+          export NODE_OPTIONS="$NB_NO --max-old-space-size=${NB_TEST_HEAP_MB:-2048}"
           npm run test:contract -- $WORKER_FLAGS
 
   integration-tests:
     name: Integration Tests
-    if: inputs.deploy_type == 'backend'
+    if: inputs.deploy_type == 'backend' && needs.route.outputs.prior_pass != 'true'
     needs: [route]
     runs-on: ${{ fromJSON(needs.route.outputs.runs_on) }}
     timeout-minutes: 20
@@ -956,7 +1030,11 @@ jobs:
           node-version: ${{ inputs.node_version }}
       - name: Isolate npm cache per job
         shell: bash
-        run: echo "NPM_CONFIG_CACHE=$RUNNER_TEMP/npm-cache" >> "$GITHUB_ENV"
+        run: |
+          echo "NPM_CONFIG_CACHE=$RUNNER_TEMP/npm-cache" >> "$GITHUB_ENV"
+          # Job-wide V8 heap ceiling (build, tsc, lint) so one node process cannot
+          # take the host; a --max-old-space-size the caller already set wins.
+          case " ${NODE_OPTIONS:-} " in *--max-old-space-size*) ;; *) echo "NODE_OPTIONS=${NODE_OPTIONS:+$NODE_OPTIONS }--max-old-space-size=${NB_HEAP_MB:-3072}" >> "$GITHUB_ENV" ;; esac
       - name: Configure private package registry
         # Idempotent (npm config set, not an append) since this runs on a
         # persistent self-hosted runner shared across jobs. Harmless when a
@@ -1119,6 +1197,10 @@ jobs:
           fi
           echo "Running $COUNT integration spec file(s)"
           WORKER_FLAGS=$(node -e "$TEST_WORKER_FLAGS_JS" test:integration 2>/dev/null || true); echo "Test worker cap (test:integration): ${WORKER_FLAGS:-none}"
+          # Per-worker heap cap (inherited by jest workers and vitest forks/threads);
+          # replaces the job-wide ceiling, keeps other flags (e.g. --experimental-vm-modules).
+          NB_NO=$(printf '%s' "${NODE_OPTIONS:-}" | sed -E 's/--max-old-space-size=[0-9]+//g')
+          export NODE_OPTIONS="$NB_NO --max-old-space-size=${NB_TEST_HEAP_MB:-2048}"
           npm run test:integration -- $WORKER_FLAGS
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1190,7 +1272,11 @@ jobs:
         # per-slot cache dir here — before npm ci — to keep the isolation that
         # stops shared _cacache races on Contabo hosts.
         shell: bash
-        run: echo "NPM_CONFIG_CACHE=$RUNNER_TEMP/npm-cache" >> "$GITHUB_ENV"
+        run: |
+          echo "NPM_CONFIG_CACHE=$RUNNER_TEMP/npm-cache" >> "$GITHUB_ENV"
+          # Job-wide V8 heap ceiling (build, tsc, lint) so one node process cannot
+          # take the host; a --max-old-space-size the caller already set wins.
+          case " ${NODE_OPTIONS:-} " in *--max-old-space-size*) ;; *) echo "NODE_OPTIONS=${NODE_OPTIONS:+$NODE_OPTIONS }--max-old-space-size=${NB_HEAP_MB:-3072}" >> "$GITHUB_ENV" ;; esac
 
       - uses: actions/cache@v4.3.0
         if: runner.os == 'Linux'
@@ -2564,6 +2650,7 @@ jobs:
   # Runs after all jobs regardless of outcome, so gate failures are reported too.
   # No-ops silently when NOTIFY_WEBHOOK_URL is unset; never fails the pipeline.
   notify:
+    timeout-minutes: 5
     name: Notify Teams
     needs: [gate, build-deploy]
     if: always()
