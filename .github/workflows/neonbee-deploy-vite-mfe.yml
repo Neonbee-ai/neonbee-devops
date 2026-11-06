@@ -18,7 +18,7 @@ on:
   workflow_call:
     inputs:
       test_max_workers:
-        description: 'Worker cap for jest/vitest in the unit, contract and integration steps (jest --maxWorkers; vitest --maxWorkers, plus --minWorkers=1 on vitest < 4). Number or percent; 0 disables the cap. Empty = jest 2, vitest 4.'
+        description: 'Worker cap for jest/vitest in the unit, contract and integration steps (jest --maxWorkers; vitest --maxWorkers, plus --minWorkers=1 on vitest < 4). Number or percent; 0 disables the cap. Empty = jest 2, vitest 2 (so360-shell-fe 4).'
         required: false
         type: string
         default: ''
@@ -94,9 +94,13 @@ env:
   # Runner = the script text (vitest wins), else package.json deps (wrapper
   # scripts such as `bash scripts/test.sh`). Nothing is printed when the
   # script already pins workers or runs in band, or when the cap is 0.
-  # Empty = per-runner default: jest 2, vitest 4. jsdom vitest suites are
-  # far heavier per file; so360-command's gate hit its 20-min limit at 2.
-  TEST_MAX_WORKERS: ${{ inputs.test_max_workers || '' }}
+  # Empty = jest 2, vitest 2 (so360-shell-fe 4). A vitest fork reached 3.6G RSS
+  # and earlyoom fired 28x/30min at 4; repos needing more pass test_max_workers.
+  TEST_MAX_WORKERS: ${{ inputs.test_max_workers || (github.repository == 'Neonbee-ai/so360-shell-fe' && '4') || '' }}
+  # V8 heap ceilings (MB). Job-wide for build/tsc/lint; per worker for tests.
+  # Repo/org variables override without a workflow change.
+  NB_HEAP_MB: ${{ vars.NB_HEAP_MB || '3072' }}
+  NB_TEST_HEAP_MB: ${{ vars.NB_TEST_HEAP_MB || '2048' }}
   TEST_WORKER_FLAGS_JS: |
     const fs = require('fs');
     const key = process.argv[1] || 'test';
@@ -106,7 +110,7 @@ env:
     const d = Object.assign({}, p.dependencies, p.devDependencies);
     let r = /vitest/.test(s) ? 'vitest' : /jest/.test(s) ? 'jest' : '';
     if (!r) r = d.vitest ? 'vitest' : d.jest ? 'jest' : '';
-    const n = String(process.env.TEST_MAX_WORKERS || (r === 'vitest' ? '4' : '2')).trim();
+    const n = String(process.env.TEST_MAX_WORKERS || '2').trim();
     if (!/^[1-9][0-9]*%?$/.test(n)) process.exit(0);
     if (r === 'jest') console.log('--maxWorkers=' + n);
     if (r === 'vitest') {
@@ -169,6 +173,7 @@ jobs:
           echo "lane: $lane ($why)" >> "$GITHUB_STEP_SUMMARY"
 
   gate:
+    timeout-minutes: ${{ github.repository == 'Neonbee-ai/so360-shell-fe' && 40 || 20 }}
     needs: [route]
     # Superseded runs on the same branch cancel here (never on main); build-deploy keeps its own
     # non-cancelling group so an in-flight deploy is never cut off.
@@ -188,7 +193,11 @@ jobs:
         # per-slot cache dir here — before npm ci — to keep the isolation that
         # stops shared _cacache races on Contabo hosts.
         shell: bash
-        run: echo "NPM_CONFIG_CACHE=$RUNNER_TEMP/npm-cache" >> "$GITHUB_ENV"
+        run: |
+          echo "NPM_CONFIG_CACHE=$RUNNER_TEMP/npm-cache" >> "$GITHUB_ENV"
+          # Job-wide V8 heap ceiling (build, tsc, lint) so one node process cannot
+          # take the host; a --max-old-space-size the caller already set wins.
+          case " ${NODE_OPTIONS:-} " in *--max-old-space-size*) ;; *) echo "NODE_OPTIONS=${NODE_OPTIONS:+$NODE_OPTIONS }--max-old-space-size=${NB_HEAP_MB:-3072}" >> "$GITHUB_ENV" ;; esac
 
       - uses: actions/cache@v4.3.0
         if: runner.os == 'Linux'
@@ -358,6 +367,10 @@ jobs:
           # Lint runs alongside the unit tests instead of as a serial step; both must pass.
           ( npm run lint --if-present > "$RUNNER_TEMP/lint.log" 2>&1 ) & LINT_PID=$!
           WORKER_FLAGS=$(node -e "$TEST_WORKER_FLAGS_JS" test 2>/dev/null || true); echo "Test worker cap (test): ${WORKER_FLAGS:-none}"
+          # Per-worker heap cap (inherited by jest workers and vitest forks/threads);
+          # replaces the job-wide ceiling, keeps other flags (e.g. --experimental-vm-modules).
+          NB_NO=$(printf '%s' "${NODE_OPTIONS:-}" | sed -E 's/--max-old-space-size=[0-9]+//g')
+          export NODE_OPTIONS="$NB_NO --max-old-space-size=${NB_TEST_HEAP_MB:-2048}"
           npm test -- $WORKER_FLAGS
           LINT_RC=0; wait "$LINT_PID" || LINT_RC=$?
           cat "$RUNNER_TEMP/lint.log"
@@ -486,7 +499,11 @@ jobs:
         # per-slot cache dir here — before npm ci — to keep the isolation that
         # stops shared _cacache races on Contabo hosts.
         shell: bash
-        run: echo "NPM_CONFIG_CACHE=$RUNNER_TEMP/npm-cache" >> "$GITHUB_ENV"
+        run: |
+          echo "NPM_CONFIG_CACHE=$RUNNER_TEMP/npm-cache" >> "$GITHUB_ENV"
+          # Job-wide V8 heap ceiling (build, tsc, lint) so one node process cannot
+          # take the host; a --max-old-space-size the caller already set wins.
+          case " ${NODE_OPTIONS:-} " in *--max-old-space-size*) ;; *) echo "NODE_OPTIONS=${NODE_OPTIONS:+$NODE_OPTIONS }--max-old-space-size=${NB_HEAP_MB:-3072}" >> "$GITHUB_ENV" ;; esac
 
       - uses: actions/cache@v4.3.0
         if: runner.os == 'Linux'
@@ -1114,6 +1131,7 @@ jobs:
   # Runs after all jobs regardless of outcome, so gate failures are reported too.
   # No-ops silently when NOTIFY_WEBHOOK_URL is unset; never fails the pipeline.
   notify:
+    timeout-minutes: 5
     name: Notify Teams
     needs: [gate, security, build-deploy]
     if: always()
