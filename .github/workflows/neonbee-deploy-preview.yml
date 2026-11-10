@@ -104,6 +104,7 @@ on:
         type: string
         default: ''
     secrets:
+      NB_BURST_DISPATCH_TOKEN:      { required: false }  # neonbee-devops actions:write; burst-label VM request
       PREVIEW_HOST:            { required: false }
       PREVIEW_SSH_KEY:         { required: false }
       CONTABO_SSH_KEY:         { required: false }
@@ -239,9 +240,32 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           BRANCH: ${{ github.head_ref || github.ref_name }}
           ATTEMPT: ${{ github.run_attempt }}
+          EVENT: ${{ github.event_name }}
+          SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          PR_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+          DISPATCH_TOKEN: ${{ secrets.NB_BURST_DISPATCH_TOKEN }}
         run: |
           lane='["self-hosted","runner-vm"]'; why="NB_BURST=${MODE:-off}"
-          if [ "${MODE:-off}" = batch ] && [ "$ATTEMPT" = 1 ]; then lane='["self-hosted","lane-burst"]'; why="NB_BURST=batch - first run on burst"
+          # PR label burst / burst:s|m|l|xl (on this PR, or on the PR merged by this push) -> nb-pool: Contabo
+          # runner-vm and GCP burst runners both carry it, so each job takes the first free runner and never
+          # waits on the VM (Contabo is the fallback). Also asks neonbee-devops burst-on-label.yml for the VM.
+          re='^burst(:(s|m|l|xl))?$'; bsrc="PR label"
+          blabel=$(jq -r --arg re "$re" 'if type == "array" then ([.[] | strings | select(test($re))][0] // empty) else empty end' <<<"${PR_LABELS:-null}" 2>/dev/null) || blabel=
+          if [ -z "$blabel" ] && [ "$EVENT" = push ]; then
+            bsrc=$(curl -fsS -m 10 -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+              "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/commits/$SHA/pulls" |
+              jq -r --arg re "$re" '[.[] | {n: .number, l: ([.labels[]?.name | select(test($re))][0])} | select(.l)][0] // empty | "\(.l) merged PR #\(.n)"' 2>/dev/null) || bsrc=
+            blabel=${bsrc%% *}
+          fi
+          if [ -n "$blabel" ]; then lane='["self-hosted","nb-pool"]'; why="burst label $blabel ($bsrc) - first free Contabo or GCP burst runner"
+            size=${blabel#burst}; size=${size#:}; size=${size:-auto}
+            if [ -n "$DISPATCH_TOKEN" ] && curl -fsS -m 10 -X POST -H "Authorization: Bearer $DISPATCH_TOKEN" -H "Accept: application/vnd.github+json" \
+                "$GITHUB_API_URL/repos/Neonbee-ai/neonbee-devops/actions/workflows/burst-on-label.yml/dispatches" \
+                -d "$(jq -cn --arg s "$GITHUB_REPOSITORY $blabel" --arg z "$size" --arg r "$GITHUB_REPOSITORY" --arg h "$SHA" \
+                  '{ref: "main", inputs: {source: $s, size: $z, repo: $r, sha: $h}}')" >/dev/null 2>&1; then
+              why="$why; burst VM requested (size $size)"
+            fi
+          elif [ "${MODE:-off}" = batch ] && [ "$ATTEMPT" = 1 ]; then lane='["self-hosted","lane-burst"]'; why="NB_BURST=batch - first run on burst"
           elif [ "${MODE:-off}" = batch ]; then lane='["self-hosted","nb-pool"]'; why="NB_BURST=batch - re-run $ATTEMPT on first free Contabo or burst runner"
           elif [ "$ATTEMPT" != 1 ]; then why="re-run attempt $ATTEMPT"
           elif [ "${MODE:-off}" != off ]; then
