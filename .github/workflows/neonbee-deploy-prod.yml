@@ -167,6 +167,11 @@ on:
       REDIS_URL: { required: false }
       STRIPE_WEBHOOK_SECRET: { required: false }
       PAYPAL_WEBHOOK_ID: { required: false }
+      RAZORPAY_KEY_ID: { required: false }
+      RAZORPAY_KEY_SECRET: { required: false }
+      BILLING_SELLER_NAME: { required: false }
+      BILLING_SELLER_ADDRESS: { required: false }
+      BILLING_SELLER_TAX_ID: { required: false }
       CHAT_INTERNAL_KEY:             { required: false }
       CRM_SYNC_INTERNAL_KEY:         { required: false }
       PROJECTS_INTERNAL_KEY:         { required: false }
@@ -2132,6 +2137,11 @@ jobs:
             [ -n "${{ secrets.REDIS_URL }}" ] && echo "REDIS_URL=${{ secrets.REDIS_URL }}" >> .env.ci
             [ -n "${{ secrets.STRIPE_WEBHOOK_SECRET }}" ] && echo "STRIPE_WEBHOOK_SECRET=${{ secrets.STRIPE_WEBHOOK_SECRET }}" >> .env.ci
             [ -n "${{ secrets.PAYPAL_WEBHOOK_ID }}" ] && echo "PAYPAL_WEBHOOK_ID=${{ secrets.PAYPAL_WEBHOOK_ID }}" >> .env.ci
+            [ -n "${{ secrets.RAZORPAY_KEY_ID }}" ] && echo "RAZORPAY_KEY_ID=${{ secrets.RAZORPAY_KEY_ID }}" >> .env.ci
+            [ -n "${{ secrets.RAZORPAY_KEY_SECRET }}" ] && echo "RAZORPAY_KEY_SECRET=${{ secrets.RAZORPAY_KEY_SECRET }}" >> .env.ci
+            [ -n "${{ secrets.BILLING_SELLER_NAME }}" ] && echo "BILLING_SELLER_NAME=${{ secrets.BILLING_SELLER_NAME }}" >> .env.ci
+            [ -n "${{ secrets.BILLING_SELLER_ADDRESS }}" ] && echo "BILLING_SELLER_ADDRESS=${{ secrets.BILLING_SELLER_ADDRESS }}" >> .env.ci
+            [ -n "${{ secrets.BILLING_SELLER_TAX_ID }}" ] && echo "BILLING_SELLER_TAX_ID=${{ secrets.BILLING_SELLER_TAX_ID }}" >> .env.ci
             [ -n "${{ secrets.MARKETING_INTERNAL_KEY }}" ] && echo "MARKETING_INTERNAL_KEY=${{ secrets.MARKETING_INTERNAL_KEY }}"                  >> .env.ci
             [ -n "${{ secrets.MARKETING_TRACKING_SECRET }}" ] && echo "MARKETING_TRACKING_SECRET=${{ secrets.MARKETING_TRACKING_SECRET }}"               >> .env.ci
             [ -n "${{ secrets.CRM_SYNC_INTERNAL_KEY }}" ]     && echo "CRM_SYNC_INTERNAL_KEY=${{ secrets.CRM_SYNC_INTERNAL_KEY }}"   >> .env.ci
