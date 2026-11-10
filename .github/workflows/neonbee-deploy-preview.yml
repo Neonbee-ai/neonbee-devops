@@ -6,7 +6,7 @@
 # Only the repos a branch touches are deployed; everything else in the preview
 # is develop's (nginx fallback on the preview host — see preview/README.md).
 #
-#   check  → skip [no-preview] commits, compute the slug (and, for site/next,
+#   check  → skip [no-preview] commits and fix/* branches (opt in: preview label, [preview], fix/pulse-hotfixes), compute the slug (and, for site/next,
 #            the app's own host pr-<slug>--<name>)
 #   build  → build only (tests run in the pre-push gate and the PR gate)
 #   deploy → Access app, then DNS (never the other way round), rsync to the
@@ -104,6 +104,7 @@ on:
         type: string
         default: ''
     secrets:
+      NB_BURST_DISPATCH_TOKEN:      { required: false }  # neonbee-devops actions:write; burst-label VM request
       PREVIEW_HOST:            { required: false }
       PREVIEW_SSH_KEY:         { required: false }
       CONTABO_SSH_KEY:         { required: false }
@@ -152,6 +153,7 @@ on:
       COMPENSATION_ENCRYPTION_KEY: { required: false }
       PLATFORM_OPS_INTERNAL_KEY:   { required: false }
       PROJECTS_INTERNAL_KEY:       { required: false }
+      FLOW_INTERNAL_KEY:           { required: false }
       MANUFACTURING_INTERNAL_KEY:  { required: false }
       ACCOUNTING_INTERNAL_KEY:     { required: false }
       ACCOUNTING_INTERNAL_KEY_2:   { required: false }
@@ -189,6 +191,11 @@ on:
       REDIS_URL: { required: false }
       STRIPE_WEBHOOK_SECRET: { required: false }
       PAYPAL_WEBHOOK_ID: { required: false }
+      RAZORPAY_KEY_ID: { required: false }
+      RAZORPAY_KEY_SECRET: { required: false }
+      BILLING_SELLER_NAME: { required: false }
+      BILLING_SELLER_ADDRESS: { required: false }
+      BILLING_SELLER_TAX_ID: { required: false }
       BUNNY_STORAGE_HOSTNAME:      { required: false }
       BUNNY_STORAGE_ZONE:          { required: false }
       BUNNY_ACCESS_KEY:            { required: false }
@@ -206,6 +213,9 @@ on:
       AWS_REGION:                  { required: false }
 
 env:
+  # GitHub runners refuse NODE_OPTIONS via $GITHUB_ENV, so the build heap cap is set here; a step env NODE_OPTIONS still wins.
+  NODE_OPTIONS: --max-old-space-size=${{ vars.NB_HEAP_MB || '3072' }}
+  NB_HEAP_MB: ${{ vars.NB_HEAP_MB || '3072' }}
   ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: true
   NPM_CONFIG_FETCH_RETRIES: '5'
   NPM_CONFIG_FETCH_RETRY_MINTIMEOUT: '2000'
@@ -230,9 +240,32 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           BRANCH: ${{ github.head_ref || github.ref_name }}
           ATTEMPT: ${{ github.run_attempt }}
+          EVENT: ${{ github.event_name }}
+          SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          PR_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+          DISPATCH_TOKEN: ${{ secrets.NB_BURST_DISPATCH_TOKEN }}
         run: |
           lane='["self-hosted","runner-vm"]'; why="NB_BURST=${MODE:-off}"
-          if [ "${MODE:-off}" = batch ] && [ "$ATTEMPT" = 1 ]; then lane='["self-hosted","lane-burst"]'; why="NB_BURST=batch - first run on burst"
+          # PR label burst / burst:s|m|l|xl (on this PR, or on the PR merged by this push) -> nb-pool: Contabo
+          # runner-vm and GCP burst runners both carry it, so each job takes the first free runner and never
+          # waits on the VM (Contabo is the fallback). Also asks neonbee-devops burst-on-label.yml for the VM.
+          re='^burst(:(s|m|l|xl))?$'; bsrc="PR label"
+          blabel=$(jq -r --arg re "$re" 'if type == "array" then ([.[] | strings | select(test($re))][0] // empty) else empty end' <<<"${PR_LABELS:-null}" 2>/dev/null) || blabel=
+          if [ -z "$blabel" ] && [ "$EVENT" = push ]; then
+            bsrc=$(curl -fsS -m 10 -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+              "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/commits/$SHA/pulls" |
+              jq -r --arg re "$re" '[.[] | {n: .number, l: ([.labels[]?.name | select(test($re))][0])} | select(.l)][0] // empty | "\(.l) merged PR #\(.n)"' 2>/dev/null) || bsrc=
+            blabel=${bsrc%% *}
+          fi
+          if [ -n "$blabel" ]; then lane='["self-hosted","nb-pool"]'; why="burst label $blabel ($bsrc) - first free Contabo or GCP burst runner"
+            size=${blabel#burst}; size=${size#:}; size=${size:-auto}
+            if [ -n "$DISPATCH_TOKEN" ] && curl -fsS -m 10 -X POST -H "Authorization: Bearer $DISPATCH_TOKEN" -H "Accept: application/vnd.github+json" \
+                "$GITHUB_API_URL/repos/Neonbee-ai/neonbee-devops/actions/workflows/burst-on-label.yml/dispatches" \
+                -d "$(jq -cn --arg s "$GITHUB_REPOSITORY $blabel" --arg z "$size" --arg r "$GITHUB_REPOSITORY" --arg h "$SHA" \
+                  '{ref: "main", inputs: {source: $s, size: $z, repo: $r, sha: $h}}')" >/dev/null 2>&1; then
+              why="$why; burst VM requested (size $size)"
+            fi
+          elif [ "${MODE:-off}" = batch ] && [ "$ATTEMPT" = 1 ]; then lane='["self-hosted","lane-burst"]'; why="NB_BURST=batch - first run on burst"
           elif [ "${MODE:-off}" = batch ]; then lane='["self-hosted","nb-pool"]'; why="NB_BURST=batch - re-run $ATTEMPT on first free Contabo or burst runner"
           elif [ "$ATTEMPT" != 1 ]; then why="re-run attempt $ATTEMPT"
           elif [ "${MODE:-off}" != off ]; then
@@ -257,6 +290,7 @@ jobs:
           echo "lane: $lane ($why)" >> "$GITHUB_STEP_SUMMARY"
 
   check:
+    timeout-minutes: 10
     runs-on: [self-hosted, runner-vm]
     outputs:
       run:  ${{ steps.c.outputs.run }}
@@ -267,6 +301,7 @@ jobs:
         env:
           BRANCH: ${{ github.ref_name }}
           MSG: ${{ github.event.head_commit.message }}
+          GH_TOKEN: ${{ github.token }}
           KIND: ${{ inputs.kind }}
           NAME: ${{ inputs.name }}
         run: |
@@ -278,6 +313,18 @@ jobs:
           if printf '%s' "$MSG" | grep -qiF '[no-preview]'; then
             echo "::notice::[no-preview] in the commit message — skipping"
             echo "run=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          # fix/* (hotfix) branches skip the preview to keep runners free: the PR gate, Dev and Prod
+          # deploys cover them. Opt in with fix/pulse-hotfixes (the shared hotfix preview),
+          # [preview] in the commit message, or a `preview` label on the branch's open PR.
+          if [[ "$BRANCH" == fix/* && "$BRANCH" != fix/pulse-hotfixes ]] && ! printf '%s' "$MSG" | grep -qiF '[preview]'; then
+            labels=$(curl -fsS -m 10 -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+              "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/pulls?state=open&head=${GITHUB_REPOSITORY_OWNER}:$(jq -rn --arg b "$BRANCH" '$b|@uri')" |
+              jq -r '[.[].labels[].name]|join(",")' 2>/dev/null) || labels=
+            if ! printf ',%s,' "$labels" | grep -qiF ',preview,'; then
+              echo "::notice::$BRANCH is a fix/ branch — no preview (add a 'preview' label to the PR and re-run, or push with [preview])"
+              echo "run=false" >> "$GITHUB_OUTPUT"; exit 0
+            fi
           fi
           case "$KIND" in fe|shell|be|site|next) ;; *) echo "::error::kind must be fe, shell, be, site or next"; exit 1 ;; esac
           [[ "$NAME" =~ ^[a-z0-9][a-z0-9-]{0,40}$ ]] || { echo "::error::invalid name '$NAME'"; exit 1; }
@@ -343,7 +390,11 @@ jobs:
 
       - name: Isolate npm cache per job
         shell: bash
-        run: echo "NPM_CONFIG_CACHE=$RUNNER_TEMP/npm-cache" >> "$GITHUB_ENV"
+        run: |
+          echo "NPM_CONFIG_CACHE=$RUNNER_TEMP/npm-cache" >> "$GITHUB_ENV"
+          # Job-wide V8 heap ceiling (build, tsc, lint) so one node process cannot
+          # take the host; a --max-old-space-size the caller already set wins.
+          : # heap cap comes from workflow-level env NODE_OPTIONS
 
       - uses: actions/cache@v4.3.0
         with:
@@ -619,6 +670,7 @@ jobs:
               echo "COMPENSATION_ENCRYPTION_KEY=${{ secrets.COMPENSATION_ENCRYPTION_KEY }}"
               echo "PLATFORM_OPS_INTERNAL_KEY=${{ secrets.PLATFORM_OPS_INTERNAL_KEY }}"
               echo "PROJECTS_INTERNAL_KEY=${{ secrets.PROJECTS_INTERNAL_KEY }}"
+              echo "FLOW_INTERNAL_KEY=${{ secrets.FLOW_INTERNAL_KEY }}"
               echo "MANUFACTURING_INTERNAL_KEY=${{ secrets.MANUFACTURING_INTERNAL_KEY }}"
               echo "ACCOUNTING_INTERNAL_KEY=${{ secrets.ACCOUNTING_INTERNAL_KEY }}"
               echo "ACCOUNTING_INTERNAL_KEY_2=${{ secrets.ACCOUNTING_INTERNAL_KEY_2 }}"
@@ -655,6 +707,11 @@ jobs:
               echo "REDIS_URL=${{ secrets.REDIS_URL }}"
               echo "STRIPE_WEBHOOK_SECRET=${{ secrets.STRIPE_WEBHOOK_SECRET }}"
               echo "PAYPAL_WEBHOOK_ID=${{ secrets.PAYPAL_WEBHOOK_ID }}"
+              echo "RAZORPAY_KEY_ID=${{ secrets.RAZORPAY_KEY_ID }}"
+              echo "RAZORPAY_KEY_SECRET=${{ secrets.RAZORPAY_KEY_SECRET }}"
+              echo "BILLING_SELLER_NAME=${{ secrets.BILLING_SELLER_NAME }}"
+              echo "BILLING_SELLER_ADDRESS=${{ secrets.BILLING_SELLER_ADDRESS }}"
+              echo "BILLING_SELLER_TAX_ID=${{ secrets.BILLING_SELLER_TAX_ID }}"
               echo "BUNNY_STORAGE_HOSTNAME=${{ secrets.BUNNY_STORAGE_HOSTNAME }}"
               echo "BUNNY_STORAGE_ZONE=${{ secrets.BUNNY_STORAGE_ZONE }}"
               echo "BUNNY_ACCESS_KEY=${{ secrets.BUNNY_ACCESS_KEY }}"
