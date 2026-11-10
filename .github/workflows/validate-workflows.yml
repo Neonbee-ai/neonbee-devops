@@ -37,6 +37,8 @@ jobs:
         run: |
           pip3 install pyyaml -q --break-system-packages 2>/dev/null || pip3 install pyyaml -q 2>/dev/null || true
           python3 -m unittest discover -s tests -p 'test_*.py' -v
+      - name: Burst VM tests (plain bash)
+        run: for t in tests/burst_*_test.sh; do bash "$t" || exit 1; done
 
   # ── Notify: Microsoft Teams webhook on completion ───────────────────────────
   # Additive only. Runs after the job regardless of outcome. No-ops when
