@@ -60,6 +60,9 @@ jobs:
               echo "[DRY RUN] would install $NAME, mkdir $WEB_ROOT, nginx -t && reload on $IP"
               continue
             fi
+            # Security-headers snippet is included by the vhost; install it first or nginx -t fails.
+            ssh root@"$IP" "mkdir -p /etc/nginx/snippets"
+            rsync -avz nginx/snippets/neonbee-security-headers.conf "root@$IP:/etc/nginx/snippets/neonbee-security-headers.conf"
             rsync -avz "$CONF" "root@$IP:/etc/nginx/sites-available/$NAME.new"
             ssh root@"$IP" "
               set -e
