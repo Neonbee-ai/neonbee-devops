@@ -228,6 +228,8 @@ on:
 # ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION was removed as of runner ≥ 2.335.0
 # (enforced June 16 2026); this replaces it.
 env:
+  # GitHub runners refuse NODE_OPTIONS via $GITHUB_ENV, so the build heap cap is set here; a step env NODE_OPTIONS still wins.
+  NODE_OPTIONS: --max-old-space-size=${{ vars.NB_HEAP_MB || '3072' }}
   # ── Test worker cap ──
   # The shared runner VM has 12 vCPU and runs 8 job slots. jest and vitest
   # default to (cores - 1) workers each, so concurrent jobs oversubscribed it
@@ -412,7 +414,7 @@ jobs:
           echo "NPM_CONFIG_CACHE=$RUNNER_TEMP/npm-cache" >> "$GITHUB_ENV"
           # Job-wide V8 heap ceiling (build, tsc, lint) so one node process cannot
           # take the host; a --max-old-space-size the caller already set wins.
-          case " ${NODE_OPTIONS:-} " in *--max-old-space-size*) ;; *) echo "NODE_OPTIONS=${NODE_OPTIONS:+$NODE_OPTIONS }--max-old-space-size=${NB_HEAP_MB:-3072}" >> "$GITHUB_ENV" ;; esac
+          : # heap cap comes from workflow-level env NODE_OPTIONS
 
       - uses: actions/cache@v4.3.0
         if: runner.os == 'Linux'
@@ -853,7 +855,7 @@ jobs:
           echo "NPM_CONFIG_CACHE=$RUNNER_TEMP/npm-cache" >> "$GITHUB_ENV"
           # Job-wide V8 heap ceiling (build, tsc, lint) so one node process cannot
           # take the host; a --max-old-space-size the caller already set wins.
-          case " ${NODE_OPTIONS:-} " in *--max-old-space-size*) ;; *) echo "NODE_OPTIONS=${NODE_OPTIONS:+$NODE_OPTIONS }--max-old-space-size=${NB_HEAP_MB:-3072}" >> "$GITHUB_ENV" ;; esac
+          : # heap cap comes from workflow-level env NODE_OPTIONS
       - name: Configure private package registry
         # Idempotent (npm config set, not an append) since this runs on a
         # persistent self-hosted runner shared across jobs. Harmless when a
@@ -1034,7 +1036,7 @@ jobs:
           echo "NPM_CONFIG_CACHE=$RUNNER_TEMP/npm-cache" >> "$GITHUB_ENV"
           # Job-wide V8 heap ceiling (build, tsc, lint) so one node process cannot
           # take the host; a --max-old-space-size the caller already set wins.
-          case " ${NODE_OPTIONS:-} " in *--max-old-space-size*) ;; *) echo "NODE_OPTIONS=${NODE_OPTIONS:+$NODE_OPTIONS }--max-old-space-size=${NB_HEAP_MB:-3072}" >> "$GITHUB_ENV" ;; esac
+          : # heap cap comes from workflow-level env NODE_OPTIONS
       - name: Configure private package registry
         # Idempotent (npm config set, not an append) since this runs on a
         # persistent self-hosted runner shared across jobs. Harmless when a
@@ -1276,7 +1278,7 @@ jobs:
           echo "NPM_CONFIG_CACHE=$RUNNER_TEMP/npm-cache" >> "$GITHUB_ENV"
           # Job-wide V8 heap ceiling (build, tsc, lint) so one node process cannot
           # take the host; a --max-old-space-size the caller already set wins.
-          case " ${NODE_OPTIONS:-} " in *--max-old-space-size*) ;; *) echo "NODE_OPTIONS=${NODE_OPTIONS:+$NODE_OPTIONS }--max-old-space-size=${NB_HEAP_MB:-3072}" >> "$GITHUB_ENV" ;; esac
+          : # heap cap comes from workflow-level env NODE_OPTIONS
 
       - uses: actions/cache@v4.3.0
         if: runner.os == 'Linux'

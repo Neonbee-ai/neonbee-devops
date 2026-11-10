@@ -206,6 +206,8 @@ on:
       AWS_REGION:                  { required: false }
 
 env:
+  # GitHub runners refuse NODE_OPTIONS via $GITHUB_ENV, so the build heap cap is set here; a step env NODE_OPTIONS still wins.
+  NODE_OPTIONS: --max-old-space-size=${{ vars.NB_HEAP_MB || '3072' }}
   NB_HEAP_MB: ${{ vars.NB_HEAP_MB || '3072' }}
   ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: true
   NPM_CONFIG_FETCH_RETRIES: '5'
@@ -362,7 +364,7 @@ jobs:
           echo "NPM_CONFIG_CACHE=$RUNNER_TEMP/npm-cache" >> "$GITHUB_ENV"
           # Job-wide V8 heap ceiling (build, tsc, lint) so one node process cannot
           # take the host; a --max-old-space-size the caller already set wins.
-          case " ${NODE_OPTIONS:-} " in *--max-old-space-size*) ;; *) echo "NODE_OPTIONS=${NODE_OPTIONS:+$NODE_OPTIONS }--max-old-space-size=${NB_HEAP_MB:-3072}" >> "$GITHUB_ENV" ;; esac
+          : # heap cap comes from workflow-level env NODE_OPTIONS
 
       - uses: actions/cache@v4.3.0
         with:
