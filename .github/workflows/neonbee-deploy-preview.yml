@@ -152,6 +152,7 @@ on:
       COMPENSATION_ENCRYPTION_KEY: { required: false }
       PLATFORM_OPS_INTERNAL_KEY:   { required: false }
       PROJECTS_INTERNAL_KEY:       { required: false }
+      FLOW_INTERNAL_KEY:           { required: false }
       MANUFACTURING_INTERNAL_KEY:  { required: false }
       ACCOUNTING_INTERNAL_KEY:     { required: false }
       ACCOUNTING_INTERNAL_KEY_2:   { required: false }
@@ -645,6 +646,7 @@ jobs:
               echo "COMPENSATION_ENCRYPTION_KEY=${{ secrets.COMPENSATION_ENCRYPTION_KEY }}"
               echo "PLATFORM_OPS_INTERNAL_KEY=${{ secrets.PLATFORM_OPS_INTERNAL_KEY }}"
               echo "PROJECTS_INTERNAL_KEY=${{ secrets.PROJECTS_INTERNAL_KEY }}"
+              echo "FLOW_INTERNAL_KEY=${{ secrets.FLOW_INTERNAL_KEY }}"
               echo "MANUFACTURING_INTERNAL_KEY=${{ secrets.MANUFACTURING_INTERNAL_KEY }}"
               echo "ACCOUNTING_INTERNAL_KEY=${{ secrets.ACCOUNTING_INTERNAL_KEY }}"
               echo "ACCOUNTING_INTERNAL_KEY_2=${{ secrets.ACCOUNTING_INTERNAL_KEY_2 }}"
