@@ -458,11 +458,13 @@ jobs:
         # in seconds instead of after the whole suite.
         if: inputs.typecheck || (inputs.deploy_type == 'backend' && !inputs.skip_typecheck)
         run: |
-          # Prefer the repo's own script. Otherwise check the tsconfig the
-          # deploy build compiles: nest-cli.json tsConfigPath, else
-          # tsconfig.build.json (usually excludes specs), else tsconfig.json.
+          # Opted-in repos (typecheck: true) use their own script if they have
+          # one. Default-on backends check exactly the tsconfig the deploy build
+          # compiles (nest-cli.json tsConfigPath, else tsconfig.build.json, else
+          # tsconfig.json), so this can only fail where `nest build` would too;
+          # a repo script may cover specs and be stricter than the build.
           # --noEmit + the node_modules installed above: no artefact, no install.
-          if npm run | grep -qE '^  (typecheck|type-check)$'; then
+          if [ "${{ inputs.typecheck }}" = "true" ] && npm run | grep -qE '^  (typecheck|type-check)$'; then
             npm run typecheck --if-present || npm run type-check --if-present
             exit $?
           fi
