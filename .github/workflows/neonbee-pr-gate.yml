@@ -464,6 +464,12 @@ jobs:
           # tsconfig.json), so this can only fail where `nest build` would too;
           # a repo script may cover specs and be stricter than the build.
           # --noEmit + the node_modules installed above: no artefact, no install.
+          # Default-on only for NestJS (nest build = tsc). Other backends
+          # (e.g. tsx/esbuild builds) never type-checked, so they opt in.
+          if [ "${{ inputs.typecheck }}" != "true" ] && [ ! -f nest-cli.json ]; then
+            echo "::notice::Not a NestJS repo — typecheck is opt-in (typecheck: true)."
+            exit 0
+          fi
           if [ "${{ inputs.typecheck }}" = "true" ] && npm run | grep -qE '^  (typecheck|type-check)$'; then
             npm run typecheck --if-present || npm run type-check --if-present
             exit $?
