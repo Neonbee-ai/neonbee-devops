@@ -327,13 +327,28 @@ class GivenAPullRequestGate(unittest.TestCase):
             "caught after merge.",
         )
 
-    def test_when_the_typecheck_tier_exists_then_it_is_opt_in(self):
-        # Enabling it for every repo at once would turn the next unrelated PR
-        # red anywhere a pre-existing type error is already sitting. Repos opt
-        # in as they are cleaned.
+    def test_when_the_typecheck_tier_exists_then_backends_default_on_others_opt_in(self):
+        # Backends: `nest build` in the deploy compiles the same tsconfig, so a
+        # pre-existing type error already blocks their deploy — gating it here
+        # adds no new red, it only moves the failure before the merge (TS2300
+        # in crm-be/flow-be, 2026-11-11). Frontends stay opt-in: enabling them
+        # all at once could turn the next unrelated PR red.
         body = read_workflow(PR_GATE)
-        self.assertIn("if: inputs.typecheck", body, f"{PR_GATE}: typecheck must be gated on its input.")
-        self.assertIn("default: false", body, f"{PR_GATE}: the typecheck input must default to false.")
+        self.assertIn(
+            "if: inputs.typecheck || (inputs.deploy_type == 'backend' && !inputs.skip_typecheck)",
+            body,
+            f"{PR_GATE}: typecheck must be default-on for backends and opt-in otherwise.",
+        )
+        self.assertIn("skip_typecheck:", body, f"{PR_GATE}: backends need an opt-out input.")
+
+    def test_when_the_typecheck_tier_runs_then_it_precedes_the_unit_tests(self):
+        # Fail fast: a compile error should not wait for the whole suite.
+        body = read_workflow(PR_GATE)
+        self.assertLess(
+            body.index("- name: Typecheck"),
+            body.index("- name: Run unit tests"),
+            f"{PR_GATE}: Typecheck must run before the unit tests.",
+        )
 
     def test_when_the_typecheck_tier_runs_then_it_emits_nothing(self):
         # The gate's charter is verification only — it must never build. tsc
