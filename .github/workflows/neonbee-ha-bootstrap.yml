@@ -115,7 +115,7 @@ jobs:
                 'proxy_set_header X-Real-IP \$remote_addr;' \
                 'proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;' \
                 'proxy_set_header X-Forwarded-Proto \$scheme;' \
-                'proxy_read_timeout 30s;' \
+                'proxy_read_timeout 300s;' \
                 > /etc/nginx/snippets/api-proxy-headers.conf
               echo 'Created api-proxy-headers.conf'
             else
@@ -128,6 +128,9 @@ jobs:
           HA_IP: ${{ secrets.HA_VM_IP }}
         run: |
           ssh-keyscan -H $HA_IP >> ~/.ssh/known_hosts 2>/dev/null
+          # Security-headers snippet is included by ha-dashboard/ha-sso; install it first or nginx -t fails.
+          ssh root@$HA_IP "mkdir -p /etc/nginx/snippets"
+          rsync -avz nginx/snippets/neonbee-security-headers.conf "root@$HA_IP:/etc/nginx/snippets/neonbee-security-headers.conf"
           for conf in nginx/ha-api.neonbee.app.conf nginx/ha-cdn.neonbee.app.conf nginx/ha-dashboard.neonbee.app.conf nginx/ha-sso.neonbee.app.conf; do
             DEST_NAME=$(basename $conf | sed 's/^ha-//')
             rsync -avz "$conf" "root@$HA_IP:/etc/nginx/sites-available/$DEST_NAME"

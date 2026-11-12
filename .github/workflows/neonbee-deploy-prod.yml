@@ -15,7 +15,7 @@ on:
   workflow_call:
     inputs:
       test_max_workers:
-        description: 'Worker cap for jest/vitest in the unit, contract and integration steps (jest --maxWorkers; vitest --maxWorkers, plus --minWorkers=1 on vitest < 4). Number or percent; 0 disables the cap. Empty = jest 2, vitest 4.'
+        description: 'Worker cap for jest/vitest in the unit, contract and integration steps (jest --maxWorkers; vitest --maxWorkers, plus --minWorkers=1 on vitest < 4). Number or percent; 0 disables the cap. Empty = jest 2, vitest 2 (so360-shell-fe 4).'
         required: false
         type: string
         default: ''
@@ -109,6 +109,7 @@ on:
         default: '22'
 
     secrets:
+      NB_BURST_DISPATCH_TOKEN:      { required: false }  # neonbee-devops actions:write; burst-label VM request
       DIGITALOCEAN_SSH_KEY:          { required: false }
       STOREFRONT_PROD_SSH_KEY:       { required: false }
       PROD_SERVER_IP:                { required: false }
@@ -160,6 +161,18 @@ on:
       REVALIDATE_SECRET: { required: false }
       WEB_SEARCH_PROVIDER: { required: false }
       WEB_SEARCH_API_KEY: { required: false }
+      # Webhook verification + WS fan-out (storefront-api campaign/back-in-stock, inbox SNS + Redis, subscription Stripe/PayPal)
+      CAMPAIGN_WEBHOOK_SECRET: { required: false }
+      BACK_IN_STOCK_TOKEN_SECRET: { required: false }
+      SNS_ALLOWED_TOPIC_ARNS: { required: false }
+      REDIS_URL: { required: false }
+      STRIPE_WEBHOOK_SECRET: { required: false }
+      PAYPAL_WEBHOOK_ID: { required: false }
+      RAZORPAY_KEY_ID: { required: false }
+      RAZORPAY_KEY_SECRET: { required: false }
+      BILLING_SELLER_NAME: { required: false }
+      BILLING_SELLER_ADDRESS: { required: false }
+      BILLING_SELLER_TAX_ID: { required: false }
       CHAT_INTERNAL_KEY:             { required: false }
       CRM_SYNC_INTERNAL_KEY:         { required: false }
       PROJECTS_INTERNAL_KEY:         { required: false }
@@ -221,6 +234,8 @@ on:
 # ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION was removed as of runner ≥ 2.335.0
 # (enforced June 16 2026); this replaces it.
 env:
+  # GitHub runners refuse NODE_OPTIONS via $GITHUB_ENV, so the build heap cap is set here; a step env NODE_OPTIONS still wins.
+  NODE_OPTIONS: --max-old-space-size=${{ vars.NB_HEAP_MB || '3072' }}
   # ── Test worker cap ──
   # The shared runner VM has 12 vCPU and runs 8 job slots. jest and vitest
   # default to (cores - 1) workers each, so concurrent jobs oversubscribed it
@@ -234,9 +249,13 @@ env:
   # Runner = the script text (vitest wins), else package.json deps (wrapper
   # scripts such as `bash scripts/test.sh`). Nothing is printed when the
   # script already pins workers or runs in band, or when the cap is 0.
-  # Empty = per-runner default: jest 2, vitest 4. jsdom vitest suites are
-  # far heavier per file; so360-command's gate hit its 20-min limit at 2.
-  TEST_MAX_WORKERS: ${{ inputs.test_max_workers || '' }}
+  # Empty = jest 2, vitest 2 (so360-shell-fe 4). A vitest fork reached 3.6G RSS
+  # and earlyoom fired 28x/30min at 4; repos needing more pass test_max_workers.
+  TEST_MAX_WORKERS: ${{ inputs.test_max_workers || (github.repository == 'Neonbee-ai/so360-shell-fe' && '4') || '' }}
+  # V8 heap ceilings (MB). Job-wide for build/tsc/lint; per worker for tests.
+  # Repo/org variables override without a workflow change.
+  NB_HEAP_MB: ${{ vars.NB_HEAP_MB || '3072' }}
+  NB_TEST_HEAP_MB: ${{ vars.NB_TEST_HEAP_MB || '2048' }}
   TEST_WORKER_FLAGS_JS: |
     const fs = require('fs');
     const key = process.argv[1] || 'test';
@@ -246,7 +265,7 @@ env:
     const d = Object.assign({}, p.dependencies, p.devDependencies);
     let r = /vitest/.test(s) ? 'vitest' : /jest/.test(s) ? 'jest' : '';
     if (!r) r = d.vitest ? 'vitest' : d.jest ? 'jest' : '';
-    const n = String(process.env.TEST_MAX_WORKERS || (r === 'vitest' ? '4' : '2')).trim();
+    const n = String(process.env.TEST_MAX_WORKERS || '2').trim();
     if (!/^[1-9][0-9]*%?$/.test(n)) process.exit(0);
     if (r === 'jest') console.log('--maxWorkers=' + n);
     if (r === 'vitest') {
@@ -267,9 +286,127 @@ env:
 # ═════════════════════════════════════════════════════════════════════════════
 jobs:
 
+  # Lane pick (see scripts/gcp-burst.sh in SO360 V.2): Contabo by default; GCP burst while org variable
+  # NB_BURST is plan|auto — except re-runs and re-pushes after a failed run, which stay on Contabo.
+  # NB_BURST=batch (bulk run, Contabo + burst together): first runs go to lane-burst; re-runs go to nb-pool,
+  # a label on both Contabo runner-vm and burst runners, so whichever is free first takes them.
+  # gcp-burst.sh watch flips NB_BURST to off when org active jobs drop below the threshold.
+  route:
+    runs-on: [self-hosted, nb-route]
+    timeout-minutes: 5
+    outputs:
+      runs_on: ${{ steps.r.outputs.runs_on }}
+      # 'true' only when this exact tree already passed gate + security (and, for
+      # backend, contract + integration) in a develop push run. See step 'prior'.
+      prior_pass: ${{ steps.prior.outputs.prior_pass || 'false' }}
+    steps:
+      # ── Gate reuse on develop -> main promotion ─────────────────────────
+      # Main's tree is usually byte-identical to a develop commit whose push
+      # run already passed the same unit/contract/integration tiers. Reuse that
+      # result instead of re-running them. Fails closed: any API or jq error,
+      # a missing job, or a job that is not 'success' leaves prior_pass=false.
+      # A develop run still in progress is not waited for (no reuse).
+      # Kill switch: repo/org variable NB_GATE_REUSE=off. Re-runs never reuse.
+      - id: prior
+        if: >-
+          github.run_attempt == 1 && vars.NB_GATE_REUSE != 'off'
+          && ((github.event_name == 'push' && github.ref == 'refs/heads/main')
+          || (github.event_name == 'pull_request' && github.base_ref == 'main'))
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          KIND: ${{ inputs.deploy_type }}
+        run: |
+          set +e
+          out=false; why="no completed develop push run with a passing gate for this tree"
+          api="$GITHUB_API_URL/repos/$GITHUB_REPOSITORY"
+          auth=(-H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json")
+          get() { curl -fsS -m 10 "${auth[@]}" "$api/$1"; }
+          need='["gate","security"]'
+          [ "$KIND" = backend ] && need='["gate","security","API Contract Tests","Integration Tests"]'
+          c=$(get "commits/$SHA"); tree=$(jq -r '.commit.tree.sha // empty' <<<"$c" 2>/dev/null)
+          if [ -z "$tree" ]; then why="commit lookup failed"; else
+            # Candidates: this commit, its parents (merge commit / PR merge ref) and the PR head.
+            cands=$( { jq -r '.sha, .parents[].sha' <<<"$c" 2>/dev/null; [ -n "$PR_HEAD" ] && echo "$PR_HEAD"; } | awk 'NF && !x[$0]++')
+            for s in $cands; do
+              if [ "$s" != "$SHA" ]; then
+                t=$(get "commits/$s" | jq -r '.commit.tree.sha // empty' 2>/dev/null)
+                [ -n "$t" ] && [ "$t" = "$tree" ] || continue
+              fi
+              ids=$(get "actions/runs?head_sha=$s&branch=develop&event=push&status=completed&per_page=20" | jq -r '.workflow_runs[].id' 2>/dev/null)
+              for id in $ids; do
+                # Called-job names read "<caller job> / <job>"; every needed job must exist and be 'success'.
+                ok=$(get "actions/runs/$id/jobs?filter=latest&per_page=100" | jq -r --argjson need "$need" '
+                  [.jobs[] | {n: (.name | sub("^.* / "; "")), c: .conclusion}] as $j
+                  | [$need[] as $x | [$j[] | select(.n == $x)] | (length > 0 and all(.c == "success"))] | all' 2>/dev/null)
+                if [ "$ok" = true ]; then out=true; why="develop run $id passed $(jq -r 'join(", ")' <<<"$need") on $s (tree $tree)"; break 2; fi
+              done
+            done
+          fi
+          echo "prior_pass=$out" >> "$GITHUB_OUTPUT"
+          echo "gate reuse: $out ($why)" >> "$GITHUB_STEP_SUMMARY"
+      - id: r
+        env:
+          MODE: ${{ vars.NB_BURST }}
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ github.head_ref || github.ref_name }}
+          ATTEMPT: ${{ github.run_attempt }}
+          EVENT: ${{ github.event_name }}
+          SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          PR_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+          DISPATCH_TOKEN: ${{ secrets.NB_BURST_DISPATCH_TOKEN }}
+        run: |
+          lane='["self-hosted","runner-vm"]'; why="NB_BURST=${MODE:-off}"
+          # PR label burst / burst:s|m|l|xl (on this PR, or on the PR merged by this push) -> nb-pool: Contabo
+          # runner-vm and GCP burst runners both carry it, so each job takes the first free runner and never
+          # waits on the VM (Contabo is the fallback). Also asks neonbee-devops burst-on-label.yml for the VM.
+          re='^burst(:(s|m|l|xl))?$'; bsrc="PR label"
+          blabel=$(jq -r --arg re "$re" 'if type == "array" then ([.[] | strings | select(test($re))][0] // empty) else empty end' <<<"${PR_LABELS:-null}" 2>/dev/null) || blabel=
+          if [ -z "$blabel" ] && [ "$EVENT" = push ]; then
+            bsrc=$(curl -fsS -m 10 -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+              "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/commits/$SHA/pulls" |
+              jq -r --arg re "$re" '[.[] | {n: .number, l: ([.labels[]?.name | select(test($re))][0])} | select(.l)][0] // empty | "\(.l) merged PR #\(.n)"' 2>/dev/null) || bsrc=
+            blabel=${bsrc%% *}
+          fi
+          if [ -n "$blabel" ]; then lane='["self-hosted","nb-pool"]'; why="burst label $blabel ($bsrc) - first free Contabo or GCP burst runner"
+            size=${blabel#burst}; size=${size#:}; size=${size:-auto}
+            if [ -n "$DISPATCH_TOKEN" ] && curl -fsS -m 10 -X POST -H "Authorization: Bearer $DISPATCH_TOKEN" -H "Accept: application/vnd.github+json" \
+                "$GITHUB_API_URL/repos/Neonbee-ai/neonbee-devops/actions/workflows/burst-on-label.yml/dispatches" \
+                -d "$(jq -cn --arg s "$GITHUB_REPOSITORY $blabel" --arg z "$size" --arg r "$GITHUB_REPOSITORY" --arg h "$SHA" \
+                  '{ref: "main", inputs: {source: $s, size: $z, repo: $r, sha: $h}}')" >/dev/null 2>&1; then
+              why="$why; burst VM requested (size $size)"
+            fi
+          elif [ "${MODE:-off}" = batch ] && [ "$ATTEMPT" = 1 ]; then lane='["self-hosted","lane-burst"]'; why="NB_BURST=batch - first run on burst"
+          elif [ "${MODE:-off}" = batch ]; then lane='["self-hosted","nb-pool"]'; why="NB_BURST=batch - re-run $ATTEMPT on first free Contabo or burst runner"
+          elif [ "$ATTEMPT" != 1 ]; then why="re-run attempt $ATTEMPT"
+          elif [ "${MODE:-off}" != off ]; then
+            api="$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions"
+            auth=(-H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json")
+            # Resolve the caller's workflow from this run itself: inside a reusable workflow github.workflow
+            # and github.workflow_ref describe the reusable file, not the caller repo's copy.
+            wid=$(curl -fsS -m 10 "${auth[@]}" "$api/runs/$GITHUB_RUN_ID" | jq -r '.workflow_id // empty' 2>/dev/null) || wid=
+            last=unknown
+            if [ -n "$wid" ]; then
+              b=$(jq -rn --arg b "$BRANCH" '$b|@uri')
+              last=$(curl -fsS -m 10 "${auth[@]}" "$api/workflows/$wid/runs?branch=$b&status=completed&per_page=3" |
+                jq -r --arg id "$GITHUB_RUN_ID" '[.workflow_runs[]|select((.id|tostring)!=$id)][0].conclusion // "none"' 2>/dev/null) || last=unknown
+            fi
+            case "$last" in
+              failure) why="previous run of this workflow on $BRANCH failed" ;;
+              unknown) why="run history unavailable - staying on Contabo" ;;
+              *)       lane='["self-hosted","lane-burst"]' ;;
+            esac
+          fi
+          echo "runs_on=$lane" >> "$GITHUB_OUTPUT"
+          echo "lane: $lane ($why)" >> "$GITHUB_STEP_SUMMARY"
+
   gate:
-    runs-on: [self-hosted, runner-vm]
-    timeout-minutes: 20
+    needs: [route]
+    runs-on: ${{ fromJSON(needs.route.outputs.runs_on) }}
+    # Shell's suite (~230s alone) blew the 900s UT ceiling on the shared
+    # runner while other deploys ran; it gets 1800s UT / 40 min job.
+    timeout-minutes: ${{ inputs.is_shell && 40 || 20 }}
     steps:
       # ── Remove stale workspace symlink from cross-repo builds ───────────────
       # A failed/cancelled vite-mfe build can leave a dangling symlink at
@@ -302,7 +439,11 @@ jobs:
         # per-slot cache dir here — before npm ci — to keep the isolation that
         # stops shared _cacache races on Contabo hosts.
         shell: bash
-        run: echo "NPM_CONFIG_CACHE=$RUNNER_TEMP/npm-cache" >> "$GITHUB_ENV"
+        run: |
+          echo "NPM_CONFIG_CACHE=$RUNNER_TEMP/npm-cache" >> "$GITHUB_ENV"
+          # Job-wide V8 heap ceiling (build, tsc, lint) so one node process cannot
+          # take the host; a --max-old-space-size the caller already set wins.
+          : # heap cap comes from workflow-level env NODE_OPTIONS
 
       - uses: actions/cache@v4.3.0
         if: runner.os == 'Linux'
@@ -498,6 +639,7 @@ jobs:
           # AUDIT_LEVEL. Comma-separate further IDs here if ever needed.
           AUDIT_LEVEL: 'critical'
           AUDIT_IGNORE_IDS: 'GHSA-qwww-vcr4-c8h2'
+          PRIOR_PASS: ${{ needs.route.outputs.prior_pass }}
         run: |
           cat > "$RUNNER_TEMP/audit-check.js" <<'AUDIT_CHECK_JS'
           const fs = require('fs');
@@ -601,6 +743,10 @@ jobs:
             EXTRA_FLAGS="--passWithNoTests --forceExit --ci"
           fi
           WORKER_FLAGS=$(node -e "$TEST_WORKER_FLAGS_JS" test 2>/dev/null || true); echo "Test worker cap (test): ${WORKER_FLAGS:-none}"
+          # Per-worker heap cap (inherited by jest workers and vitest forks/threads);
+          # replaces the job-wide ceiling, keeps other flags (e.g. --experimental-vm-modules).
+          NB_NO=$(printf '%s' "${NODE_OPTIONS:-}" | sed -E 's/--max-old-space-size=[0-9]+//g')
+          export NODE_OPTIONS="$NB_NO --max-old-space-size=${NB_TEST_HEAP_MB:-2048}"
           EXTRA_FLAGS="$EXTRA_FLAGS $WORKER_FLAGS"
 
           # ── Spec floor ────────────────────────────────────────────────────
@@ -637,18 +783,24 @@ jobs:
           if command -v timeout &>/dev/null; then TIMEOUT_BIN="timeout"
           elif command -v gtimeout &>/dev/null; then TIMEOUT_BIN="gtimeout"
           fi
+          # Shell-fe only: 1800s. Every other repo keeps 900s.
+          UT_TIMEOUT=${{ inputs.is_shell && 1800 || 900 }}
           run_tests_with_timeout() {
             if [ -n "$TIMEOUT_BIN" ]; then
-              "$TIMEOUT_BIN" 900 npm test -- $EXTRA_FLAGS 2>"$TEST_ERR"
+              "$TIMEOUT_BIN" "$UT_TIMEOUT" npm test -- $EXTRA_FLAGS 2>"$TEST_ERR"
             elif command -v perl &>/dev/null; then
-              perl -e 'alarm shift; exec @ARGV' 900 npm test -- $EXTRA_FLAGS 2>"$TEST_ERR"
+              perl -e 'alarm shift; exec @ARGV' "$UT_TIMEOUT" npm test -- $EXTRA_FLAGS 2>"$TEST_ERR"
             else
               echo "::warning::No timeout mechanism available on this runner — unit tests run unbounded"
               npm test -- $EXTRA_FLAGS 2>"$TEST_ERR"
             fi
           }
           TEST_RC=0
-          run_tests_with_timeout || TEST_RC=$?
+          if [ "${PRIOR_PASS:-}" = true ]; then
+            echo "::notice::Unit tests skipped: this tree already passed them on develop (route job summary has the run id). Audit, licenses and secrets still run."
+          else
+            run_tests_with_timeout || TEST_RC=$?
+          fi
           # A suite that never finishes is NOT a pass. This previously reset
           # RC=0 on timeout, so a hung run shipped straight to production with
           # nothing but a warning annotation — the gate's single largest trust
@@ -656,7 +808,7 @@ jobs:
           # is a reason to raise the ceiling, not to ignore the result.
           # 124 = GNU timeout, 142 = perl SIGALRM (128+14).
           if [ $TEST_RC -eq 124 ] || [ $TEST_RC -eq 142 ]; then
-            echo "::error::Unit tests exceeded the 900s ceiling — failing the gate (hung suites are not passes)"
+            echo "::error::Unit tests exceeded the ${UT_TIMEOUT}s ceiling — failing the gate (hung suites are not passes)"
           fi
           [ $TEST_RC -ne 0 ] && RC=$TEST_RC
 
@@ -717,10 +869,10 @@ jobs:
 
   contract-tests:
     name: API Contract Tests
-    if: inputs.deploy_type == 'backend'
-    needs: [gate]
-    runs-on: [self-hosted, runner-vm]
-    timeout-minutes: 15
+    if: inputs.deploy_type == 'backend' && needs.route.outputs.prior_pass != 'true'
+    needs: [route]
+    runs-on: ${{ fromJSON(needs.route.outputs.runs_on) }}
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4.3.1
       - uses: actions/setup-node@v4.4.0
@@ -728,7 +880,11 @@ jobs:
           node-version: ${{ inputs.node_version }}
       - name: Isolate npm cache per job
         shell: bash
-        run: echo "NPM_CONFIG_CACHE=$RUNNER_TEMP/npm-cache" >> "$GITHUB_ENV"
+        run: |
+          echo "NPM_CONFIG_CACHE=$RUNNER_TEMP/npm-cache" >> "$GITHUB_ENV"
+          # Job-wide V8 heap ceiling (build, tsc, lint) so one node process cannot
+          # take the host; a --max-old-space-size the caller already set wins.
+          : # heap cap comes from workflow-level env NODE_OPTIONS
       - name: Configure private package registry
         # Idempotent (npm config set, not an append) since this runs on a
         # persistent self-hosted runner shared across jobs. Harmless when a
@@ -886,13 +1042,17 @@ jobs:
           fi
           echo "Running $COUNT contract spec file(s)"
           WORKER_FLAGS=$(node -e "$TEST_WORKER_FLAGS_JS" test:contract 2>/dev/null || true); echo "Test worker cap (test:contract): ${WORKER_FLAGS:-none}"
+          # Per-worker heap cap (inherited by jest workers and vitest forks/threads);
+          # replaces the job-wide ceiling, keeps other flags (e.g. --experimental-vm-modules).
+          NB_NO=$(printf '%s' "${NODE_OPTIONS:-}" | sed -E 's/--max-old-space-size=[0-9]+//g')
+          export NODE_OPTIONS="$NB_NO --max-old-space-size=${NB_TEST_HEAP_MB:-2048}"
           npm run test:contract -- $WORKER_FLAGS
 
   integration-tests:
     name: Integration Tests
-    if: inputs.deploy_type == 'backend'
-    needs: [gate]
-    runs-on: [self-hosted, runner-vm]
+    if: inputs.deploy_type == 'backend' && needs.route.outputs.prior_pass != 'true'
+    needs: [route]
+    runs-on: ${{ fromJSON(needs.route.outputs.runs_on) }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4.3.1
@@ -901,7 +1061,11 @@ jobs:
           node-version: ${{ inputs.node_version }}
       - name: Isolate npm cache per job
         shell: bash
-        run: echo "NPM_CONFIG_CACHE=$RUNNER_TEMP/npm-cache" >> "$GITHUB_ENV"
+        run: |
+          echo "NPM_CONFIG_CACHE=$RUNNER_TEMP/npm-cache" >> "$GITHUB_ENV"
+          # Job-wide V8 heap ceiling (build, tsc, lint) so one node process cannot
+          # take the host; a --max-old-space-size the caller already set wins.
+          : # heap cap comes from workflow-level env NODE_OPTIONS
       - name: Configure private package registry
         # Idempotent (npm config set, not an append) since this runs on a
         # persistent self-hosted runner shared across jobs. Harmless when a
@@ -1064,6 +1228,10 @@ jobs:
           fi
           echo "Running $COUNT integration spec file(s)"
           WORKER_FLAGS=$(node -e "$TEST_WORKER_FLAGS_JS" test:integration 2>/dev/null || true); echo "Test worker cap (test:integration): ${WORKER_FLAGS:-none}"
+          # Per-worker heap cap (inherited by jest workers and vitest forks/threads);
+          # replaces the job-wide ceiling, keeps other flags (e.g. --experimental-vm-modules).
+          NB_NO=$(printf '%s' "${NODE_OPTIONS:-}" | sed -E 's/--max-old-space-size=[0-9]+//g')
+          export NODE_OPTIONS="$NB_NO --max-old-space-size=${NB_TEST_HEAP_MB:-2048}"
           npm run test:integration -- $WORKER_FLAGS
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1071,7 +1239,7 @@ jobs:
 # ═════════════════════════════════════════════════════════════════════════════
 
   build-deploy:
-    needs: [gate, contract-tests, integration-tests]
+    needs: [route, gate, contract-tests, integration-tests]
     # contract/integration are skipped for vite-mfe and nextjs deploys. A
     # skipped `needs` would normally skip this job too, so the result is
     # matched explicitly: proceed on success or skipped, never on failure.
@@ -1082,7 +1250,7 @@ jobs:
       && needs.integration-tests.result != 'failure'
     # Linux only: the Mac Mini gate runners also carry `contabo` (they run the
     # gate), but this job builds + rsyncs to the VMs and assumes a Linux host.
-    runs-on: [self-hosted, runner-vm]
+    runs-on: ${{ fromJSON(needs.route.outputs.runs_on) }}
     timeout-minutes: 20
     concurrency:
       group: neonbee-prod-${{ inputs.service_name }}
@@ -1135,7 +1303,11 @@ jobs:
         # per-slot cache dir here — before npm ci — to keep the isolation that
         # stops shared _cacache races on Contabo hosts.
         shell: bash
-        run: echo "NPM_CONFIG_CACHE=$RUNNER_TEMP/npm-cache" >> "$GITHUB_ENV"
+        run: |
+          echo "NPM_CONFIG_CACHE=$RUNNER_TEMP/npm-cache" >> "$GITHUB_ENV"
+          # Job-wide V8 heap ceiling (build, tsc, lint) so one node process cannot
+          # take the host; a --max-old-space-size the caller already set wins.
+          : # heap cap comes from workflow-level env NODE_OPTIONS
 
       - uses: actions/cache@v4.3.0
         if: runner.os == 'Linux'
@@ -1607,6 +1779,27 @@ jobs:
             _shell-fe
           cd _shell-fe && git sparse-checkout set packages
 
+      # MFE Tailwind CSS is generated from @so360/design-system's dist (withComb
+      # scans it). The committed dist was stale 2026-10-20..11-01 and MFEs shipped
+      # without the Comb classes while CI stayed GREEN. Rebuild it from source
+      # here and FAIL on a build error or a stale/missing dist/.src-hash stamp
+      # (shell-fe scripts/src-hash.cjs, the same check withComb.cjs runs).
+      - name: Rebuild shared shell packages (fail on stale dist)
+        if: inputs.deploy_type == 'vite-mfe' && !inputs.is_shell && inputs.needs_shell_packages
+        run: |
+          # Committed dists go stale (shell-context since 2026-10-17 lacked
+          # useDatasetSchema → MFE tsc RED). Build every shared package from
+          # source, same order as the dev lane, and fail on any error.
+          PKGS="$GITHUB_WORKSPACE/_shell-fe/packages"
+          for p in shell-context design-system event-bus formatters; do
+            [ -d "$PKGS/$p" ] || { echo "::error::_shell-fe/packages/$p missing"; exit 1; }
+            ( cd "$PKGS/$p" \
+              && npm install --legacy-peer-deps --include=dev --prefer-offline --no-audit --no-fund \
+              && npm run build ) || { echo "::error::@so360/$p build failed — refusing to ship from a stale dist"; exit 1; }
+          done
+          ( cd "$PKGS/design-system" && node scripts/src-hash.cjs --check ) \
+            || { echo "::error::@so360/design-system dist is stale after rebuild"; exit 1; }
+
       - name: Build (vite-mfe)
         if: inputs.deploy_type == 'vite-mfe' && !inputs.is_shell
         run: |
@@ -1615,6 +1808,21 @@ jobs:
             rm -rf "$RUNNER_PARENT/so360-shell-fe"
             ln -s "$GITHUB_WORKSPACE/_shell-fe" "$RUNNER_PARENT/so360-shell-fe"
             (cd "$GITHUB_WORKSPACE/_shell-fe" && npm install --legacy-peer-deps --prefer-offline --no-audit --no-fund 2>/dev/null || true)
+            # The packages' committed dist/ drifts from src (2026-11-01: the
+            # design-system dist lacked FillPane/KpiGrid/CountUp → TS2305 on
+            # every comb MFE's main build). Rebuild from source, as the dev
+            # workflow does — but FAIL HARD: falling back to the stale
+            # committed dist would ship a GREEN build against old exports.
+            # shell-fe is not an npm workspace root, so install inside each
+            # package first (else "tsc: not found").
+            for p in shell-context design-system event-bus formatters; do
+              if [ -d "$GITHUB_WORKSPACE/_shell-fe/packages/$p" ]; then
+                ( cd "$GITHUB_WORKSPACE/_shell-fe/packages/$p" \
+                  && npm install --legacy-peer-deps --include=dev --no-audit --no-fund --prefer-offline >/dev/null 2>&1 \
+                  && npm run build ) \
+                  || { echo "::error::could not rebuild @so360/$p from so360-shell-fe source — refusing to build against its stale committed dist"; exit 1; }
+              fi
+            done
           fi
 
           rm -rf node_modules
@@ -1727,7 +1935,7 @@ jobs:
           fi
 
           if [ -d "_shell-fe" ]; then
-            for pkg in shell-context design-system event-bus formatters theme; do
+            for pkg in shell-context design-system event-bus formatters cross-link theme; do
               # Re-ensure @so360 dir before every copy — a previous package's
               # inner `npm install` can hoist/reorganise deps and silently remove
               # the parent scoped directory, causing the next cp to fail with
@@ -1947,6 +2155,17 @@ jobs:
             [ -n "${{ secrets.REVALIDATE_SECRET }}" ] && echo "REVALIDATE_SECRET=${{ secrets.REVALIDATE_SECRET }}" >> .env.ci
             [ -n "${{ secrets.WEB_SEARCH_PROVIDER }}" ] && echo "WEB_SEARCH_PROVIDER=${{ secrets.WEB_SEARCH_PROVIDER }}" >> .env.ci
             [ -n "${{ secrets.WEB_SEARCH_API_KEY }}" ] && echo "WEB_SEARCH_API_KEY=${{ secrets.WEB_SEARCH_API_KEY }}" >> .env.ci
+            [ -n "${{ secrets.CAMPAIGN_WEBHOOK_SECRET }}" ] && echo "CAMPAIGN_WEBHOOK_SECRET=${{ secrets.CAMPAIGN_WEBHOOK_SECRET }}" >> .env.ci
+            [ -n "${{ secrets.BACK_IN_STOCK_TOKEN_SECRET }}" ] && echo "BACK_IN_STOCK_TOKEN_SECRET=${{ secrets.BACK_IN_STOCK_TOKEN_SECRET }}" >> .env.ci
+            [ -n "${{ secrets.SNS_ALLOWED_TOPIC_ARNS }}" ] && echo "SNS_ALLOWED_TOPIC_ARNS=${{ secrets.SNS_ALLOWED_TOPIC_ARNS }}" >> .env.ci
+            [ -n "${{ secrets.REDIS_URL }}" ] && echo "REDIS_URL=${{ secrets.REDIS_URL }}" >> .env.ci
+            [ -n "${{ secrets.STRIPE_WEBHOOK_SECRET }}" ] && echo "STRIPE_WEBHOOK_SECRET=${{ secrets.STRIPE_WEBHOOK_SECRET }}" >> .env.ci
+            [ -n "${{ secrets.PAYPAL_WEBHOOK_ID }}" ] && echo "PAYPAL_WEBHOOK_ID=${{ secrets.PAYPAL_WEBHOOK_ID }}" >> .env.ci
+            [ -n "${{ secrets.RAZORPAY_KEY_ID }}" ] && echo "RAZORPAY_KEY_ID=${{ secrets.RAZORPAY_KEY_ID }}" >> .env.ci
+            [ -n "${{ secrets.RAZORPAY_KEY_SECRET }}" ] && echo "RAZORPAY_KEY_SECRET=${{ secrets.RAZORPAY_KEY_SECRET }}" >> .env.ci
+            [ -n "${{ secrets.BILLING_SELLER_NAME }}" ] && echo "BILLING_SELLER_NAME=${{ secrets.BILLING_SELLER_NAME }}" >> .env.ci
+            [ -n "${{ secrets.BILLING_SELLER_ADDRESS }}" ] && echo "BILLING_SELLER_ADDRESS=${{ secrets.BILLING_SELLER_ADDRESS }}" >> .env.ci
+            [ -n "${{ secrets.BILLING_SELLER_TAX_ID }}" ] && echo "BILLING_SELLER_TAX_ID=${{ secrets.BILLING_SELLER_TAX_ID }}" >> .env.ci
             [ -n "${{ secrets.MARKETING_INTERNAL_KEY }}" ] && echo "MARKETING_INTERNAL_KEY=${{ secrets.MARKETING_INTERNAL_KEY }}"                  >> .env.ci
             [ -n "${{ secrets.MARKETING_TRACKING_SECRET }}" ] && echo "MARKETING_TRACKING_SECRET=${{ secrets.MARKETING_TRACKING_SECRET }}"               >> .env.ci
             [ -n "${{ secrets.CRM_SYNC_INTERNAL_KEY }}" ]     && echo "CRM_SYNC_INTERNAL_KEY=${{ secrets.CRM_SYNC_INTERNAL_KEY }}"   >> .env.ci
@@ -2092,6 +2311,8 @@ jobs:
       - name: Publish swagger snapshot to Neura catalog repo
         if: ${{ inputs.deploy_type == 'backend' && inputs.publish_swagger == 'true' }}
         continue-on-error: true
+        # Was unbounded: an unreachable primary held ssh for ~6.7 min per backend prod deploy.
+        timeout-minutes: 2
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
@@ -2099,7 +2320,7 @@ jobs:
           PORT="${{ inputs.port }}"
           [ -n "$IP" ] && [ "$PORT" != "0" ] || { echo "no ip/port — skipping"; exit 0; }
           for P in "/api-json" "/api-docs-json" "/docs-json"; do
-            ssh -o StrictHostKeyChecking=no root@"$IP" "curl -sf http://127.0.0.1:$PORT$P" > /tmp/swagger.json 2>/dev/null && break
+            ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -o BatchMode=yes root@"$IP" "curl -sf -m 20 http://127.0.0.1:$PORT$P" > /tmp/swagger.json 2>/dev/null && break
           done
           [ -s /tmp/swagger.json ] && head -c 1 /tmp/swagger.json | grep -q '{' || { echo "no swagger JSON served — skipping"; exit 0; }
           # Pure curl — fleet slots may lack gh (the copy-secret/golden-gate trap).
@@ -2465,6 +2686,7 @@ jobs:
   # Runs after all jobs regardless of outcome, so gate failures are reported too.
   # No-ops silently when NOTIFY_WEBHOOK_URL is unset; never fails the pipeline.
   notify:
+    timeout-minutes: 5
     name: Notify Teams
     needs: [gate, build-deploy]
     if: always()

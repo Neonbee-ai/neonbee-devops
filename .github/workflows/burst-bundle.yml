@@ -1,0 +1,37 @@
+name: Build burst VM bundle
+# Pre-builds everything the burst VM needs (actions runner, Node 22, gitleaks, semgrep wheels, warm npm cache
+# for the main repos' lockfiles, Playwright Chromium) into release `burst-bundle` of this public repo, so the VM
+# boots stock Ubuntu with no custom image or kept disk ($0 storage). Parts <= 1900 MiB; assets replaced.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 3 1 * *'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: burst-bundle
+  cancel-in-progress: false
+
+jobs:
+  bundle:
+    runs-on: [self-hosted, runner-vm]
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with: { sparse-checkout: scripts/burst }
+      - name: Build
+        env:
+          GH_TOKEN: ${{ secrets.NB_BURST_GH_TOKEN }}
+          OUT: ${{ runner.temp }}/burst-out
+        run: bash scripts/burst/build-bundle.sh
+      - name: Publish release burst-bundle
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OUT: ${{ runner.temp }}/burst-out
+        run: |
+          bash scripts/burst/publish-bundle.sh
+          { echo '### burst-bundle'; echo '```'; cat "$OUT/VERSIONS"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - if: always()
+        run: rm -rf "${{ runner.temp }}/burst-out"

@@ -1,0 +1,52 @@
+name: Burst VM on label
+# Lowest-touch trigger: no caller-repo file. The shared route step in every neonbee-* reusable workflow
+# sees a `burst` / `burst:s|m|l|xl` PR label (or a push whose merged PR carried one), routes the job to
+# ["self-hosted","nb-pool"] (first free Contabo OR GCP burst runner, so nothing waits on the VM) and
+# dispatches this workflow with NB_BURST_DISPATCH_TOKEN. Here we size + create the Spot VM; it deletes
+# itself after 3 idle minutes. The 10-minute schedule reaps: re-runs jobs lost to preemption, deregisters
+# gcp-burst-* runners, posts the cost estimate. Runs on Contabo (never ubuntu-latest).
+run-name: "burst ${{ github.event_name == 'schedule' && 'reap' || format('up {0} {1}@{2}', inputs.size || 'auto', inputs.repo || 'manual', inputs.sha || '-') }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      source:       { description: "Who asked (repo + label)", required: false, default: manual }
+      size:         { description: "auto | s | m | l | xl", required: false, default: auto }
+      repo:         { description: "owner/repo whose pending jobs size the VM (auto)", required: false, default: "" }
+      sha:          { description: "Commit SHA of those jobs", required: false, default: "" }
+      machine_type: { description: "Override, t2d-standard-2/4/8/16/32", required: false, default: "" }
+      runners:      { description: "Override runner count (1-20)", required: false, default: "" }
+      mode:         { description: "up | reap", required: false, default: up }
+  schedule:
+    - cron: '*/10 * * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: burst-vm
+  cancel-in-progress: false
+
+jobs:
+  burst:
+    runs-on: [self-hosted, runner-vm]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with: { sparse-checkout: scripts/burst }
+      - name: Burst VM
+        env:
+          GCP_BURST_SA_KEY: ${{ secrets.GCP_BURST_SA_KEY }}
+          NB_BURST_GH_TOKEN: ${{ secrets.NB_BURST_GH_TOKEN }}
+          NB_BURST_JUMP_KEY: ${{ secrets.NB_BURST_JUMP_KEY }}
+          NB_BURST_JUMP_KNOWN: ${{ secrets.NB_BURST_JUMP_KNOWN }}
+          SOURCE: ${{ inputs.source }}
+          SIZE: ${{ inputs.size || 'auto' }}
+          REPO: ${{ inputs.repo }}
+          SHA: ${{ inputs.sha }}
+          MACHINE: ${{ inputs.machine_type }}
+          RUNNERS: ${{ inputs.runners }}
+          MODE: ${{ github.event_name == 'schedule' && 'reap' || inputs.mode || 'up' }}
+        run: |
+          [ -n "$GCP_BURST_SA_KEY" ] && [ -n "$NB_BURST_GH_TOKEN" ] || { echo "::notice::burst secrets not set - skipped (jobs run on Contabo)"; exit 0; }
+          bash scripts/burst/burst-up.sh "$MODE"
