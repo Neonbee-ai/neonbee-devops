@@ -1,0 +1,42 @@
+# One-off: add mcp.neonbee.app (Neonbee MCP gateway + OAuth issuer) as a copy of api.neonbee.app's
+# record (same type, target and proxy), so it follows the same origin (HA VM while the primary is down).
+name: ops-cf-dns-mcp-neonbee
+on:
+  push:
+    branches: [ops/cf-dns-mcp-neonbee]
+  workflow_dispatch:
+permissions: {}
+jobs:
+  dns:
+    runs-on: [self-hosted, runner-vm]
+    steps:
+      - name: Upsert mcp.neonbee.app from api.neonbee.app
+        env:
+          T1: ${{ secrets.CF_SAAS_API_TOKEN }}
+          T2: ${{ secrets.CF_PREVIEW_API_TOKEN }}
+          ZONE_NAME: neonbee.app
+          SRC: api.neonbee.app
+          DST: mcp.neonbee.app
+        run: |
+          set -euo pipefail
+          API=https://api.cloudflare.com/client/v4
+          for T in "$T1" "$T2"; do
+            [ -n "$T" ] || continue
+            H=(-H "Authorization: Bearer $T" -H "Content-Type: application/json")
+            Z=$(curl -s "${H[@]}" "$API/zones?name=$ZONE_NAME" | jq -r '.result[0].id // empty')
+            [ -n "$Z" ] || { echo "token cannot see $ZONE_NAME, trying next"; continue; }
+            SJ=$(curl -s "${H[@]}" "$API/zones/$Z/dns_records?name=$SRC")
+            [ "$(echo "$SJ" | jq -r .success)" = true ] || { echo "token cannot read DNS, trying next"; continue; }
+            echo "== $SRC"; echo "$SJ" | jq -c '.result[] | {type, content, proxied, ttl}'
+            REC=$(echo "$SJ" | jq -c '[.result[] | select(.type=="A" or .type=="AAAA" or .type=="CNAME")][0] // empty')
+            [ -n "$REC" ] || { echo "no A/AAAA/CNAME for $SRC"; exit 1; }
+            BODY=$(echo "$REC" | jq -c --arg n "$DST" '{type, name: $n, content, proxied, ttl, comment: "Neonbee MCP gateway (neura-be)"}')
+            EX=$(curl -s "${H[@]}" "$API/zones/$Z/dns_records?name=$DST" | jq -r '.result[0].id // empty')
+            if [ -n "$EX" ]; then R=$(curl -s -X PUT "${H[@]}" "$API/zones/$Z/dns_records/$EX" -d "$BODY")
+            else R=$(curl -s -X POST "${H[@]}" "$API/zones/$Z/dns_records" -d "$BODY"); fi
+            echo "$R" | jq -c '{success, errors, rec: (.result | {name, type, content, proxied})}'
+            [ "$(echo "$R" | jq -r .success)" = true ] || { echo "write failed, trying next"; continue; }
+            echo "rollback: DELETE $API/zones/$Z/dns_records/$(echo "$R" | jq -r .result.id)"
+            exit 0
+          done
+          echo "no token could write $ZONE_NAME"; exit 1
