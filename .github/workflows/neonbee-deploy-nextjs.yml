@@ -721,7 +721,14 @@ jobs:
           # Rsync build output only — .next/ + public/ + package files
           # node_modules and source files are NOT deployed to VM
           ssh root@$SERVER_IP "mkdir -p '$SERVICE_DIR'"
-          rsync -avz --delete --exclude 'node_modules' --exclude '.git' .next/ "root@$SERVER_IP:$SERVICE_DIR/.next/"
+          # No --delete on .next. Next.js serves content-hashed chunks by name, and a
+          # client that loaded the previous build keeps requesting the OLD hashes.
+          # Deleting them mid-deploy is exactly what produced
+          # "ChunkLoadError: Loading chunk N failed" on already-open tabs. Sync
+          # additively and prune by age, so recent builds stay reachable while an
+          # open session finishes and reloads.
+          rsync -avz --exclude 'node_modules' --exclude '.git' .next/ "root@$SERVER_IP:$SERVICE_DIR/.next/"
+          ssh root@$SERVER_IP "find '$SERVICE_DIR/.next/static/chunks' -type f -mtime +7 -delete 2>/dev/null || true"
           rsync -avz package.json package-lock.json "root@$SERVER_IP:$SERVICE_DIR/"
           rsync -avz public/ "root@$SERVER_IP:$SERVICE_DIR/public/" 2>/dev/null || true
           # Standalone apps start with `cp .env.local .next/standalone/` and
@@ -796,7 +803,14 @@ jobs:
           "
 
           ssh root@$SERVER_IP "mkdir -p '$SERVICE_DIR'"
-          rsync -avz --delete --exclude 'node_modules' --exclude '.git' .next/ "root@$SERVER_IP:$SERVICE_DIR/.next/"
+          # No --delete on .next. Next.js serves content-hashed chunks by name, and a
+          # client that loaded the previous build keeps requesting the OLD hashes.
+          # Deleting them mid-deploy is exactly what produced
+          # "ChunkLoadError: Loading chunk N failed" on already-open tabs. Sync
+          # additively and prune by age, so recent builds stay reachable while an
+          # open session finishes and reloads.
+          rsync -avz --exclude 'node_modules' --exclude '.git' .next/ "root@$SERVER_IP:$SERVICE_DIR/.next/"
+          ssh root@$SERVER_IP "find '$SERVICE_DIR/.next/static/chunks' -type f -mtime +7 -delete 2>/dev/null || true"
           rsync -avz package.json package-lock.json "root@$SERVER_IP:$SERVICE_DIR/"
           rsync -avz public/ "root@$SERVER_IP:$SERVICE_DIR/public/" 2>/dev/null || true
 
