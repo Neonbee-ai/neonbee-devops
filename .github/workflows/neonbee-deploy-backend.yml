@@ -54,12 +54,12 @@ on:
         type: boolean
         default: false
       pm2_instances:
-        description: 'PM2 instances (pm2_reload path only; legacy path stays 1)'
+        description: 'PM2 instances (both paths; default 1 = previous behaviour)'
         required: false
         type: number
         default: 1
       pm2_max_memory:
-        description: 'PM2 max_memory_restart (pm2_reload path only; legacy path stays 400M)'
+        description: 'PM2 max_memory_restart (both paths; default 400M = previous behaviour)'
         required: false
         type: string
         default: '400M'
@@ -1475,7 +1475,7 @@ jobs:
               done
               sleep 2
               MAIN_JS=$(find dist -name main.js | head -1)
-              PORT=$PORT pm2 start "$MAIN_JS" --name "$SERVICE_NAME" --cwd "$SERVICE_DIR" --instances 1 --max-memory-restart 400M --update-env
+              PORT=$PORT pm2 start "$MAIN_JS" --name "$SERVICE_NAME" --cwd "$SERVICE_DIR" --instances "${{ inputs.pm2_instances }}" --max-memory-restart "${{ inputs.pm2_max_memory }}" --update-env
             fi
             pm2 save
             HEALTH_PATH="${{ inputs.health_path }}"
@@ -1740,7 +1740,7 @@ jobs:
               done
               sleep 2
               MAIN_JS=$(find dist -name main.js | head -1)
-              PORT=$PORT pm2 start "$MAIN_JS" --name "$SERVICE_NAME" --cwd "$SERVICE_DIR" --instances 1 --max-memory-restart 400M --update-env
+              PORT=$PORT pm2 start "$MAIN_JS" --name "$SERVICE_NAME" --cwd "$SERVICE_DIR" --instances "${{ inputs.pm2_instances }}" --max-memory-restart "${{ inputs.pm2_max_memory }}" --update-env
             fi
             pm2 save
             HEALTH_PATH="${{ inputs.health_path }}"
