@@ -65,5 +65,9 @@ for f in "$ROOT"/.github/workflows/neonbee-deploy-{backend,nextjs,preview,prod,v
   route "$wf" push-api-fails   "$VMLANE" none EVENT=push PR_LABELS=null DISPATCH_TOKEN=t STUB_API_FAIL=1
   route "$wf" batch-unchanged  "$BURST"  none MODE=batch
   route "$wf" label-beats-batch "$POOL"  auto MODE=batch PR_LABELS='["burst"]' DISPATCH_TOKEN=t
+  route "$wf" batch-expiry-live "$BURST" none MODE="batch@$(( $(date +%s) + 3600 ))"
+  route "$wf" batch-expired     "$VMLANE" none MODE="batch@$(( $(date +%s) - 60 ))"
+  route "$wf" batch-bad-expiry  "$VMLANE" none MODE="batch@soon"
+  route "$wf" batch-expiry-rerun "$POOL"  none MODE="batch@$(( $(date +%s) + 3600 ))" ATTEMPT=2
 done
 echo "burst_route_test: $pass passed, $fail failed"; [ "$fail" = 0 ]
