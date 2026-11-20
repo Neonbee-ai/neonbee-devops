@@ -45,6 +45,44 @@ on:
         required: false
         type: string
         default: '22'
+      # ── Opt-in zero-downtime PM2 (Stage 1.6). All default OFF = today's
+      #    stop/delete/start path is unchanged. Repo var NB_PM2_RELOAD=true
+      #    also turns pm2_reload on without editing the caller.
+      pm2_reload:
+        description: 'Use a generated per-service ecosystem file + pm2 reload <name> (zero downtime) instead of delete+start'
+        required: false
+        type: boolean
+        default: false
+      pm2_instances:
+        description: 'PM2 instances (pm2_reload path only; legacy path stays 1)'
+        required: false
+        type: number
+        default: 1
+      pm2_max_memory:
+        description: 'PM2 max_memory_restart (pm2_reload path only; legacy path stays 400M)'
+        required: false
+        type: string
+        default: '400M'
+      pm2_exec_mode:
+        description: 'cluster (stateless NestJS) or fork (pm2_reload path only)'
+        required: false
+        type: string
+        default: 'cluster'
+      pm2_kill_timeout:
+        description: 'ms PM2 waits after SIGINT before SIGKILL (pm2_reload path only)'
+        required: false
+        type: number
+        default: 10000
+      pm2_listen_timeout:
+        description: 'ms PM2 waits for a new worker to listen/ready (pm2_reload path only)'
+        required: false
+        type: number
+        default: 15000
+      pm2_wait_ready:
+        description: 'Wait for process.send("ready") - only for apps that emit it (pm2_reload path only)'
+        required: false
+        type: boolean
+        default: false
       extra_env_dev:
         description: 'Extra env vars for dev (KEY=value lines, one per line)'
         required: false
@@ -1366,21 +1404,79 @@ jobs:
             fi
             mv .env.ci .env
 
-            pm2 stop "$SERVICE_NAME" 2>/dev/null || true
-            pm2 delete "$SERVICE_NAME" 2>/dev/null || true
-            sleep 3
-            # Free the port, but never kill a PM2 daemon or PM2-managed process: in cluster mode the
-            # God daemon holds the listen socket, and killing it takes every app on the VM down.
-            SAFE_PIDS=" $(pgrep -f 'PM2 v.*God Daemon' | tr '\n' ' ') $(pm2 jlist 2>/dev/null | grep -oP '"pid":\K[0-9]+' | tr '\n' ' ') "
-            for PID in $( { lsof -ti :"$PORT" 2>/dev/null; ss -Hlptn "sport = :$PORT" 2>/dev/null | grep -oP '(?<=pid=)\d+'; } | sort -u); do
-              case "$SAFE_PIDS" in
-                *" $PID "*) echo "Port $PORT held by PM2 pid $PID - not killing" ;;
-                *) kill -9 "$PID" 2>/dev/null || true ;;
-              esac
-            done
-            sleep 2
-            MAIN_JS=$(find dist -name main.js | head -1)
-            PORT=$PORT pm2 start "$MAIN_JS" --name "$SERVICE_NAME" --cwd "$SERVICE_DIR" --instances 1 --max-memory-restart 400M --update-env
+            NB_PM2_RELOAD="${{ (inputs.pm2_reload || vars.NB_PM2_RELOAD == 'true') && 'true' || 'false' }}"
+            NB_PM2_EXEC_MODE="${{ inputs.pm2_exec_mode }}"
+            NB_PM2_KILL_TIMEOUT="${{ inputs.pm2_kill_timeout }}"
+            NB_PM2_LISTEN_TIMEOUT="${{ inputs.pm2_listen_timeout }}"
+            NB_PM2_WAIT_READY="${{ inputs.pm2_wait_ready }}"
+            if [ "$NB_PM2_RELOAD" = "true" ]; then
+              # ── Opt-in zero-downtime PM2 reload (input pm2_reload / repo var NB_PM2_RELOAD) ──
+              # Writes a per-service ecosystem file (.nb-ecosystem.<name>.json in the service
+              # dir) and runs `pm2 reload <file> --only <name>`: a rolling worker swap in
+              # cluster mode, so the port never goes dark. Touches ONLY the named app (never
+              # `pm2 ... all`) and never kills anything by port. If the app is absent or its
+              # exec mode / instance count / cwd / script differ from the wanted config, it
+              # does a one-off delete+start of this app only. NODE_APP_INSTANCE stays PM2's
+              # instance_var, so isSchedulerLeader() (instance 0 runs crons) is unchanged.
+              nb_pm2_reload() {
+                local NAME="$1" SCRIPT="$2" CWD="$3" INST="$4" MEM="$5" APP_PORT="$6"
+                local ECO="$CWD/.nb-ecosystem.$NAME.json" WANT CUR
+                WANT=$(NB_NAME="$NAME" NB_SCRIPT="$SCRIPT" NB_CWD="$CWD" NB_INST="$INST" NB_MEM="$MEM" \
+                  NB_PORT="$APP_PORT" NB_ECO="$ECO" NB_EXEC="$NB_PM2_EXEC_MODE" NB_KILL="$NB_PM2_KILL_TIMEOUT" \
+                  NB_LISTEN="$NB_PM2_LISTEN_TIMEOUT" NB_READY="$NB_PM2_WAIT_READY" node -e '
+                  const e = process.env, cluster = e.NB_EXEC !== "fork";
+                  const app = { name: e.NB_NAME, script: e.NB_SCRIPT, cwd: e.NB_CWD,
+                    exec_mode: cluster ? "cluster" : "fork",
+                    instances: cluster ? (Number(e.NB_INST) || 1) : 1,
+                    instance_var: "NODE_APP_INSTANCE",
+                    max_memory_restart: e.NB_MEM,
+                    kill_timeout: Number(e.NB_KILL) || 10000,
+                    listen_timeout: Number(e.NB_LISTEN) || 15000,
+                    wait_ready: e.NB_READY === "true",
+                    autorestart: true, merge_logs: true,
+                    env: { PORT: String(e.NB_PORT) } };
+                  require("fs").writeFileSync(e.NB_ECO, JSON.stringify({ apps: [app] }, null, 2) + "\n");
+                  console.log([app.exec_mode, app.instances, app.cwd, app.script].join("|"));
+                ') || { echo "FATAL: cannot write PM2 ecosystem $ECO"; return 1; }
+                CUR=$(pm2 jlist 2>/dev/null | NB_NAME="$NAME" node -e '
+                  let s = "";
+                  process.stdin.on("data", d => s += d).on("end", () => {
+                    let l;
+                    try { l = JSON.parse(s.slice(s.search(/^\[(\{|\])/m))); } catch (_) { console.log("unknown"); return; }
+                    const p = l.filter(x => x.name === process.env.NB_NAME);
+                    if (!p.length) { console.log("absent"); return; }
+                    const v = p[0].pm2_env || {};
+                    console.log([v.exec_mode === "cluster_mode" ? "cluster" : "fork", p.length, v.pm_cwd, v.pm_exec_path].join("|"));
+                  });
+                ') || CUR="unknown"
+                echo "PM2 $NAME: running=[$CUR] wanted=[$WANT]"
+                if [ "$CUR" = "$WANT" ]; then
+                  pm2 reload "$ECO" --only "$NAME" --update-env && { echo "pm2 reload $NAME: OK (zero-downtime)"; return 0; }
+                  echo "pm2 reload $NAME failed - falling back to delete+start of this app only"
+                fi
+                pm2 delete "$NAME" 2>/dev/null || true
+                pm2 start "$ECO" --only "$NAME" --update-env
+              }
+              MAIN_JS=$(find dist -name main.js | head -1)
+              [ -n "$MAIN_JS" ] || { echo "FATAL: no dist/**/main.js"; exit 1; }
+              nb_pm2_reload "$SERVICE_NAME" "$(pwd)/$MAIN_JS" "$(pwd)" "${{ inputs.pm2_instances }}" "${{ inputs.pm2_max_memory }}" "$PORT" || exit 1
+            else
+              pm2 stop "$SERVICE_NAME" 2>/dev/null || true
+              pm2 delete "$SERVICE_NAME" 2>/dev/null || true
+              sleep 3
+              # Free the port, but never kill a PM2 daemon or PM2-managed process: in cluster mode the
+              # God daemon holds the listen socket, and killing it takes every app on the VM down.
+              SAFE_PIDS=" $(pgrep -f 'PM2 v.*God Daemon' | tr '\n' ' ') $(pm2 jlist 2>/dev/null | grep -oP '"pid":\K[0-9]+' | tr '\n' ' ') "
+              for PID in $( { lsof -ti :"$PORT" 2>/dev/null; ss -Hlptn "sport = :$PORT" 2>/dev/null | grep -oP '(?<=pid=)\d+'; } | sort -u); do
+                case "$SAFE_PIDS" in
+                  *" $PID "*) echo "Port $PORT held by PM2 pid $PID - not killing" ;;
+                  *) kill -9 "$PID" 2>/dev/null || true ;;
+                esac
+              done
+              sleep 2
+              MAIN_JS=$(find dist -name main.js | head -1)
+              PORT=$PORT pm2 start "$MAIN_JS" --name "$SERVICE_NAME" --cwd "$SERVICE_DIR" --instances 1 --max-memory-restart 400M --update-env
+            fi
             pm2 save
             HEALTH_PATH="${{ inputs.health_path }}"
             for i in {1..15}; do
@@ -1573,21 +1669,79 @@ jobs:
             fi
             mv .env.ci .env
 
-            pm2 stop "$SERVICE_NAME" 2>/dev/null || true
-            pm2 delete "$SERVICE_NAME" 2>/dev/null || true
-            sleep 3
-            # Free the port, but never kill a PM2 daemon or PM2-managed process: in cluster mode the
-            # God daemon holds the listen socket, and killing it takes every app on the VM down.
-            SAFE_PIDS=" $(pgrep -f 'PM2 v.*God Daemon' | tr '\n' ' ') $(pm2 jlist 2>/dev/null | grep -oP '"pid":\K[0-9]+' | tr '\n' ' ') "
-            for PID in $( { lsof -ti :"$PORT" 2>/dev/null; ss -Hlptn "sport = :$PORT" 2>/dev/null | grep -oP '(?<=pid=)\d+'; } | sort -u); do
-              case "$SAFE_PIDS" in
-                *" $PID "*) echo "Port $PORT held by PM2 pid $PID - not killing" ;;
-                *) kill -9 "$PID" 2>/dev/null || true ;;
-              esac
-            done
-            sleep 2
-            MAIN_JS=$(find dist -name main.js | head -1)
-            PORT=$PORT pm2 start "$MAIN_JS" --name "$SERVICE_NAME" --cwd "$SERVICE_DIR" --instances 1 --max-memory-restart 400M --update-env
+            NB_PM2_RELOAD="${{ (inputs.pm2_reload || vars.NB_PM2_RELOAD == 'true') && 'true' || 'false' }}"
+            NB_PM2_EXEC_MODE="${{ inputs.pm2_exec_mode }}"
+            NB_PM2_KILL_TIMEOUT="${{ inputs.pm2_kill_timeout }}"
+            NB_PM2_LISTEN_TIMEOUT="${{ inputs.pm2_listen_timeout }}"
+            NB_PM2_WAIT_READY="${{ inputs.pm2_wait_ready }}"
+            if [ "$NB_PM2_RELOAD" = "true" ]; then
+              # ── Opt-in zero-downtime PM2 reload (input pm2_reload / repo var NB_PM2_RELOAD) ──
+              # Writes a per-service ecosystem file (.nb-ecosystem.<name>.json in the service
+              # dir) and runs `pm2 reload <file> --only <name>`: a rolling worker swap in
+              # cluster mode, so the port never goes dark. Touches ONLY the named app (never
+              # `pm2 ... all`) and never kills anything by port. If the app is absent or its
+              # exec mode / instance count / cwd / script differ from the wanted config, it
+              # does a one-off delete+start of this app only. NODE_APP_INSTANCE stays PM2's
+              # instance_var, so isSchedulerLeader() (instance 0 runs crons) is unchanged.
+              nb_pm2_reload() {
+                local NAME="$1" SCRIPT="$2" CWD="$3" INST="$4" MEM="$5" APP_PORT="$6"
+                local ECO="$CWD/.nb-ecosystem.$NAME.json" WANT CUR
+                WANT=$(NB_NAME="$NAME" NB_SCRIPT="$SCRIPT" NB_CWD="$CWD" NB_INST="$INST" NB_MEM="$MEM" \
+                  NB_PORT="$APP_PORT" NB_ECO="$ECO" NB_EXEC="$NB_PM2_EXEC_MODE" NB_KILL="$NB_PM2_KILL_TIMEOUT" \
+                  NB_LISTEN="$NB_PM2_LISTEN_TIMEOUT" NB_READY="$NB_PM2_WAIT_READY" node -e '
+                  const e = process.env, cluster = e.NB_EXEC !== "fork";
+                  const app = { name: e.NB_NAME, script: e.NB_SCRIPT, cwd: e.NB_CWD,
+                    exec_mode: cluster ? "cluster" : "fork",
+                    instances: cluster ? (Number(e.NB_INST) || 1) : 1,
+                    instance_var: "NODE_APP_INSTANCE",
+                    max_memory_restart: e.NB_MEM,
+                    kill_timeout: Number(e.NB_KILL) || 10000,
+                    listen_timeout: Number(e.NB_LISTEN) || 15000,
+                    wait_ready: e.NB_READY === "true",
+                    autorestart: true, merge_logs: true,
+                    env: { PORT: String(e.NB_PORT) } };
+                  require("fs").writeFileSync(e.NB_ECO, JSON.stringify({ apps: [app] }, null, 2) + "\n");
+                  console.log([app.exec_mode, app.instances, app.cwd, app.script].join("|"));
+                ') || { echo "FATAL: cannot write PM2 ecosystem $ECO"; return 1; }
+                CUR=$(pm2 jlist 2>/dev/null | NB_NAME="$NAME" node -e '
+                  let s = "";
+                  process.stdin.on("data", d => s += d).on("end", () => {
+                    let l;
+                    try { l = JSON.parse(s.slice(s.search(/^\[(\{|\])/m))); } catch (_) { console.log("unknown"); return; }
+                    const p = l.filter(x => x.name === process.env.NB_NAME);
+                    if (!p.length) { console.log("absent"); return; }
+                    const v = p[0].pm2_env || {};
+                    console.log([v.exec_mode === "cluster_mode" ? "cluster" : "fork", p.length, v.pm_cwd, v.pm_exec_path].join("|"));
+                  });
+                ') || CUR="unknown"
+                echo "PM2 $NAME: running=[$CUR] wanted=[$WANT]"
+                if [ "$CUR" = "$WANT" ]; then
+                  pm2 reload "$ECO" --only "$NAME" --update-env && { echo "pm2 reload $NAME: OK (zero-downtime)"; return 0; }
+                  echo "pm2 reload $NAME failed - falling back to delete+start of this app only"
+                fi
+                pm2 delete "$NAME" 2>/dev/null || true
+                pm2 start "$ECO" --only "$NAME" --update-env
+              }
+              MAIN_JS=$(find dist -name main.js | head -1)
+              [ -n "$MAIN_JS" ] || { echo "FATAL: no dist/**/main.js"; exit 1; }
+              nb_pm2_reload "$SERVICE_NAME" "$(pwd)/$MAIN_JS" "$(pwd)" "${{ inputs.pm2_instances }}" "${{ inputs.pm2_max_memory }}" "$PORT" || exit 1
+            else
+              pm2 stop "$SERVICE_NAME" 2>/dev/null || true
+              pm2 delete "$SERVICE_NAME" 2>/dev/null || true
+              sleep 3
+              # Free the port, but never kill a PM2 daemon or PM2-managed process: in cluster mode the
+              # God daemon holds the listen socket, and killing it takes every app on the VM down.
+              SAFE_PIDS=" $(pgrep -f 'PM2 v.*God Daemon' | tr '\n' ' ') $(pm2 jlist 2>/dev/null | grep -oP '"pid":\K[0-9]+' | tr '\n' ' ') "
+              for PID in $( { lsof -ti :"$PORT" 2>/dev/null; ss -Hlptn "sport = :$PORT" 2>/dev/null | grep -oP '(?<=pid=)\d+'; } | sort -u); do
+                case "$SAFE_PIDS" in
+                  *" $PID "*) echo "Port $PORT held by PM2 pid $PID - not killing" ;;
+                  *) kill -9 "$PID" 2>/dev/null || true ;;
+                esac
+              done
+              sleep 2
+              MAIN_JS=$(find dist -name main.js | head -1)
+              PORT=$PORT pm2 start "$MAIN_JS" --name "$SERVICE_NAME" --cwd "$SERVICE_DIR" --instances 1 --max-memory-restart 400M --update-env
+            fi
             pm2 save
             HEALTH_PATH="${{ inputs.health_path }}"
             for i in {1..15}; do
