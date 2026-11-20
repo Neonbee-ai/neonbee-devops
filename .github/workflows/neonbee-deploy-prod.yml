@@ -201,6 +201,8 @@ on:
       VITE_FIREBASE_APP_ID:          { required: false }
       VITE_FIREBASE_VAPID_KEY:       { required: false }
       MOBILITY_INTERNAL_KEY:         { required: false }
+      MCP_OAUTH_ENC_KEY:         { required: false }
+      MCP_CONFIRM_TOKEN_SECRET:         { required: false }
       PAT_TOKEN:                     { required: false }
       INTERNAL_SERVICE_KEY:          { required: false }
       INVENTORY_INTERNAL_KEY:        { required: false }
@@ -2107,6 +2109,8 @@ jobs:
             [ -n "${{ secrets.VAPID_PUBLIC_KEY }}" ]          && echo "VAPID_PUBLIC_KEY=${{ secrets.VAPID_PUBLIC_KEY }}"               >> .env.ci
             [ -n "${{ secrets.VAPID_PRIVATE_KEY }}" ]         && echo "VAPID_PRIVATE_KEY=${{ secrets.VAPID_PRIVATE_KEY }}"             >> .env.ci
             [ -n "${{ secrets.MOBILITY_INTERNAL_KEY }}" ]     && echo "MOBILITY_INTERNAL_KEY=${{ secrets.MOBILITY_INTERNAL_KEY }}"     >> .env.ci
+            [ -n "${{ secrets.MCP_OAUTH_ENC_KEY }}" ]     && echo "MCP_OAUTH_ENC_KEY=${{ secrets.MCP_OAUTH_ENC_KEY }}"     >> .env.ci
+            [ -n "${{ secrets.MCP_CONFIRM_TOKEN_SECRET }}" ]     && echo "MCP_CONFIRM_TOKEN_SECRET=${{ secrets.MCP_CONFIRM_TOKEN_SECRET }}"     >> .env.ci
             [ -n "${{ secrets.INTERNAL_SERVICE_KEY }}" ]      && echo "INTERNAL_SERVICE_KEY=${{ secrets.INTERNAL_SERVICE_KEY }}"       >> .env.ci
             [ -n "${{ secrets.INVENTORY_INTERNAL_KEY }}" ]    && echo "INVENTORY_INTERNAL_KEY=${{ secrets.INVENTORY_INTERNAL_KEY }}"   >> .env.ci
             [ -n "${{ secrets.DAILYSTORE_PUBLIC_URL }}" ]     && echo "DAILYSTORE_PUBLIC_URL=${{ secrets.DAILYSTORE_PUBLIC_URL }}"     >> .env.ci
