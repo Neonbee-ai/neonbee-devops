@@ -239,6 +239,9 @@ jobs:
           PR_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
           DISPATCH_TOKEN: ${{ secrets.NB_BURST_DISPATCH_TOKEN }}
         run: |
+          # nb-batch (scripts/nb-batch.sh in SO360 V.2) sets NB_BURST=batch@<unix expiry>: past the expiry the batch is
+          # over (controller died or VM gone), so the value counts as off and jobs stay on Contabo.
+          case "${MODE:-}" in *@*) exp=${MODE#*@}; MODE=${MODE%%@*}; { [[ $exp =~ ^[0-9]+$ ]] && [ "$(date +%s)" -lt "$exp" ]; } || MODE=off ;; esac
           lane='["self-hosted","runner-vm"]'; why="NB_BURST=${MODE:-off}"
           # PR label burst / burst:s|m|l|xl (on this PR, or on the PR merged by this push) -> nb-pool: Contabo
           # runner-vm and GCP burst runners both carry it, so each job takes the first free runner and never
