@@ -1,5 +1,5 @@
 {
-  "_comment": "Real prod catalog, 2026-11-20. Upload as s3://<release-bucket>/agent/services.json (scripts/package-agent.sh). name = prod deploy service_name (PM2 app name; the HA VM runs the same apps with a -ha suffix). Ports, instances, scripts and max_memory (500M = neonbee-deploy-prod.yml pm2_max_memory default) come from each repo's prod caller of neonbee-deploy-prod.yml and pm2/ss on the prod HA VM 84.247.131.148; every health_path answered 200 on that VM. type=nginx + static=true = a static bundle (Vite MFE remote / shell / SSO / portal) served by nginx from /opt/neonbee/services/<name>/current; prod_nginx_root is the current VM doc root, for writing the nb-nginx-sites site files. critical=true: Core, every backend routed by the api.neonbee.app gateway, storefront-api, storefront-web, shell and SSO (nb-health ignores type=nginx entries; only nginx itself is checked). Next.js apps (storefront-web-prod, partner-portal-prod) run `npm start -p <port>` on the VM today; on AWS their bundle must be Next standalone output (server.js). EXCLUDED by owner decision 2026-11-20: so360-command, so360-command-be, the marketing website (neonbee.ai), Internal Tools apps (tools-prod, shell-fe-tools) and so360-mobility* - never list them here.",
+  "_comment": "Real prod catalog, 2026-11-20. Upload as s3://<release-bucket>/agent/services.json (scripts/package-agent.sh). name = prod deploy service_name (PM2 app name; the HA VM runs the same apps with a -ha suffix). Ports, instances, scripts and max_memory (500M = neonbee-deploy-prod.yml pm2_max_memory default) come from each repo's prod caller of neonbee-deploy-prod.yml and pm2/ss on the prod HA VM 84.247.131.148; every health_path answered 200 on that VM. type=nginx + static=true = a static bundle (Vite MFE remote / shell / SSO / portal) served by nginx from /opt/neonbee/services/<name>/current; prod_nginx_root is the current VM doc root, for writing the nb-nginx-sites site files. critical=true: Core, every backend routed by the api.neonbee.app gateway, storefront-api, storefront-web, shell and SSO. nb-health probes node apps on 127.0.0.1:<port><health_path> and critical static entries through local nginx with Host: <server_name> + health_path (default /index.html); non-critical static entries are not probed. Next.js apps run `npm start -- -p <port>` on the VM today; on AWS the bundle is the same as the prod rsync (.next/, public/, package.json, package-lock.json) and the catalog reproduces `npm start`: storefront-web (output: 'standalone') runs .next/standalone/server.js with PORT + HOSTNAME=0.0.0.0 (nb-deploy copies .next/static, public/ and .env beside it, as its npm start does); partner-portal (not standalone) runs node_modules/next/dist/bin/next with args [start, -p, <port>], cwd = release dir, runtime deps via install=true. Optional per-service fields: args (string array -> PM2 args), env (string map -> PM2 env; PORT/NODE_ENV always set). EXCLUDED by owner decision 2026-11-20: so360-command, so360-command-be, the marketing website (neonbee.ai), Internal Tools apps (tools-prod, shell-fe-tools) and so360-mobility* - never list them here.",
   "services": [
     {
       "name": "nb-nginx-sites",
@@ -11,14 +11,18 @@
       "type": "nginx",
       "static": true,
       "prod_nginx_root": "/var/www/dashboard.neonbee.app/html",
-      "critical": true
+      "critical": true,
+      "server_name": "dashboard.neonbee.app",
+      "health_path": "/index.html"
     },
     {
       "name": "sso-fe",
       "type": "nginx",
       "static": true,
       "prod_nginx_root": "/var/www/sso.neonbee.app/html",
-      "critical": true
+      "critical": true,
+      "server_name": "sso.neonbee.app",
+      "health_path": "/index.html"
     },
     {
       "name": "client-portal-pwa",
@@ -505,10 +509,13 @@
       "port": 8031,
       "health_path": "/",
       "exec_mode": "fork",
-      "script": "server.js",
+      "script": ".next/standalone/server.js",
       "instances": 1,
       "max_memory": "500M",
-      "critical": true
+      "critical": true,
+      "env": {
+        "HOSTNAME": "0.0.0.0"
+      }
     },
     {
       "name": "partner-portal-prod",
@@ -516,10 +523,16 @@
       "port": 8046,
       "health_path": "/api/health",
       "exec_mode": "fork",
-      "script": "server.js",
+      "script": "node_modules/next/dist/bin/next",
       "instances": 1,
       "max_memory": "500M",
-      "critical": false
+      "critical": false,
+      "args": [
+        "start",
+        "-p",
+        "8046"
+      ],
+      "install": true
     }
   ]
 }

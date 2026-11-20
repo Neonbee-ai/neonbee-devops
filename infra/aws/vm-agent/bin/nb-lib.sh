@@ -44,6 +44,12 @@ nb_svc() {
     '(.services[] | select(.name == $n) | .[$f]) // $d' "$NB_STATE/services.json"
 }
 
+# Catalog lookup as compact JSON (arrays/objects such as args, env): nb_svc_json <service> <field>
+# Prints "null" when the field is absent.
+nb_svc_json() {
+  jq -c --arg n "$1" --arg f "$2" '(.services[] | select(.name == $n) | .[$f]) // null' "$NB_STATE/services.json"
+}
+
 nb_fetch_catalog() {
   local tmp="$NB_STATE/services.json.tmp"
   aws s3 cp "s3://$NB_RELEASE_BUCKET/agent/services.json" "$tmp" --only-show-errors \

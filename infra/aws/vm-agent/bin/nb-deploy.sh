@@ -78,12 +78,22 @@ activate() {  # switch `current` to $1 (absolute release dir) and (re)start
     script=$(cd "$target" && find dist -name main.js -not -path '*/node_modules/*' | sort | head -1)
     [ -n "$script" ] || { nb_log "no dist/**/main.js in $SVC release; set .script in the catalog"; return 1; }
   fi
+  if [ "$script" = .next/standalone/server.js ]; then
+    # Next standalone: do what the app's `npm start` does on the VM today - put static
+    # assets, public/ and the rendered .env beside server.js (it chdirs to its own dir).
+    [ -f "$target/$script" ] || { nb_log "no $script in $SVC release"; return 1; }
+    cp -r "$target/.next/static" "$target/.next/standalone/.next/" 2>/dev/null || true
+    [ -d "$target/public" ] && cp -r "$target/public" "$target/.next/standalone/"
+    cp "$target/.env" "$target/.next/standalone/.env"
+    chown -R "$NB_USER:$NB_USER" "$target/.next/standalone"
+  fi
   # Everything that can fail on a bad bundle happens BEFORE the symlink flips.
   ln -sfn "$target" "$CUR.new" && mv -Tf "$CUR.new" "$CUR"
   local eco="$SDIR/.nb-ecosystem.$SVC.json"
   action=$(nb_pm2 jlist 2>/dev/null | NB_NAME="$SVC" NB_SCRIPT="$CUR/$script" NB_CWD="$CUR" NB_ECO="$eco" \
     NB_INST="$(nb_svc "$SVC" instances 1)" NB_MEM="$(nb_svc "$SVC" max_memory 1G)" \
     NB_PORT="$(nb_svc "$SVC" port)" NB_EXEC="$(nb_svc "$SVC" exec_mode cluster)" \
+    NB_ARGS="$(nb_svc_json "$SVC" args)" NB_ENV="$(nb_svc_json "$SVC" env)" \
     node "$(dirname "$0")/nb-pm2-apply.js") || nb_die "cannot write $eco"
   chown "$NB_USER:$NB_USER" "$eco"
   if [ "$action" = reload ]; then
