@@ -1,0 +1,126 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  Neonbee prod (Stage 2.1) - release bucket and Secrets Manager secrets.
+  Placeholder secret values are created here; real values are written by the
+  operator / deploy runner afterwards (never committed, never in the AMI or user data).
+
+Parameters:
+  EnvName:
+    Type: String
+    Default: nb-prod
+  ReleaseRetentionDays:
+    Type: Number
+    Default: 90
+    Description: Non-current object versions (old pointers, deleted bundles) expire after this many days.
+  ArtifactRetentionDays:
+    Type: Number
+    Default: 30
+    Description: Lambda packages under artifacts/ expire after this many days.
+  CfTokenSecretName:
+    Type: String
+    Default: CF_LB_API_TOKEN
+    Description: Secret holding the Cloudflare API token that can edit LB pools.
+  TeamsWebhookSecretName:
+    Type: String
+    Default: neonbee/prod/teams-webhook-url
+  AppEnvSecretPrefix:
+    Type: String
+    Default: neonbee/prod/env/
+    Description: One secret per app named <prefix><pm2-app-name>; JSON object of env vars.
+
+Resources:
+  ReleaseBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub '${EnvName}-releases-${AWS::AccountId}'
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      LifecycleConfiguration:
+        Rules:
+          # Bundles (<service>/<sha>.tar.*) are never expired by age: a service that is
+          # not redeployed for months must still boot. Overwritten pointers
+          # (current.json / candidate.json) and deleted objects keep a short history.
+          - Id: expire-noncurrent-versions
+            Status: Enabled
+            NoncurrentVersionExpiration:
+              NoncurrentDays: !Ref ReleaseRetentionDays
+          - Id: expire-lambda-artifacts
+            Status: Enabled
+            Prefix: artifacts/
+            ExpirationInDays: !Ref ArtifactRetentionDays
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 7
+          - Id: abort-multipart
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 3
+
+  ReleaseBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ReleaseBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt ReleaseBucket.Arn
+              - !Sub '${ReleaseBucket.Arn}/*'
+            Condition:
+              Bool: { 'aws:SecureTransport': 'false' }
+
+  CfLbApiToken:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Ref CfTokenSecretName
+      Description: Cloudflare API token (Load Balancing - edit pools). Set the value after deploy.
+      SecretString: REPLACE_ME
+
+  TeamsWebhookUrl:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Ref TeamsWebhookSecretName
+      Description: Microsoft Teams incoming-webhook URL for alerts. Set the value after deploy.
+      SecretString: REPLACE_ME
+
+  # Shared env applied to every app before its own secret (e.g. SUPABASE_URL).
+  SharedAppEnv:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub '${AppEnvSecretPrefix}_shared'
+      Description: Env vars shared by all apps (JSON object). Per-app secrets override it.
+      SecretString: '{}'
+
+Outputs:
+  ReleaseBucketName:
+    Value: !Ref ReleaseBucket
+    Export: { Name: !Sub '${EnvName}-ReleaseBucketName' }
+  ReleaseBucketArn:
+    Value: !GetAtt ReleaseBucket.Arn
+    Export: { Name: !Sub '${EnvName}-ReleaseBucketArn' }
+  CfLbApiTokenSecretArn:
+    Value: !Ref CfLbApiToken
+    Export: { Name: !Sub '${EnvName}-CfLbApiTokenSecretArn' }
+  TeamsWebhookSecretArn:
+    Value: !Ref TeamsWebhookUrl
+    Export: { Name: !Sub '${EnvName}-TeamsWebhookSecretArn' }
+  AppEnvSecretPrefix:
+    Value: !Ref AppEnvSecretPrefix
+    Export: { Name: !Sub '${EnvName}-AppEnvSecretPrefix' }

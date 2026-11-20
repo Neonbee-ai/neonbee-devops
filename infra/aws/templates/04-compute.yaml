@@ -1,0 +1,467 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  Neonbee prod (Stage 2.1/2.2) - instance role, launch template, Auto Scaling Group
+  (starts at 0/0/4, no ALB - Cloudflare Load Balancer is the front door), lifecycle
+  hooks used by the Cloudflare pool sync Lambda, CloudWatch agent config, alarms and
+  the nb-deploy SSM document (deploy with rollback).
+
+Parameters:
+  EnvName:
+    Type: String
+    Default: nb-prod
+  InstanceType:
+    Type: String
+    Default: r6a.large
+    Description: On-demand type (design doc 1.4 - 2 vCPU / 16 GiB x86).
+  SpotInstanceTypes:
+    Type: CommaDelimitedList
+    Default: r5a.large,r6i.large,r5.large
+    Description: Exactly 3 extra x86 >=16 GiB types used above the on-demand base (Spot).
+  OnDemandBaseCapacity:
+    Type: Number
+    Default: 2
+    Description: First N nodes are on-demand; nodes above this are Spot.
+  MinSize:
+    Type: Number
+    Default: 0
+  DesiredCapacity:
+    Type: Number
+    Default: 0
+  MaxSize:
+    Type: Number
+    Default: 4
+  RootVolumeGb:
+    Type: Number
+    Default: 30
+  AmiParameterName:
+    Type: String
+    Default: /neonbee/prod/ami/current
+    Description: SSM parameter the launch template resolves at launch time (written by the image stack).
+  InitialAmiId:
+    Type: AWS::EC2::Image::Id
+    Description: >-
+      Seed value for the AMI parameters on FIRST create only (the first Image Builder output).
+      Never change it afterwards - the image pipeline owns the parameter value.
+  EnableScalingPolicies:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: Turn on CPU target tracking + memory scale-out once MinSize >= 2 (go-live).
+  CpuTargetPercent:
+    Type: Number
+    Default: 55
+  LaunchHookTimeoutSeconds:
+    Type: Number
+    Default: 600
+  TerminateHookTimeoutSeconds:
+    Type: Number
+    Default: 300
+  HealthGracePeriodSeconds:
+    Type: Number
+    Default: 300
+  DeployDocumentName:
+    Type: String
+    Default: nb-deploy
+    Description: SSM Command document name the deploy workflow calls (contract - keep nb-deploy).
+
+Conditions:
+  ScalingOn: !Equals [!Ref EnableScalingPolicies, 'true']
+
+Resources:
+  # ---------------------------------------------------------------- IAM
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${EnvName}-node-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+      Policies:
+        - PolicyName: read-releases
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Bundles live at <service>/<sha>.tar.zst, pointers at <service>/current.json,
+              # the service catalog at agent/services.json. Read-only, whole bucket.
+              - Effect: Allow
+                Action: [s3:GetObject, s3:GetObjectVersion]
+                Resource: !Sub
+                  - '${Arn}/*'
+                  - Arn: { 'Fn::ImportValue': !Sub '${EnvName}-ReleaseBucketArn' }
+              - Effect: Allow
+                Action: s3:ListBucket
+                Resource: { 'Fn::ImportValue': !Sub '${EnvName}-ReleaseBucketArn' }
+        - PolicyName: read-app-env-secrets
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [secretsmanager:GetSecretValue, secretsmanager:DescribeSecret]
+                Resource: !Sub
+                  - 'arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${Prefix}*'
+                  - Prefix: { 'Fn::ImportValue': !Sub '${EnvName}-AppEnvSecretPrefix' }
+              - Effect: Allow
+                Action: secretsmanager:ListSecrets   # cannot be resource-scoped
+                Resource: '*'
+        - PolicyName: read-agent-params
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [ssm:GetParameter, ssm:GetParameters]
+                Resource: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/neonbee/prod/*'
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref InstanceRole]
+
+  # ---------------------------------------------------------------- AMI pointers
+  # The launch template resolves AmiParameterName at every launch. The image stack's
+  # promote Lambda rotates current -> previous; rollback = copy previous back.
+  AmiCurrentParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Ref AmiParameterName
+      Type: String
+      DataType: aws:ec2:image
+      Value: !Ref InitialAmiId
+      Description: AMI used for new nodes (owned by the image pipeline after first create)
+
+  AmiPreviousParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '${AmiParameterName}-previous'
+      Type: String
+      DataType: aws:ec2:image
+      Value: !Ref InitialAmiId
+      Description: Last known-good AMI (rollback target)
+
+  CloudWatchAgentConfig:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /neonbee/prod/cwagent-config
+      Type: String
+      Description: CloudWatch agent config loaded by nb-boot.sh
+      Value: !Sub |
+        {
+          "agent": { "metrics_collection_interval": 60 },
+          "metrics": {
+            "namespace": "CWAgent",
+            "append_dimensions": { "AutoScalingGroupName": "${!aws:AutoScalingGroupName}", "InstanceId": "${!aws:InstanceId}" },
+            "aggregation_dimensions": [["AutoScalingGroupName"], ["AutoScalingGroupName", "path"]],
+            "metrics_collected": {
+              "mem": { "measurement": ["mem_used_percent"] },
+              "disk": { "measurement": ["used_percent"], "resources": ["/"], "drop_device": true, "ignore_file_system_types": ["tmpfs", "devtmpfs", "overlay", "squashfs"] }
+            }
+          },
+          "logs": {
+            "logs_collected": { "files": { "collect_list": [
+              { "file_path": "/var/log/nb-agent/*.log", "log_group_name": "/${EnvName}/nb-agent", "log_stream_name": "{instance_id}", "retention_in_days": 7 },
+              { "file_path": "/opt/neonbee/.pm2/logs/*-error*.log", "log_group_name": "/${EnvName}/pm2-errors", "log_stream_name": "{instance_id}", "retention_in_days": 7 }
+            ] } }
+          }
+        }
+
+  # ---------------------------------------------------------------- Launch template
+  LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    DependsOn: AmiCurrentParam
+    Properties:
+      LaunchTemplateName: !Sub '${EnvName}-node'
+      LaunchTemplateData:
+        ImageId: !Sub 'resolve:ssm:${AmiParameterName}'
+        InstanceType: !Ref InstanceType
+        IamInstanceProfile: { Arn: !GetAtt InstanceProfile.Arn }
+        MetadataOptions:
+          HttpTokens: required
+          HttpPutResponseHopLimit: 1
+          InstanceMetadataTags: enabled
+        Monitoring: { Enabled: false }
+        NetworkInterfaces:
+          - DeviceIndex: 0
+            AssociatePublicIpAddress: true
+            DeleteOnTermination: true
+            Groups:
+              - { 'Fn::ImportValue': !Sub '${EnvName}-NodeSecurityGroupId' }
+        BlockDeviceMappings:
+          - DeviceName: /dev/sda1
+            Ebs:
+              VolumeSize: !Ref RootVolumeGb
+              VolumeType: gp3
+              Encrypted: true
+              DeleteOnTermination: true
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - { Key: Name, Value: !Sub '${EnvName}-node' }
+              - { Key: neonbee:env, Value: !Ref EnvName }
+          - ResourceType: volume
+            Tags:
+              - { Key: neonbee:env, Value: !Ref EnvName }
+        # No secrets here - only pointers. nb-boot.sh does the rest (vm-agent/bin/nb-boot.sh).
+        UserData:
+          Fn::Base64: !Sub
+            - |
+              #!/bin/bash
+              set -euo pipefail
+              install -d -m 0755 /etc/nb-agent
+              cat > /etc/nb-agent/agent.conf <<'EOF'
+              NB_ENV_NAME=${EnvName}
+              NB_REGION=${AWS::Region}
+              NB_RELEASE_BUCKET=${Bucket}
+              NB_SECRET_PREFIX=${Prefix}
+              NB_CWAGENT_PARAM=/neonbee/prod/cwagent-config
+              NB_SCHEDULER_DB_LOCK=true
+              EOF
+              systemctl enable --now nb-boot.service nb-health.timer
+            - Bucket: { 'Fn::ImportValue': !Sub '${EnvName}-ReleaseBucketName' }
+              Prefix: { 'Fn::ImportValue': !Sub '${EnvName}-AppEnvSecretPrefix' }
+
+  # ---------------------------------------------------------------- ASG
+  AutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AutoScalingGroupName: !Sub '${EnvName}-asg'
+      MinSize: !Ref MinSize
+      MaxSize: !Ref MaxSize
+      DesiredCapacity: !Ref DesiredCapacity
+      VPCZoneIdentifier: !Split [',', { 'Fn::ImportValue': !Sub '${EnvName}-PublicSubnetIds' }]
+      HealthCheckType: EC2
+      HealthCheckGracePeriod: !Ref HealthGracePeriodSeconds
+      DefaultInstanceWarmup: 300
+      CapacityRebalance: true
+      InstanceMaintenancePolicy:
+        MinHealthyPercentage: 100
+        MaxHealthyPercentage: 200
+      MixedInstancesPolicy:
+        InstancesDistribution:
+          OnDemandAllocationStrategy: prioritized
+          OnDemandBaseCapacity: !Ref OnDemandBaseCapacity
+          OnDemandPercentageAboveBaseCapacity: 0
+          SpotAllocationStrategy: price-capacity-optimized
+        LaunchTemplate:
+          LaunchTemplateSpecification:
+            LaunchTemplateId: !Ref LaunchTemplate
+            Version: !GetAtt LaunchTemplate.LatestVersionNumber
+          Overrides:
+            - InstanceType: !Ref InstanceType
+            - InstanceType: !Select [0, !Ref SpotInstanceTypes]
+            - InstanceType: !Select [1, !Ref SpotInstanceTypes]
+            - InstanceType: !Select [2, !Ref SpotInstanceTypes]
+      MetricsCollection:
+        - Granularity: 1Minute
+          Metrics:
+            - GroupDesiredCapacity
+            - GroupInServiceInstances
+            - GroupPendingInstances
+            - GroupTerminatingInstances
+      # Consumed by the scale-events stack (EventBridge -> cf-lb-sync Lambda).
+      LifecycleHookSpecificationList:
+        - LifecycleHookName: nb-ready
+          LifecycleTransition: autoscaling:EC2_INSTANCE_LAUNCHING
+          HeartbeatTimeout: !Ref LaunchHookTimeoutSeconds
+          DefaultResult: ABANDON
+        - LifecycleHookName: nb-drain
+          LifecycleTransition: autoscaling:EC2_INSTANCE_TERMINATING
+          HeartbeatTimeout: !Ref TerminateHookTimeoutSeconds
+          DefaultResult: CONTINUE
+      Tags:
+        - { Key: neonbee:env, Value: !Ref EnvName, PropagateAtLaunch: true }
+
+  # ---------------------------------------------------------------- Scaling (off until go-live)
+  CpuTargetTracking:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Condition: ScalingOn
+    Properties:
+      AutoScalingGroupName: !Ref AutoScalingGroup
+      PolicyType: TargetTrackingScaling
+      TargetTrackingConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ASGAverageCPUUtilization
+        TargetValue: !Ref CpuTargetPercent
+
+  MemoryScaleOut:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Condition: ScalingOn
+    Properties:
+      AutoScalingGroupName: !Ref AutoScalingGroup
+      PolicyType: StepScaling
+      AdjustmentType: ChangeInCapacity
+      MetricAggregationType: Average
+      StepAdjustments:
+        - { MetricIntervalLowerBound: 0, MetricIntervalUpperBound: 10, ScalingAdjustment: 1 }
+        - { MetricIntervalLowerBound: 10, ScalingAdjustment: 2 }
+
+  MemoryScaleOutAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: ScalingOn
+    Properties:
+      AlarmName: !Sub '${EnvName}-mem-scale-out'
+      AlarmDescription: Average memory >= 80% for 3 min - add nodes (scale-out only).
+      Namespace: CWAgent
+      MetricName: mem_used_percent
+      Dimensions:
+        - { Name: AutoScalingGroupName, Value: !Ref AutoScalingGroup }
+      Statistic: Average
+      Period: 60
+      EvaluationPeriods: 3
+      Threshold: 80
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref MemoryScaleOut]
+
+  # ---------------------------------------------------------------- Alarms -> Teams
+  CpuHighAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${EnvName}-cpu-high'
+      AlarmDescription: ASG average CPU > 80% for 10 min.
+      Namespace: AWS/EC2
+      MetricName: CPUUtilization
+      Dimensions:
+        - { Name: AutoScalingGroupName, Value: !Ref AutoScalingGroup }
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 80
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [{ 'Fn::ImportValue': !Sub '${EnvName}-AlertTopicArn' }]
+      OKActions: [{ 'Fn::ImportValue': !Sub '${EnvName}-AlertTopicArn' }]
+
+  MemoryHighAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${EnvName}-memory-high'
+      AlarmDescription: Highest node memory > 90% for 10 min (CloudWatch agent).
+      Namespace: CWAgent
+      MetricName: mem_used_percent
+      Dimensions:
+        - { Name: AutoScalingGroupName, Value: !Ref AutoScalingGroup }
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 90
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [{ 'Fn::ImportValue': !Sub '${EnvName}-AlertTopicArn' }]
+      OKActions: [{ 'Fn::ImportValue': !Sub '${EnvName}-AlertTopicArn' }]
+
+  DiskHighAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${EnvName}-disk-high'
+      AlarmDescription: Root disk > 90% on any node after nb-agent cleanup.
+      Namespace: CWAgent
+      MetricName: disk_used_percent
+      Dimensions:
+        - { Name: AutoScalingGroupName, Value: !Ref AutoScalingGroup }
+        - { Name: path, Value: / }
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 90
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [{ 'Fn::ImportValue': !Sub '${EnvName}-AlertTopicArn' }]
+
+  # Desired > InService for 15 min = replacements are failing (boot, health gate or CF sync).
+  UnhealthyCapacityAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${EnvName}-asg-unhealthy'
+      AlarmDescription: In-service nodes below desired for 15 min (launches failing their health gate).
+      EvaluationPeriods: 3
+      DatapointsToAlarm: 3
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [{ 'Fn::ImportValue': !Sub '${EnvName}-AlertTopicArn' }]
+      OKActions: [{ 'Fn::ImportValue': !Sub '${EnvName}-AlertTopicArn' }]
+      Metrics:
+        - Id: desired
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: AWS/AutoScaling
+              MetricName: GroupDesiredCapacity
+              Dimensions: [{ Name: AutoScalingGroupName, Value: !Ref AutoScalingGroup }]
+            Period: 300
+            Stat: Minimum
+        - Id: inservice
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: AWS/AutoScaling
+              MetricName: GroupInServiceInstances
+              Dimensions: [{ Name: AutoScalingGroupName, Value: !Ref AutoScalingGroup }]
+            Period: 300
+            Stat: Maximum
+        - Id: gap
+          Expression: desired - inservice
+          Label: missing nodes
+          ReturnData: true
+
+  # ---------------------------------------------------------------- Deploy document (2.2)
+  # Contract with .github/workflows/neonbee-deploy-s3-release.yml (plan 2.4):
+  # document name nb-deploy, string params service, sha, bucket, key.
+  DeployDocument:
+    Type: AWS::SSM::Document
+    Properties:
+      Name: !Ref DeployDocumentName
+      DocumentType: Command
+      DocumentFormat: YAML
+      UpdateMethod: NewVersion
+      Content:
+        schemaVersion: '2.2'
+        description: Deploy one service release on this node with automatic rollback (vm-agent/bin/nb-deploy.sh).
+        parameters:
+          service:
+            type: String
+            description: Service / PM2 app name (lowercase, digits, dash)
+            allowedPattern: '^[a-z0-9][a-z0-9-]{1,63}$'
+          sha:
+            type: String
+            description: Release sha
+            allowedPattern: '^[A-Za-z0-9._-]{4,64}$'
+          bucket:
+            type: String
+            description: Release bucket
+            allowedPattern: '^[a-z0-9][a-z0-9.-]{2,62}$'
+          key:
+            type: String
+            description: Object key, <service>/<sha>.tar.zst or .tar.gz
+            allowedPattern: '^[a-z0-9][a-z0-9-]{1,63}/[A-Za-z0-9._-]{4,64}\.tar\.(zst|gz)$'
+        mainSteps:
+          - action: aws:runShellScript
+            name: deploy
+            inputs:
+              timeoutSeconds: '900'
+              runCommand:
+                - /opt/nb-agent/bin/nb-deploy.sh '{{ service }}' '{{ sha }}' '{{ bucket }}' '{{ key }}'
+
+Outputs:
+  AutoScalingGroupName:
+    Value: !Ref AutoScalingGroup
+    Export: { Name: !Sub '${EnvName}-AsgName' }
+  LaunchTemplateId:
+    Value: !Ref LaunchTemplate
+  InstanceRoleArn:
+    Value: !GetAtt InstanceRole.Arn
+    Export: { Name: !Sub '${EnvName}-InstanceRoleArn' }
+  InstanceProfileName:
+    Value: !Ref InstanceProfile
+    Export: { Name: !Sub '${EnvName}-InstanceProfileName' }
+  AmiParameterName:
+    Value: !Ref AmiParameterName
+    Export: { Name: !Sub '${EnvName}-AmiParameterName' }
+  DeployDocumentName:
+    Value: !Ref DeployDocument
+    Export: { Name: !Sub '${EnvName}-DeployDocumentName' }
