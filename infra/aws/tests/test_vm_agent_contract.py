@@ -54,6 +54,35 @@ class VmAgentContractTest(unittest.TestCase):
         for banned in ("command", "website", "tools"):
             self.assertNotIn(banned, names)
 
+    def test_given_real_catalog_when_read_then_excludes_internal_tools_vm_and_mobility_apps(self):
+        names = [s["name"] for s in json.loads(read("vm-agent", "services.json"))["services"]]
+        for n in names:
+            for banned in ("command", "website", "tools", "mobility"):
+                self.assertNotIn(banned, n)
+
+    def test_given_real_catalog_when_read_then_names_and_ports_are_unique(self):
+        svcs = json.loads(read("vm-agent", "services.json"))["services"]
+        names = [s["name"] for s in svcs]
+        ports = [s["port"] for s in svcs if "port" in s]
+        self.assertEqual(len(names), len(set(names)))
+        self.assertEqual(len(ports), len(set(ports)))
+
+    def test_given_real_catalog_when_read_then_every_node_app_has_port_health_and_script(self):
+        for s in json.loads(read("vm-agent", "services.json"))["services"]:
+            self.assertIn(s.get("type"), ("node", "nginx"), s["name"])
+            self.assertIsInstance(s.get("critical"), bool, s["name"])
+            if s["type"] == "node":
+                self.assertIsInstance(s.get("port"), int, s["name"])
+                self.assertTrue(s.get("health_path", "").startswith("/"), s["name"])
+                self.assertTrue(s.get("script"), s["name"])
+            else:
+                self.assertNotIn("port", s, s["name"])
+
+    def test_given_real_catalog_when_read_then_front_door_apps_are_critical(self):
+        by = {s["name"]: s for s in json.loads(read("vm-agent", "services.json"))["services"]}
+        for n in ("nb-nginx-sites", "core-prod", "sso-fe", "shell-fe", "storefront-api-prod", "storefront-web-prod"):
+            self.assertTrue(by[n]["critical"], n)
+
     def test_given_asg_when_read_then_starts_at_zero_with_cap_four(self):
         body = read("templates", "04-compute.yaml")
         for p, v in (("MinSize", "0"), ("DesiredCapacity", "0"), ("MaxSize", "4")):

@@ -80,7 +80,7 @@ aws secretsmanager put-secret-value --secret-id neonbee/prod/teams-webhook-url -
 aws cloudformation package --template-file templates/03-alerts.yaml --s3-bucket $BUCKET --s3-prefix artifacts --output-template-file /tmp/03.yaml
 aws cloudformation deploy --stack-name $ENV-alerts --template-file /tmp/03.yaml --capabilities CAPABILITY_IAM \
   --parameter-overrides BudgetEmail=<optional email>
-# 4. agent bundle + service catalog (copy services.example.json -> vm-agent/services.json, fill all apps)
+# 4. agent bundle + service catalog (vm-agent/services.json is the real catalog; package-agent.sh uploads it)
 scripts/package-agent.sh /tmp/nb-agent s3://$BUCKET
 # 5. compute. InitialAmiId = any Ubuntu 24.04 x86 AMI as a placeholder; desired is 0 so
 #    nothing launches until step 7 replaces it with a real image.
@@ -125,7 +125,7 @@ on the compute stack, after scheduler-lock verification and a load test.
 | scale-events | `CloudflareAccountId`, `CloudflarePoolId` | (required) | **yes** |
 | scale-events | `HealthWaitSeconds` / `DrainSeconds` / `HealthHostHeader` | 480 / 45 / api.neonbee.app | |
 | image | `RecipeVersion`, `ScheduleExpression`, `AutoRefresh` | 1.0.0, 1st of month 20:30 UTC, true | bump RecipeVersion on any recipe change |
-| S3 | `agent/services.json` | example only | **yes** - full app list, ports, health paths, critical flags |
+| S3 | `agent/services.json` | `vm-agent/services.json` (61 apps, filled 2026-11-20 from prod callers + HA VM) | re-check when an app or port changes |
 
 ## Monthly cost (on-demand, ap-south-1, rates from the design doc §8)
 
