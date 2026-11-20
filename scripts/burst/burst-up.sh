@@ -20,7 +20,7 @@ PROJECT=${GCP_PROJECT:-gen-lang-client-0521938031}; ZONE=${GCP_ZONE:-europe-west
 SELF_SA=nb-burst-self@$PROJECT.iam.gserviceaccount.com
 LABELS_BASE=lane-burst,nb-pool
 WAIT=${BURST_ONLINE_WAIT:-300}; MAX_RUN=${BURST_MAX_RUN_S:-10800}
-JUMP_HOST=207.180.217.124; JUMP_TARGETS="68.183.86.248 167.71.226.224 167.114.98.177 84.247.131.148"
+JUMP_HOST=207.180.217.124; JUMP_TARGETS="167.114.98.177 84.247.131.148"   # DO VMs 68.183.86.248 + 167.71.226.224 deleted
 BUNDLE_BASE=https://github.com/Neonbee-ai/neonbee-devops/releases/download/burst-bundle
 CE=https://compute.googleapis.com/compute/v1/projects/$PROJECT/zones/$ZONE
 SUMMARY=${GITHUB_STEP_SUMMARY:-/dev/stdout}
