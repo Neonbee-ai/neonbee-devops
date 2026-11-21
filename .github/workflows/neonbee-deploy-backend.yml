@@ -1223,12 +1223,6 @@ jobs:
           HEALTH: ${{ inputs.health_path }}
         run: |
           ssh-keyscan -H $SERVER_IP >> ~/.ssh/known_hosts 2>/dev/null
-          # ── Dev database ─────────────────────────────────────────────────
-          # There is no dev Supabase project: CI holds one set of credentials
-          # and they are production's. Dev therefore runs against the SAME
-          # database as prod (user decision, 2026-09-21) — SUPABASE_*_DEV
-          # overrides it the moment those secrets exist. Say so on every deploy
-          # so nobody discovers it from a support ticket.
           if [ -z "${{ secrets.SUPABASE_URL_DEV }}" ]; then
             echo "::warning title=Dev is on the PRODUCTION database::No SUPABASE_URL_DEV secret — ${{ inputs.service_name }} (dev) reads and writes production data. Anything you create while testing on dev is real."
             {
@@ -1240,12 +1234,6 @@ jobs:
             } >> "$GITHUB_STEP_SUMMARY"
           fi
 
-          # ── Directory isolation ──────────────────────────────────────────
-          # The dev tier MUST NOT deploy into the prod tree. On the Contabo VM
-          # /github/neonbee/so360-* is what the *-prod-ha PM2 apps serve from,
-          # so an rsync --delete + .env rewrite there would hand production a
-          # dev build (dev Supabase, SERVICE_PORT_BAND, CORS) at its next
-          # restart. Remap every path into /github/neonbee-dev/ instead.
           case "$SERVICE_DIR" in
             /github/neonbee/*) SERVICE_DIR="/github/neonbee-dev/${SERVICE_DIR#/github/neonbee/}" ;;
             *)                 SERVICE_DIR="${SERVICE_DIR%/}-dev" ;;
@@ -1256,13 +1244,11 @@ jobs:
           NEW_SLOT=$([[ "$CURRENT" == "blue" ]] && echo green || echo blue)
           echo "Slot: $CURRENT → $NEW_SLOT"
 
-          # Backup dist before overwriting (Blue/Green rollback target)
           ssh root@$SERVER_IP "
             mkdir -p '$SERVICE_DIR/dist-prev' '$SERVICE_DIR/dist'
             rsync -a --delete '$SERVICE_DIR/dist/' '$SERVICE_DIR/dist-prev/' 2>/dev/null || true
           "
 
-          # Rsync dist/ only — source never touches target VM
           ssh root@$SERVER_IP "mkdir -p '$SERVICE_DIR/dist'"
           rsync -avz --delete dist/ "root@$SERVER_IP:$SERVICE_DIR/dist/"
           rsync -avz package.json package-lock.json "root@$SERVER_IP:$SERVICE_DIR/"
@@ -1275,7 +1261,6 @@ jobs:
             nvm use 22
             npm install --omit=dev --legacy-peer-deps --prefer-offline --no-audit --no-fund
 
-            # ── Write CI-managed vars ────────────────────────────────────────
             {
               echo "NODE_ENV=development"
               echo "RELEASE_SHA=${{ github.sha }}"
@@ -1292,7 +1277,6 @@ jobs:
               echo "CORS_ORIGINS=${{ secrets.CORS_ORIGINS_DEV }}"
             } > .env.ci
 
-            # ── Append optional secrets (only when the GitHub secret is set) ─
             [ -n "${{ secrets.STOREFRONT_JWT_SECRET }}" ]       && echo "STOREFRONT_JWT_SECRET=${{ secrets.STOREFRONT_JWT_SECRET }}"             >> .env.ci
             [ -n "${{ secrets.BUNNY_STORAGE_HOSTNAME }}" ]      && echo "BUNNY_STORAGE_HOSTNAME=${{ secrets.BUNNY_STORAGE_HOSTNAME }}"           >> .env.ci
             [ -n "${{ secrets.BUNNY_STORAGE_ZONE }}" ]          && echo "BUNNY_STORAGE_ZONE=${{ secrets.BUNNY_STORAGE_ZONE }}"                   >> .env.ci
@@ -1355,14 +1339,9 @@ jobs:
             [ -n "${{ secrets.CRM_SYNC_INTERNAL_KEY }}" ]       && echo "CRM_SYNC_INTERNAL_KEY=${{ secrets.CRM_SYNC_INTERNAL_KEY }}"             >> .env.ci
             [ -n "${{ secrets.MAINTENANCE_INTERNAL_KEY }}" ]       && echo "MAINTENANCE_INTERNAL_KEY=${{ secrets.MAINTENANCE_INTERNAL_KEY }}"             >> .env.ci
             [ -n "${{ secrets.SUPPORT_INTERNAL_KEY }}" ]           && echo "SUPPORT_INTERNAL_KEY=${{ secrets.SUPPORT_INTERNAL_KEY }}"                     >> .env.ci
-            # Channel Program: HS256 secret Core signs partner delegated-access session tokens with. Absent = /access/session returns 503 and no partner can enter a client tenant.
             [ -n "${{ secrets.CHANNEL_DELEGATION_SECRET }}" ] && echo "CHANNEL_DELEGATION_SECRET=${{ secrets.CHANNEL_DELEGATION_SECRET }}" >> .env.ci
-            # Channel Program: AES-256-GCM key Subscription encrypts channel payout bank details with. Absent = payout-profile writes are refused (fail-closed).
             [ -n "${{ secrets.COMPENSATION_ENCRYPTION_KEY }}" ] && echo "COMPENSATION_ENCRYPTION_KEY=${{ secrets.COMPENSATION_ENCRYPTION_KEY }}" >> .env.ci
             [ -n "${{ secrets.VENDOR_BANK_ENC_KEY }}" ] && echo "VENDOR_BANK_ENC_KEY=${{ secrets.VENDOR_BANK_ENC_KEY }}" >> .env.ci
-            # AWS SES (Inbox email channel outbound + inbound S3 bodies). Mirrors the prod
-            # workflow; dev/staging carried no AWS block at all until 2026-09-12, so a
-            # SES-backed agent reply could not send there. Conditional like the rest.
             [ -n "${{ secrets.AWS_ACCESS_KEY_ID }}" ]          && echo "AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}"                     >> .env.ci
             [ -n "${{ secrets.AWS_SECRET_ACCESS_KEY }}" ]      && echo "AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}"             >> .env.ci
             [ -n "${{ secrets.AWS_REGION }}" ]                 && echo "AWS_REGION=${{ secrets.AWS_REGION }}"                                   >> .env.ci
@@ -1387,17 +1366,11 @@ jobs:
             [ -n "${{ secrets.SLACK_CLIENT_SECRET }}" ] && echo "SLACK_CLIENT_SECRET=${{ secrets.SLACK_CLIENT_SECRET }}" >> .env.ci
             [ -n "${{ secrets.SLACK_SIGNING_SECRET }}" ] && echo "SLACK_SIGNING_SECRET=${{ secrets.SLACK_SIGNING_SECRET }}" >> .env.ci
 
-            # ── Caller-supplied extra env vars for dev ────────────────────────
             EXTRA_ENV_DEV='${{ inputs.extra_env_dev }}'
             [ -n "$EXTRA_ENV_DEV" ] && printf '%s\n' "$EXTRA_ENV_DEV" >> .env.ci
 
-            # Strip any KEY= lines where the secret wasn't set
             sed -i '/=$/d' .env.ci
 
-            # ── PERMANENT FIX: Merge server-side secrets CI doesn't own ─────
-            # Keys already on the server but absent from .env.ci are preserved.
-            # This prevents future deployments from silently wiping secrets
-            # that were added to the server after the workflow was last updated.
             if [ -f .env ]; then
               CI_KEYS=$(sed 's/=.*//' .env.ci | tr '\n' '|' | sed 's/|$//')
               [ -n "$CI_KEYS" ] && grep -vE "^(${CI_KEYS})=" .env >> .env.ci 2>/dev/null || true
@@ -1410,14 +1383,6 @@ jobs:
             NB_PM2_LISTEN_TIMEOUT="${{ inputs.pm2_listen_timeout }}"
             NB_PM2_WAIT_READY="${{ inputs.pm2_wait_ready }}"
             if [ "$NB_PM2_RELOAD" = "true" ]; then
-              # ── Opt-in zero-downtime PM2 reload (input pm2_reload / repo var NB_PM2_RELOAD) ──
-              # Writes a per-service ecosystem file (.nb-ecosystem.<name>.json in the service
-              # dir) and runs `pm2 reload <file> --only <name>`: a rolling worker swap in
-              # cluster mode, so the port never goes dark. Touches ONLY the named app (never
-              # `pm2 ... all`) and never kills anything by port. If the app is absent or its
-              # exec mode / instance count / cwd / script differ from the wanted config, it
-              # does a one-off delete+start of this app only. NODE_APP_INSTANCE stays PM2's
-              # instance_var, so isSchedulerLeader() (instance 0 runs crons) is unchanged.
               nb_pm2_reload() {
                 local NAME="$1" SCRIPT="$2" CWD="$3" INST="$4" MEM="$5" APP_PORT="$6"
                 local ECO="$CWD/.nb-ecosystem.$NAME.json" WANT CUR
@@ -1464,8 +1429,6 @@ jobs:
               pm2 stop "$SERVICE_NAME" 2>/dev/null || true
               pm2 delete "$SERVICE_NAME" 2>/dev/null || true
               sleep 3
-              # Free the port, but never kill a PM2 daemon or PM2-managed process: in cluster mode the
-              # God daemon holds the listen socket, and killing it takes every app on the VM down.
               SAFE_PIDS=" $(pgrep -f 'PM2 v.*God Daemon' | tr '\n' ' ') $(pm2 jlist 2>/dev/null | grep -oP '"pid":\K[0-9]+' | tr '\n' ' ') "
               for PID in $( { lsof -ti :"$PORT" 2>/dev/null; ss -Hlptn "sport = :$PORT" 2>/dev/null | grep -oP '(?<=pid=)\d+'; } | sort -u); do
                 case "$SAFE_PIDS" in
@@ -1488,7 +1451,6 @@ jobs:
             echo "Deployed $SERVICE_NAME on port $PORT (slot: $NEW_SLOT)"
           DEPLOY_SCRIPT
 
-          # Push deploy metric to Pushgateway on Internal Tools VM (non-fatal)
           TOOLS=${{ secrets.INTERNAL_TOOLS_VM }}
           if [ -n "$TOOLS" ]; then
             ssh-keyscan -H $TOOLS >> ~/.ssh/known_hosts 2>/dev/null
@@ -1501,7 +1463,6 @@ jobs:
             " 2>/dev/null || true
           fi
 
-      # ── Staging ──────────────────────────────────────────────────────────
       - name: Deploy to Staging
         if: github.ref == 'refs/heads/qa'
         env:
@@ -1513,12 +1474,6 @@ jobs:
         run: |
           ssh-keyscan -H $SERVER_IP >> ~/.ssh/known_hosts 2>/dev/null
 
-          # ── Directory isolation ──────────────────────────────────────────
-          # The staging tier MUST NOT deploy into the prod tree. On the Contabo VM
-          # /github/neonbee/so360-* is what the *-prod-ha PM2 apps serve from,
-          # so an rsync --delete + .env rewrite there would hand production a
-          # staging build (dev Supabase, SERVICE_PORT_BAND, CORS) at its next
-          # restart. Remap every path into /github/neonbee-staging/ instead.
           case "$SERVICE_DIR" in
             /github/neonbee/*) SERVICE_DIR="/github/neonbee-staging/${SERVICE_DIR#/github/neonbee/}" ;;
             *)                 SERVICE_DIR="${SERVICE_DIR%/}-staging" ;;
@@ -1545,7 +1500,6 @@ jobs:
             nvm use 22
             npm install --omit=dev --legacy-peer-deps --prefer-offline --no-audit --no-fund
 
-            # ── Write CI-managed vars ────────────────────────────────────────
             {
               echo "NODE_ENV=staging"
               echo "RELEASE_SHA=${{ github.sha }}"
@@ -1562,7 +1516,6 @@ jobs:
               echo "CORS_ORIGINS=${{ secrets.CORS_ORIGINS_STAGING }}"
             } > .env.ci
 
-            # ── Append optional secrets (only when the GitHub secret is set) ─
             [ -n "${{ secrets.STOREFRONT_JWT_SECRET_STAGING }}" ] && echo "STOREFRONT_JWT_SECRET=${{ secrets.STOREFRONT_JWT_SECRET_STAGING }}"   >> .env.ci
             [ -n "${{ secrets.BUNNY_STORAGE_HOSTNAME }}" ]      && echo "BUNNY_STORAGE_HOSTNAME=${{ secrets.BUNNY_STORAGE_HOSTNAME }}"           >> .env.ci
             [ -n "${{ secrets.BUNNY_STORAGE_ZONE }}" ]          && echo "BUNNY_STORAGE_ZONE=${{ secrets.BUNNY_STORAGE_ZONE }}"                   >> .env.ci
@@ -1625,14 +1578,9 @@ jobs:
             [ -n "${{ secrets.CRM_SYNC_INTERNAL_KEY }}" ]       && echo "CRM_SYNC_INTERNAL_KEY=${{ secrets.CRM_SYNC_INTERNAL_KEY }}"             >> .env.ci
             [ -n "${{ secrets.MAINTENANCE_INTERNAL_KEY }}" ]       && echo "MAINTENANCE_INTERNAL_KEY=${{ secrets.MAINTENANCE_INTERNAL_KEY }}"             >> .env.ci
             [ -n "${{ secrets.SUPPORT_INTERNAL_KEY }}" ]           && echo "SUPPORT_INTERNAL_KEY=${{ secrets.SUPPORT_INTERNAL_KEY }}"                     >> .env.ci
-            # Channel Program: HS256 secret Core signs partner delegated-access session tokens with. Absent = /access/session returns 503 and no partner can enter a client tenant.
             [ -n "${{ secrets.CHANNEL_DELEGATION_SECRET }}" ] && echo "CHANNEL_DELEGATION_SECRET=${{ secrets.CHANNEL_DELEGATION_SECRET }}" >> .env.ci
-            # Channel Program: AES-256-GCM key Subscription encrypts channel payout bank details with. Absent = payout-profile writes are refused (fail-closed).
             [ -n "${{ secrets.COMPENSATION_ENCRYPTION_KEY }}" ] && echo "COMPENSATION_ENCRYPTION_KEY=${{ secrets.COMPENSATION_ENCRYPTION_KEY }}" >> .env.ci
             [ -n "${{ secrets.VENDOR_BANK_ENC_KEY }}" ] && echo "VENDOR_BANK_ENC_KEY=${{ secrets.VENDOR_BANK_ENC_KEY }}" >> .env.ci
-            # AWS SES (Inbox email channel outbound + inbound S3 bodies). Mirrors the prod
-            # workflow; dev/staging carried no AWS block at all until 2026-09-12, so a
-            # SES-backed agent reply could not send there. Conditional like the rest.
             [ -n "${{ secrets.AWS_ACCESS_KEY_ID }}" ]          && echo "AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}"                     >> .env.ci
             [ -n "${{ secrets.AWS_SECRET_ACCESS_KEY }}" ]      && echo "AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}"             >> .env.ci
             [ -n "${{ secrets.AWS_REGION }}" ]                 && echo "AWS_REGION=${{ secrets.AWS_REGION }}"                                   >> .env.ci
@@ -1655,14 +1603,11 @@ jobs:
             [ -n "${{ secrets.SLACK_CLIENT_SECRET }}" ] && echo "SLACK_CLIENT_SECRET=${{ secrets.SLACK_CLIENT_SECRET }}" >> .env.ci
             [ -n "${{ secrets.SLACK_SIGNING_SECRET }}" ] && echo "SLACK_SIGNING_SECRET=${{ secrets.SLACK_SIGNING_SECRET }}" >> .env.ci
 
-            # ── Caller-supplied extra env vars for staging ────────────────────
             EXTRA_ENV_STAGING='${{ inputs.extra_env_staging }}'
             [ -n "$EXTRA_ENV_STAGING" ] && printf '%s\n' "$EXTRA_ENV_STAGING" >> .env.ci
 
-            # Strip any KEY= lines where the secret wasn't set
             sed -i '/=$/d' .env.ci
 
-            # ── PERMANENT FIX: Merge server-side secrets CI doesn't own ─────
             if [ -f .env ]; then
               CI_KEYS=$(sed 's/=.*//' .env.ci | tr '\n' '|' | sed 's/|$//')
               [ -n "$CI_KEYS" ] && grep -vE "^(${CI_KEYS})=" .env >> .env.ci 2>/dev/null || true
@@ -1675,14 +1620,6 @@ jobs:
             NB_PM2_LISTEN_TIMEOUT="${{ inputs.pm2_listen_timeout }}"
             NB_PM2_WAIT_READY="${{ inputs.pm2_wait_ready }}"
             if [ "$NB_PM2_RELOAD" = "true" ]; then
-              # ── Opt-in zero-downtime PM2 reload (input pm2_reload / repo var NB_PM2_RELOAD) ──
-              # Writes a per-service ecosystem file (.nb-ecosystem.<name>.json in the service
-              # dir) and runs `pm2 reload <file> --only <name>`: a rolling worker swap in
-              # cluster mode, so the port never goes dark. Touches ONLY the named app (never
-              # `pm2 ... all`) and never kills anything by port. If the app is absent or its
-              # exec mode / instance count / cwd / script differ from the wanted config, it
-              # does a one-off delete+start of this app only. NODE_APP_INSTANCE stays PM2's
-              # instance_var, so isSchedulerLeader() (instance 0 runs crons) is unchanged.
               nb_pm2_reload() {
                 local NAME="$1" SCRIPT="$2" CWD="$3" INST="$4" MEM="$5" APP_PORT="$6"
                 local ECO="$CWD/.nb-ecosystem.$NAME.json" WANT CUR
@@ -1729,8 +1666,6 @@ jobs:
               pm2 stop "$SERVICE_NAME" 2>/dev/null || true
               pm2 delete "$SERVICE_NAME" 2>/dev/null || true
               sleep 3
-              # Free the port, but never kill a PM2 daemon or PM2-managed process: in cluster mode the
-              # God daemon holds the listen socket, and killing it takes every app on the VM down.
               SAFE_PIDS=" $(pgrep -f 'PM2 v.*God Daemon' | tr '\n' ' ') $(pm2 jlist 2>/dev/null | grep -oP '"pid":\K[0-9]+' | tr '\n' ' ') "
               for PID in $( { lsof -ti :"$PORT" 2>/dev/null; ss -Hlptn "sport = :$PORT" 2>/dev/null | grep -oP '(?<=pid=)\d+'; } | sort -u); do
                 case "$SAFE_PIDS" in
