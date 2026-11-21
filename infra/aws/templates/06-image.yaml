@@ -226,7 +226,7 @@ Resources:
       Role: !GetAtt PromoteRole.Arn
       Timeout: 60
       MemorySize: 128
-      ReservedConcurrentExecutions: 1
+      # ReservedConcurrentExecutions omitted: new accounts keep a 10-execution unreserved floor.
       Environment:
         Variables:
           AMI_PARAM: { 'Fn::ImportValue': !Sub '${EnvName}-AmiParameterName' }
