@@ -71,7 +71,7 @@ activate() {  # switch `current` to $1 (absolute release dir) and (re)start
   nb_render_env "$SVC" "$target"
   if [ "$(nb_svc "$SVC" install false)" = true ] && [ ! -d "$target/node_modules" ] && [ -f "$target/package-lock.json" ]; then
     # Runtime deps only, no build (runner builds; plan 2.4 moves node_modules into the bundle).
-    sudo -u "$NB_USER" -H bash -c "cd '$target' && npm ci --omit=dev --ignore-scripts --no-audit --no-fund" >&2
+    sudo -u "$NB_USER" -H bash -c "cd '$target' && npm ci --omit=dev --legacy-peer-deps --ignore-scripts --no-audit --no-fund" >&2
   fi
   script=$(nb_svc "$SVC" script auto)
   if [ "$script" = auto ]; then

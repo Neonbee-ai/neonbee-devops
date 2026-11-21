@@ -1,5 +1,5 @@
 {
-  "_comment": "Real prod catalog, 2026-11-20. Upload as s3://<release-bucket>/agent/services.json (scripts/package-agent.sh). name = prod deploy service_name (PM2 app name; the HA VM runs the same apps with a -ha suffix). Ports, instances, scripts and max_memory (500M = neonbee-deploy-prod.yml pm2_max_memory default) come from each repo's prod caller of neonbee-deploy-prod.yml and pm2/ss on the prod HA VM 84.247.131.148; every health_path answered 200 on that VM. type=nginx + static=true = a static bundle (Vite MFE remote / shell / SSO / portal) served by nginx from /opt/neonbee/services/<name>/current; prod_nginx_root is the current VM doc root, for writing the nb-nginx-sites site files. critical=true: Core, every backend routed by the api.neonbee.app gateway, storefront-api, storefront-web, shell and SSO. nb-health probes node apps on 127.0.0.1:<port><health_path> and critical static entries through local nginx with Host: <server_name> + health_path (default /index.html); non-critical static entries are not probed. Next.js apps run `npm start -- -p <port>` on the VM today; on AWS the bundle is the same as the prod rsync (.next/, public/, package.json, package-lock.json) and the catalog reproduces `npm start`: storefront-web (output: 'standalone') runs .next/standalone/server.js with PORT + HOSTNAME=0.0.0.0 (nb-deploy copies .next/static, public/ and .env beside it, as its npm start does); partner-portal (not standalone) runs node_modules/next/dist/bin/next with args [start, -p, <port>], cwd = release dir, runtime deps via install=true. Optional per-service fields: args (string array -> PM2 args), env (string map -> PM2 env; PORT/NODE_ENV always set). EXCLUDED by owner decision 2026-11-20: so360-command, so360-command-be, the marketing website (neonbee.ai), Internal Tools apps (tools-prod, shell-fe-tools) and so360-mobility* - never list them here.",
+  "_comment": "Real prod catalog, 2026-11-20. Upload as s3://<release-bucket>/agent/services.json (scripts/package-agent.sh). name = prod deploy service_name (PM2 app name; the HA VM runs the same apps with a -ha suffix). Ports, instances, scripts and max_memory (500M = neonbee-deploy-prod.yml pm2_max_memory default) come from each repo's prod caller of neonbee-deploy-prod.yml and pm2/ss on the prod HA VM 84.247.131.148; every health_path answered 200 on that VM. type=nginx + static=true = a static bundle (Vite MFE remote / shell / SSO / portal) served by nginx from /opt/neonbee/services/<name>/current; prod_nginx_root is the current VM doc root, for writing the nb-nginx-sites site files. critical=true: Core, every backend routed by the api.neonbee.app gateway, storefront-api, storefront-web, shell and SSO. nb-health probes node apps on 127.0.0.1:<port><health_path> and critical static entries through local nginx with Host: <server_name> + health_path (default /index.html); non-critical static entries are not probed. Next.js apps run `npm start -- -p <port>` on the VM today; on AWS the bundle is the same as the prod rsync (.next/, public/, package.json, package-lock.json) and the catalog reproduces `npm start`: storefront-web (output: 'standalone') runs .next/standalone/server.js with PORT + HOSTNAME=0.0.0.0 (nb-deploy copies .next/static, public/ and .env beside it, as its npm start does); partner-portal (not standalone) runs node_modules/next/dist/bin/next with args [start, -p, <port>], cwd = release dir, runtime deps via install=true. Optional per-service fields: args (string array -> PM2 args), env (string map -> PM2 env; PORT/NODE_ENV always set). EXCLUDED by owner decision 2026-11-20: so360-command, so360-command-be, the marketing website (neonbee.ai), Internal Tools apps (tools-prod, shell-fe-tools) and so360-mobility* - never list them here. Backends (dist/**/main.js) set install=true: the bundle carries dist + package.json + package-lock.json like the prod rsync, and nb-deploy installs runtime deps once per release (npm ci --omit=dev --legacy-peer-deps, as the VM's npm install --omit=dev --legacy-peer-deps).",
   "services": [
     {
       "name": "nb-nginx-sites",
@@ -221,7 +221,8 @@
       "script": "dist/src/main.js",
       "instances": 2,
       "max_memory": "500M",
-      "critical": true
+      "critical": true,
+      "install": true
     },
     {
       "name": "crm-prod",
@@ -231,7 +232,8 @@
       "script": "dist/src/main.js",
       "instances": 2,
       "max_memory": "500M",
-      "critical": true
+      "critical": true,
+      "install": true
     },
     {
       "name": "inventory-prod",
@@ -241,7 +243,8 @@
       "script": "dist/main.js",
       "instances": 2,
       "max_memory": "500M",
-      "critical": true
+      "critical": true,
+      "install": true
     },
     {
       "name": "accounting-prod",
@@ -251,7 +254,8 @@
       "script": "dist/src/main.js",
       "instances": 2,
       "max_memory": "500M",
-      "critical": true
+      "critical": true,
+      "install": true
     },
     {
       "name": "projects-prod",
@@ -261,7 +265,8 @@
       "script": "dist/main.js",
       "instances": 2,
       "max_memory": "500M",
-      "critical": true
+      "critical": true,
+      "install": true
     },
     {
       "name": "timesheet-prod",
@@ -271,7 +276,8 @@
       "script": "dist/main.js",
       "instances": 2,
       "max_memory": "500M",
-      "critical": true
+      "critical": true,
+      "install": true
     },
     {
       "name": "people-connect-prod",
@@ -281,7 +287,8 @@
       "script": "dist/main.js",
       "instances": 2,
       "max_memory": "500M",
-      "critical": true
+      "critical": true,
+      "install": true
     },
     {
       "name": "inbox-prod",
@@ -291,7 +298,8 @@
       "script": "dist/src/main.js",
       "instances": 2,
       "max_memory": "500M",
-      "critical": true
+      "critical": true,
+      "install": true
     },
     {
       "name": "neura-prod",
@@ -301,7 +309,8 @@
       "script": "dist/src/main.js",
       "instances": 2,
       "max_memory": "500M",
-      "critical": true
+      "critical": true,
+      "install": true
     },
     {
       "name": "storefront-api-prod",
@@ -311,7 +320,8 @@
       "script": "dist/main.js",
       "instances": 2,
       "max_memory": "500M",
-      "critical": true
+      "critical": true,
+      "install": true
     },
     {
       "name": "flow-prod",
@@ -321,7 +331,8 @@
       "script": "dist/main.js",
       "instances": 2,
       "max_memory": "500M",
-      "critical": true
+      "critical": true,
+      "install": true
     },
     {
       "name": "insight-prod",
@@ -331,7 +342,8 @@
       "script": "dist/main.js",
       "instances": 2,
       "max_memory": "500M",
-      "critical": true
+      "critical": true,
+      "install": true
     },
     {
       "name": "subscription-prod",
@@ -341,7 +353,8 @@
       "script": "dist/main.js",
       "instances": 2,
       "max_memory": "500M",
-      "critical": true
+      "critical": true,
+      "install": true
     },
     {
       "name": "forms-prod",
@@ -351,7 +364,8 @@
       "script": "dist/main.js",
       "instances": 2,
       "max_memory": "500M",
-      "critical": true
+      "critical": true,
+      "install": true
     },
     {
       "name": "dailystore-admin-prod",
@@ -361,7 +375,8 @@
       "script": "dist/main.js",
       "instances": 2,
       "max_memory": "500M",
-      "critical": true
+      "critical": true,
+      "install": true
     },
     {
       "name": "fulfillment-prod",
@@ -371,7 +386,8 @@
       "script": "dist/main.js",
       "instances": 2,
       "max_memory": "500M",
-      "critical": true
+      "critical": true,
+      "install": true
     },
     {
       "name": "support-prod",
@@ -381,7 +397,8 @@
       "script": "dist/src/main.js",
       "instances": 2,
       "max_memory": "500M",
-      "critical": true
+      "critical": true,
+      "install": true
     },
     {
       "name": "manufacturing-prod",
@@ -391,7 +408,8 @@
       "script": "dist/src/main.js",
       "instances": 1,
       "max_memory": "500M",
-      "critical": true
+      "critical": true,
+      "install": true
     },
     {
       "name": "chat-prod",
@@ -401,7 +419,8 @@
       "script": "dist/main.js",
       "instances": 2,
       "max_memory": "500M",
-      "critical": true
+      "critical": true,
+      "install": true
     },
     {
       "name": "documents-prod",
@@ -411,7 +430,8 @@
       "script": "dist/src/main.js",
       "instances": 2,
       "max_memory": "500M",
-      "critical": true
+      "critical": true,
+      "install": true
     },
     {
       "name": "sign-prod",
@@ -421,7 +441,8 @@
       "script": "dist/src/main.js",
       "instances": 2,
       "max_memory": "500M",
-      "critical": true
+      "critical": true,
+      "install": true
     },
     {
       "name": "folio-prod",
@@ -431,7 +452,8 @@
       "script": "dist/main.js",
       "instances": 2,
       "max_memory": "500M",
-      "critical": true
+      "critical": true,
+      "install": true
     },
     {
       "name": "connect-prod",
@@ -441,7 +463,8 @@
       "script": "dist/main.js",
       "instances": 1,
       "max_memory": "500M",
-      "critical": false
+      "critical": false,
+      "install": true
     },
     {
       "name": "signal-prod",
@@ -451,7 +474,8 @@
       "script": "dist/src/main.js",
       "instances": 1,
       "max_memory": "500M",
-      "critical": true
+      "critical": true,
+      "install": true
     },
     {
       "name": "platform-help-prod",
@@ -461,7 +485,8 @@
       "script": "dist/src/main.js",
       "instances": 1,
       "max_memory": "500M",
-      "critical": false
+      "critical": false,
+      "install": true
     },
     {
       "name": "contentforge-prod",
@@ -471,7 +496,8 @@
       "script": "dist/main.js",
       "instances": 2,
       "max_memory": "500M",
-      "critical": false
+      "critical": false,
+      "install": true
     },
     {
       "name": "lumen-prod",
@@ -481,7 +507,8 @@
       "script": "dist/main.js",
       "instances": 1,
       "max_memory": "500M",
-      "critical": false
+      "critical": false,
+      "install": true
     },
     {
       "name": "marketing-prod",
@@ -491,7 +518,8 @@
       "script": "dist/main.js",
       "instances": 1,
       "max_memory": "500M",
-      "critical": true
+      "critical": true,
+      "install": true
     },
     {
       "name": "maintenance-prod",
@@ -501,7 +529,8 @@
       "script": "dist/main.js",
       "instances": 2,
       "max_memory": "500M",
-      "critical": false
+      "critical": false,
+      "install": true
     },
     {
       "name": "storefront-web-prod",
