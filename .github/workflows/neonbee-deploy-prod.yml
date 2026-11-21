@@ -2054,7 +2054,9 @@ jobs:
               if [ "$STANDALONE" = true ]; then
                 P=$'.next/standalone\n.next/static\npublic\npackage.json\n!.next/standalone/.env*'
               else
-                P=$'.next\npublic\npackage.json\npackage-lock.json\nnext.config.*\n!.next/cache\n!.next/standalone'
+                # Whole .next (an output:'standalone' app deployed the npm-start way,
+                # e.g. storefront-web, still needs .next/standalone on AWS).
+                P=$'.next\npublic\npackage.json\npackage-lock.json\nnext.config.*\n!.next/cache\n!.next/standalone/.env*'
               fi ;;
             *) echo "::warning::no AWS release layout for deploy_type=$KIND"; exit 1 ;;
           esac
