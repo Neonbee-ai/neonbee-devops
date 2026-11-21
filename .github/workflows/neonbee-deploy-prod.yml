@@ -2029,6 +2029,48 @@ jobs:
             rm -f "$LINK"
           fi
 
+      # ── Opt-in AWS release artifact (Stage 3.1) ─────────────────────────────
+      # Only when the caller repo/org var NB_AWS_DEPLOY == 'true' on main: the
+      # caller's deploy-aws job (neonbee-deploy-s3-release.yml) bundles this exact
+      # build — build once, never on a VM. Unset var = both steps skipped, so
+      # today's deploy is unchanged; continue-on-error so it can never fail it.
+      # package.json is always listed so the artifact root stays the workspace
+      # (upload-artifact roots at the paths' common ancestor). Vite = dist only
+      # (artifact root = dist, the release workflow's legacy layout).
+      - name: AWS release artifact paths
+        id: nb_aws_paths
+        if: success() && vars.NB_AWS_DEPLOY == 'true' && github.ref == 'refs/heads/main'
+        continue-on-error: true
+        shell: bash
+        env:
+          KIND: ${{ inputs.deploy_type }}
+          STANDALONE: ${{ inputs.standalone }}
+        run: |
+          set -euo pipefail
+          case "$KIND" in
+            backend)  P=$'dist\npackage.json\npackage-lock.json' ;;
+            vite-mfe) P='dist' ;;
+            nextjs)
+              if [ "$STANDALONE" = true ]; then
+                P=$'.next/standalone\n.next/static\npublic\npackage.json\n!.next/standalone/.env*'
+              else
+                P=$'.next\npublic\npackage.json\npackage-lock.json\nnext.config.*\n!.next/cache\n!.next/standalone'
+              fi ;;
+            *) echo "::warning::no AWS release layout for deploy_type=$KIND"; exit 1 ;;
+          esac
+          { echo 'paths<<NB_PATHS_EOF'; printf '%s\n' "$P"; echo 'NB_PATHS_EOF'; } >> "$GITHUB_OUTPUT"
+
+      - name: Upload AWS release artifact
+        if: success() && steps.nb_aws_paths.outcome == 'success' && steps.nb_aws_paths.outputs.paths != ''
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: nb-release-${{ inputs.service_name }}
+          path: ${{ steps.nb_aws_paths.outputs.paths }}
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 1
+
       # ── SSH + VM resolution (shared) ────────────────────────────────────────
       - name: Resolve target VM
         id: vm

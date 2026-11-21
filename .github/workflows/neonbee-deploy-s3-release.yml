@@ -1,10 +1,12 @@
 name: Neonbee Deploy — S3 Release Rollout (AWS ASG)
 
 # ════════════════════════════════════════════════════════════════════════════
-# Reusable workflow (plan item 2.4). NOT wired into any caller yet.
+# Reusable workflow (plan item 2.4). Callers wire it as an opt-in deploy-aws
+# job (repo/org var NB_AWS_DEPLOY == 'true', main only, Stage 3.1); the build
+# artifact `nb-release-<service>` comes from neonbee-deploy-prod.yml.
 #
 #   artifact (built by the caller's build job — build once, never on a VM)
-#     → package: tar(dist + extra files + nb-release.json) → zstd (gzip fallback)
+#     → package: tar(dist | package_paths + extra files + nb-release.json) → zstd (gzip fallback)
 #     → upload:  s3://<bucket>/<service>/<sha>.tar.zst  (+ .sha256)
 #     → rollout: SSM Run Command (document nb-deploy, InService nodes of the ASG,
 #                one at a time by default)  OR  ASG instance refresh
@@ -44,6 +46,15 @@ on:
         required: false
         type: string
         default: 'package.json package-lock.json'
+      package_paths:
+        description: >-
+          Newline/space-separated paths inside the artifact dir (dist_path) to bundle at
+          the release root, keeping their relative path (e.g. for Next standalone:
+          ".next/standalone .next/static public"). Default "dist" = legacy layout: the
+          whole artifact dir becomes <release>/dist.
+        required: false
+        type: string
+        default: 'dist'
       release_bucket:
         description: 'S3 release bucket (falls back to repo var NB_RELEASE_BUCKET)'
         required: false
@@ -187,18 +198,39 @@ jobs:
         env:
           DIST_PATH: ${{ inputs.dist_path }}
           EXTRA_FILES: ${{ inputs.extra_files }}
+          PACKAGE_PATHS: ${{ inputs.package_paths }}
         run: |
           set -euo pipefail
           OUT="${RUNNER_TEMP}/nb-release-${GITHUB_RUN_ID}-${SERVICE}"
           rm -rf "$OUT"; mkdir -p "$OUT/stage"
           [ -d "$DIST_PATH" ] && [ -n "$(ls -A "$DIST_PATH")" ] || { echo "::error::$DIST_PATH is empty"; exit 1; }
-          cp -R "$DIST_PATH" "$OUT/stage/dist"
-          # Extra files may sit next to dist in the artifact or in the workspace.
-          for f in $EXTRA_FILES; do
-            if   [ -e "$DIST_PATH/$f" ]; then cp -R "$DIST_PATH/$f" "$OUT/stage/";  rm -rf "$OUT/stage/dist/$f"
-            elif [ -e "$f" ];            then cp -R "$f" "$OUT/stage/"
-            fi
-          done
+          # Normalise the list (newlines/tabs -> spaces). Exactly "dist" = legacy layout.
+          PATHS=$(printf '%s' "$PACKAGE_PATHS" | tr '\r\n\t' '   ' | xargs)
+          if [ "$PATHS" = "dist" ]; then
+            cp -R "$DIST_PATH" "$OUT/stage/dist"
+            # Extra files may sit next to dist in the artifact or in the workspace.
+            for f in $EXTRA_FILES; do
+              if   [ -e "$DIST_PATH/$f" ]; then cp -R "$DIST_PATH/$f" "$OUT/stage/";  rm -rf "$OUT/stage/dist/$f"
+              elif [ -e "$f" ];            then cp -R "$f" "$OUT/stage/"
+              fi
+            done
+          else
+            [ -n "$PATHS" ] || { echo "::error::package_paths is empty"; exit 1; }
+            for p in $PATHS; do
+              case "$p" in /*|..|../*|*/../*|*/..) echo "::error::package_paths entry '$p' must be relative, without '..'"; exit 1 ;; esac
+              p="${p%/}"
+              [ -e "$DIST_PATH/$p" ] || { echo "::error::package_paths entry '$p' not found in $DIST_PATH"; exit 1; }
+              mkdir -p "$OUT/stage/$(dirname "$p")"
+              cp -R "$DIST_PATH/$p" "$OUT/stage/$p"
+            done
+            # Optional extras: from the artifact dir, else the workspace; never fatal.
+            for f in $EXTRA_FILES; do
+              [ -e "$OUT/stage/$f" ] && continue
+              if   [ -e "$DIST_PATH/$f" ]; then cp -R "$DIST_PATH/$f" "$OUT/stage/"
+              elif [ -e "$f" ];            then cp -R "$f" "$OUT/stage/"
+              fi
+            done
+          fi
           printf '{"service":"%s","sha":"%s","run_id":"%s","repo":"%s","created_at":"%s"}\n' \
             "$SERVICE" "$SHA" "$GITHUB_RUN_ID" "$GITHUB_REPOSITORY" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$OUT/stage/nb-release.json"
           if command -v zstd >/dev/null 2>&1; then
