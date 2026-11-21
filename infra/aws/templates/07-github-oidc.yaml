@@ -52,7 +52,11 @@ Resources:
               StringEquals:
                 'token.actions.githubusercontent.com:aud': sts.amazonaws.com
               StringLike:
-                'token.actions.githubusercontent.com:sub': !Sub 'repo:${GitHubOrg}/*:ref:refs/heads/main'
+                # default sub, and the immutable form GitHub issues (org@id/repo@id) for repos with
+                # use_immutable_subject: both pinned to this org and to main.
+                'token.actions.githubusercontent.com:sub':
+                  - !Sub 'repo:${GitHubOrg}/*:ref:refs/heads/main'
+                  - !Sub 'repo:${GitHubOrg}@*/*@*:ref:refs/heads/main'
       Policies:
         - PolicyName: deploy
           PolicyDocument:
