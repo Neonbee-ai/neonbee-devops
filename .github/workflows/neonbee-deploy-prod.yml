@@ -14,6 +14,11 @@ name: Deploy to Production (reusable)
 on:
   workflow_call:
     inputs:
+      targets:
+        description: 'both (default) | aws (skip the HA deploy steps, still build + publish the AWS artifact) | ha'
+        required: false
+        type: string
+        default: ''
       test_max_workers:
         description: 'Worker cap for jest/vitest in the unit, contract and integration steps (jest --maxWorkers; vitest --maxWorkers, plus --minWorkers=1 on vitest < 4). Number or percent; 0 disables the cap. Empty = jest 2, vitest 2 (so360-shell-fe 4).'
         required: false
@@ -1288,6 +1293,10 @@ jobs:
     concurrency:
       group: neonbee-prod-${{ inputs.service_name }}
       cancel-in-progress: false
+    env:
+      # both (default) | aws (build + AWS artifact only, HA deploy steps skipped) | ha. The caller's repo var
+      # NB_DEPLOY_TARGETS is the dispatch-time switch for callers that have no workflow_dispatch input.
+      NB_TARGETS: ${{ inputs.targets || vars.NB_DEPLOY_TARGETS || 'both' }}
     steps:
 
       # ── Remove stale workspace symlink from cross-repo builds ───────────────
@@ -2104,7 +2113,7 @@ jobs:
       # causing a YAML parse error ("workflow file issue" in 0 s).
       - name: Deploy backend
         id: deploy_backend
-        if: always() && inputs.deploy_type == 'backend' && steps.build_backend.outcome == 'success'
+        if: env.NB_TARGETS != 'aws' && (always() && inputs.deploy_type == 'backend' && steps.build_backend.outcome == 'success')
         env:
           SERVER_IP: ${{ steps.vm.outputs.ip }}
           HA_IP: ${{ secrets.HA_VM_IP }}
@@ -2446,7 +2455,7 @@ jobs:
       # (repository_dispatch payloads cap at 64KB; swaggers are bigger), where
       # neura's own CI regenerates the catalog and opens a PR on drift.
       - name: Publish swagger snapshot to Neura catalog repo
-        if: ${{ inputs.deploy_type == 'backend' && inputs.publish_swagger == 'true' }}
+        if: ${{ env.NB_TARGETS != 'aws' && (inputs.deploy_type == 'backend' && inputs.publish_swagger == 'true') }}
         continue-on-error: true
         # Was unbounded: an unreachable primary held ssh for ~6.7 min per backend prod deploy.
         timeout-minutes: 2
@@ -2481,7 +2490,7 @@ jobs:
       # ═══════════════════════════════════════════════════════════════════════
       - name: Deploy vite-mfe
         id: deploy_vitemfe_primary
-        if: always() && inputs.deploy_type == 'vite-mfe'
+        if: env.NB_TARGETS != 'aws' && (always() && inputs.deploy_type == 'vite-mfe')
         continue-on-error: true
         env:
           SERVER_IP: ${{ secrets.PROD_SERVER_IP }}
@@ -2500,7 +2509,7 @@ jobs:
           echo "Deployed ${{ inputs.service_name }} to $NGINX_ROOT"
 
       - name: Purge Cloudflare cache
-        if: inputs.deploy_type == 'vite-mfe' && inputs.cf_purge_urls != ''
+        if: env.NB_TARGETS != 'aws' && (inputs.deploy_type == 'vite-mfe' && inputs.cf_purge_urls != '')
         continue-on-error: true
         run: |
           CF_ZONE="${{ secrets.CF_SAAS_ZONE_ID }}"
@@ -2524,7 +2533,7 @@ jobs:
       # ── HA Standby: vite-mfe ──────────────────────────────────────────────
       - name: Deploy vite-mfe to HA standby
         id: deploy_vitemfe_ha
-        if: always() && inputs.deploy_type == 'vite-mfe' && inputs.target_vm == 'prod'
+        if: env.NB_TARGETS != 'aws' && (always() && inputs.deploy_type == 'vite-mfe' && inputs.target_vm == 'prod')
         continue-on-error: true
         env:
           HA_IP: ${{ secrets.HA_VM_IP }}
@@ -2546,7 +2555,7 @@ jobs:
 
       # ── Failover gate: vite-mfe ───────────────────────────────────────────
       - name: Verify vite-mfe deploy reached a target
-        if: always() && inputs.deploy_type == 'vite-mfe'
+        if: env.NB_TARGETS != 'aws' && (always() && inputs.deploy_type == 'vite-mfe')
         env:
           PRIMARY: ${{ steps.deploy_vitemfe_primary.outcome }}
           HA: ${{ steps.deploy_vitemfe_ha.outcome }}
@@ -2566,7 +2575,7 @@ jobs:
       # ═══════════════════════════════════════════════════════════════════════
       - name: Deploy nextjs (standard)
         id: deploy_nextjs_primary
-        if: always() && inputs.deploy_type == 'nextjs' && !inputs.standalone
+        if: env.NB_TARGETS != 'aws' && (always() && inputs.deploy_type == 'nextjs' && !inputs.standalone)
         continue-on-error: true
         env:
           SERVER_IP: ${{ steps.vm.outputs.ip }}
@@ -2609,7 +2618,7 @@ jobs:
       # ── HA Standby: nextjs (standard) ─────────────────────────────────────
       - name: Deploy nextjs to HA standby
         id: deploy_nextjs_ha
-        if: always() && inputs.deploy_type == 'nextjs' && !inputs.standalone && (inputs.target_vm == 'prod' || inputs.target_vm == 'storefront' || inputs.target_vm == 'internal')
+        if: env.NB_TARGETS != 'aws' && (always() && inputs.deploy_type == 'nextjs' && !inputs.standalone && (inputs.target_vm == 'prod' || inputs.target_vm == 'storefront' || inputs.target_vm == 'internal'))
         continue-on-error: true
         env:
           HA_IP: ${{ secrets.HA_VM_IP }}
@@ -2652,7 +2661,7 @@ jobs:
 
       # ── Failover gate: nextjs (standard) ──────────────────────────────────
       - name: Verify nextjs deploy reached a target
-        if: always() && inputs.deploy_type == 'nextjs' && !inputs.standalone
+        if: env.NB_TARGETS != 'aws' && (always() && inputs.deploy_type == 'nextjs' && !inputs.standalone)
         env:
           PRIMARY: ${{ steps.deploy_nextjs_primary.outcome }}
           HA: ${{ steps.deploy_nextjs_ha.outcome }}
@@ -2669,7 +2678,7 @@ jobs:
 
       - name: Deploy nextjs (standalone)
         id: deploy_nextjs_standalone_primary
-        if: always() && inputs.deploy_type == 'nextjs' && inputs.standalone
+        if: env.NB_TARGETS != 'aws' && (always() && inputs.deploy_type == 'nextjs' && inputs.standalone)
         continue-on-error: true
         env:
           SERVER_IP: ${{ steps.vm.outputs.ip }}
@@ -2706,7 +2715,7 @@ jobs:
       # ── HA Standby: nextjs (standalone) ───────────────────────────────────
       - name: Deploy nextjs standalone to HA standby
         id: deploy_nextjs_standalone_ha
-        if: always() && inputs.deploy_type == 'nextjs' && inputs.standalone && inputs.target_vm == 'prod'
+        if: env.NB_TARGETS != 'aws' && (always() && inputs.deploy_type == 'nextjs' && inputs.standalone && inputs.target_vm == 'prod')
         continue-on-error: true
         env:
           HA_IP: ${{ secrets.HA_VM_IP }}
@@ -2746,7 +2755,7 @@ jobs:
 
       # ── Failover gate: nextjs (standalone) ────────────────────────────────
       - name: Verify nextjs standalone deploy reached a target
-        if: always() && inputs.deploy_type == 'nextjs' && inputs.standalone
+        if: env.NB_TARGETS != 'aws' && (always() && inputs.deploy_type == 'nextjs' && inputs.standalone)
         env:
           PRIMARY: ${{ steps.deploy_nextjs_standalone_primary.outcome }}
           HA: ${{ steps.deploy_nextjs_standalone_ha.outcome }}
@@ -2792,7 +2801,7 @@ jobs:
       # Runs last: the primary deploy, swagger publish and metrics have already
       # completed, and nothing rolls back on failure — this only surfaces drift.
       - name: Enforce HA standby parity
-        if: always()
+        if: env.NB_TARGETS != 'aws' && (always())
         env:
           BACKEND_PRIMARY: ${{ steps.deploy_backend.outcome }}
           BACKEND_HA: ${{ steps.deploy_backend.outputs.ha }}
