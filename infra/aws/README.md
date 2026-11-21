@@ -5,8 +5,7 @@ Infrastructure as code for plan items 2.1, 2.2, 2.3, 2.5 and 2.6
 one stack per layer. **Nothing here has been deployed.** Every command below that
 changes AWS or Cloudflare is for the operator to run after approval.
 
-Front door: **Cloudflare Load Balancer** in front of the nodes' public IPs. There is
-no AWS ALB (the design doc's ALB option was replaced). Shared cache: Postgres (no
+Front door (2026-11-21 decision): **no load balancer for now**. Nodes claim one of 4 pool Elastic IPs at boot (`nb-claim`, tag `nb-pool`); DNS is mapped to those IPs at the end. `05-scale-events` (Cloudflare LB sync) is NOT deployed. Shared cache: Postgres (no
 ElastiCache). Alerts: Microsoft Teams.
 
 **Out of scope (owner decision 2026-11-20):** Command (`command.neonbee.app`,
@@ -23,6 +22,7 @@ service catalog, not in the AWS Cloudflare pool and not part of the cutover.
 | `templates/03-alerts.yaml` | SNS topic `nb-prod-alerts` -> `teams-notify` Lambda -> Teams webhook; AWS Budget $350/month (80% + 100% actual, 100% forecast); optional email backstop |
 | `templates/04-compute.yaml` | Instance role + profile, AMI pointer params, CloudWatch agent config, launch template (IMDSv2, gp3 encrypted, AMI via `resolve:ssm`), ASG **0/0/4** (on-demand base 2, Spot above), lifecycle hooks `nb-ready` / `nb-drain`, alarms (CPU, memory, disk, missing nodes), optional scaling policies, SSM document **`nb-deploy`** |
 | `templates/05-scale-events.yaml` | Lifecycle events -> `cf-lb-sync` Lambda (add healthy node to the CF pool, drain + remove on terminate, 15-min reconcile, alerts) |
+| `templates/07-github-oidc.yaml` | GitHub OIDC provider + role `nb-gh-deploy` (org Neonbee-ai, main only): S3 put/get, SSM `nb-deploy`, ASG instance refresh, `neonbee/prod/env/*` secrets |
 | `templates/06-image.yaml` | Image Builder monthly pipeline (Ubuntu 24.04 + patches + Node 22 + PM2 + nginx + CW agent + nb-agent) and `ami-promote` Lambda (promote, instance refresh, auto-rollback) |
 | `lambdas/` | `teams_notify`, `cf_lb_sync`, `ami_promote` (Python 3.12, stdlib + boto3) |
 | `vm-agent/` | `nb-boot.sh`, `nb-deploy.sh`, `nb-health.sh`, `nb-pm2-apply.js`, systemd units, nginx `/__lb_health` snippet, `services.example.json` |

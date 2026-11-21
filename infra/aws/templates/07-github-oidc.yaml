@@ -1,0 +1,105 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  Neonbee prod - GitHub Actions OIDC deploy role (nb-gh-deploy). Trusted only for
+  repos under the GitHub org on refs/heads/main. Can upload release bundles, run the
+  nb-deploy SSM document on the ASG's instances, start instance refreshes and write
+  app env secrets under neonbee/prod/env/.
+
+Parameters:
+  EnvName:
+    Type: String
+    Default: nb-prod
+  GitHubOrg:
+    Type: String
+    Default: Neonbee-ai
+  CreateOidcProvider:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: Set false if token.actions.githubusercontent.com already exists in the account.
+  ExistingOidcProviderArn:
+    Type: String
+    Default: ''
+  DeployDocumentName:
+    Type: String
+    Default: nb-deploy
+
+Conditions:
+  MakeProvider: !Equals [!Ref CreateOidcProvider, 'true']
+
+Resources:
+  GitHubOidcProvider:
+    Type: AWS::IAM::OIDCProvider
+    Condition: MakeProvider
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList: [sts.amazonaws.com]
+      ThumbprintList: [6938fd4d98bab03faadb97b34396831e3780aea1]
+
+  DeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: nb-gh-deploy
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action: sts:AssumeRoleWithWebIdentity
+            Principal:
+              Federated: !If [MakeProvider, !Ref GitHubOidcProvider, !Ref ExistingOidcProviderArn]
+            Condition:
+              StringEquals:
+                'token.actions.githubusercontent.com:aud': sts.amazonaws.com
+              StringLike:
+                'token.actions.githubusercontent.com:sub': !Sub 'repo:${GitHubOrg}/*:ref:refs/heads/main'
+      Policies:
+        - PolicyName: deploy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ReleaseBucketObjects
+                Effect: Allow
+                Action: [s3:PutObject, s3:GetObject, s3:GetObjectVersion]
+                Resource: !Sub
+                  - '${Arn}/*'
+                  - Arn: { 'Fn::ImportValue': !Sub '${EnvName}-ReleaseBucketArn' }
+              - Sid: ReleaseBucketList
+                Effect: Allow
+                Action: s3:ListBucket
+                Resource: { 'Fn::ImportValue': !Sub '${EnvName}-ReleaseBucketArn' }
+              - Sid: RunDeployDocument
+                Effect: Allow
+                Action: ssm:SendCommand
+                Resource: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:*:document/${DeployDocumentName}'
+              - Sid: RunOnAsgInstances
+                Effect: Allow
+                Action: ssm:SendCommand
+                Resource: !Sub 'arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/*'
+                Condition:
+                  StringEquals:
+                    'ssm:resourceTag/aws:autoscaling:groupName': { 'Fn::ImportValue': !Sub '${EnvName}-AsgName' }
+              - Sid: CommandStatus
+                Effect: Allow
+                Action: [ssm:GetCommandInvocation, ssm:ListCommandInvocations, ssm:ListCommands, ssm:DescribeInstanceInformation]
+                Resource: '*'
+              - Sid: AsgRead
+                Effect: Allow
+                Action: [autoscaling:DescribeAutoScalingGroups, autoscaling:DescribeInstanceRefreshes, ec2:DescribeInstances]
+                Resource: '*'
+              - Sid: AsgRefresh
+                Effect: Allow
+                Action: [autoscaling:StartInstanceRefresh, autoscaling:CancelInstanceRefresh]
+                Resource: !Sub
+                  - 'arn:${AWS::Partition}:autoscaling:${AWS::Region}:${AWS::AccountId}:autoScalingGroup:*:autoScalingGroupName/${Asg}'
+                  - Asg: { 'Fn::ImportValue': !Sub '${EnvName}-AsgName' }
+              - Sid: AppEnvSecrets
+                Effect: Allow
+                Action: [secretsmanager:CreateSecret, secretsmanager:PutSecretValue, secretsmanager:DescribeSecret, secretsmanager:TagResource]
+                Resource: !Sub 'arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:neonbee/prod/env/*'
+
+Outputs:
+  DeployRoleArn:
+    Value: !GetAtt DeployRole.Arn
+  OidcProviderArn:
+    Value: !If [MakeProvider, !Ref GitHubOidcProvider, !Ref ExistingOidcProviderArn]

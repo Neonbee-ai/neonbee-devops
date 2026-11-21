@@ -109,6 +109,23 @@ Resources:
               - Effect: Allow
                 Action: secretsmanager:ListSecrets   # cannot be resource-scoped
                 Resource: '*'
+        - PolicyName: claim-pool-eip
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: ec2:DescribeAddresses
+                Resource: '*'
+              - Effect: Allow
+                Action: [ec2:AssociateAddress, ec2:DisassociateAddress]
+                Resource: !Sub 'arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:elastic-ip/*'
+                Condition:
+                  StringEquals: { 'aws:ResourceTag/nb-pool': !Ref EnvName }
+              - Effect: Allow
+                Action: [ec2:AssociateAddress, ec2:DisassociateAddress]
+                Resource: !Sub 'arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/*'
+                Condition:
+                  StringEquals: { 'aws:ResourceTag/neonbee:env': !Ref EnvName }
         - PolicyName: read-agent-params
           PolicyDocument:
             Version: '2012-10-17'
@@ -262,16 +279,7 @@ Resources:
             - GroupInServiceInstances
             - GroupPendingInstances
             - GroupTerminatingInstances
-      # Consumed by the scale-events stack (EventBridge -> cf-lb-sync Lambda).
-      LifecycleHookSpecificationList:
-        - LifecycleHookName: nb-ready
-          LifecycleTransition: autoscaling:EC2_INSTANCE_LAUNCHING
-          HeartbeatTimeout: !Ref LaunchHookTimeoutSeconds
-          DefaultResult: ABANDON
-        - LifecycleHookName: nb-drain
-          LifecycleTransition: autoscaling:EC2_INSTANCE_TERMINATING
-          HeartbeatTimeout: !Ref TerminateHookTimeoutSeconds
-          DefaultResult: CONTINUE
+      # No lifecycle hooks: no Cloudflare LB, nothing would complete them (DNS maps to pool EIPs).
       Tags:
         - { Key: neonbee:env, Value: !Ref EnvName, PropagateAtLaunch: true }
 

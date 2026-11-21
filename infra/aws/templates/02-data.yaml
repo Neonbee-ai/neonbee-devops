@@ -86,20 +86,15 @@ Resources:
             Condition:
               Bool: { 'aws:SecureTransport': 'false' }
 
-  CfLbApiToken:
-    Type: AWS::SecretsManager::Secret
-    Properties:
-      Name: !Ref CfTokenSecretName
-      Description: Cloudflare API token (Load Balancing - edit pools). Set the value after deploy.
-      SecretString: REPLACE_ME
-
   TeamsWebhookUrl:
     Type: AWS::SecretsManager::Secret
     Properties:
       Name: !Ref TeamsWebhookSecretName
       Description: Microsoft Teams incoming-webhook URL for alerts. Set the value after deploy.
-      SecretString: REPLACE_ME
+      # No SecretString on purpose: a stack update can never overwrite the real value.
 
+  # SecretString below is only applied at creation; it is unchanged on later updates, so
+  # CloudFormation never overwrites a value the operator has set.
   # Shared env applied to every app before its own secret (e.g. SUPABASE_URL).
   SharedAppEnv:
     Type: AWS::SecretsManager::Secret
@@ -115,9 +110,6 @@ Outputs:
   ReleaseBucketArn:
     Value: !GetAtt ReleaseBucket.Arn
     Export: { Name: !Sub '${EnvName}-ReleaseBucketArn' }
-  CfLbApiTokenSecretArn:
-    Value: !Ref CfLbApiToken
-    Export: { Name: !Sub '${EnvName}-CfLbApiTokenSecretArn' }
   TeamsWebhookSecretArn:
     Value: !Ref TeamsWebhookUrl
     Export: { Name: !Sub '${EnvName}-TeamsWebhookSecretArn' }

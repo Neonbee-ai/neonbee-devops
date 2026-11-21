@@ -36,9 +36,14 @@ def _default_post(url, payload):
 
 def webhook_url(get_secret):
     if "url" not in _cache:
-        value = (get_secret(os.environ["TEAMS_WEBHOOK_SECRET_ARN"]) or "").strip()
-        if not value.startswith("https://") or value == "REPLACE_ME":
-            raise RuntimeError("Teams webhook secret is not set to an https URL")
+        try:
+            value = (get_secret(os.environ["TEAMS_WEBHOOK_SECRET_ARN"]) or "").strip()
+        except Exception as exc:  # secret created empty until the owner sets the URL
+            print("teams webhook secret not readable yet: {}".format(type(exc).__name__))
+            return None
+        if not value.startswith("https://"):
+            print("teams webhook secret is not set to an https URL yet")
+            return None
         _cache["url"] = value
     return _cache["url"]
 
@@ -94,6 +99,9 @@ def handler(event, context, get_secret=None, post=None):
     get_secret = get_secret or _default_get_secret
     post = post or _default_post
     url = webhook_url(get_secret)
+    if url is None:
+        print("alert not delivered (webhook not configured): {}".format(json.dumps(event)[:1500]))
+        return {"sent": 0, "skipped": True}
     sent = 0
     for record in event.get("Records", []):
         sns = record.get("Sns", {})

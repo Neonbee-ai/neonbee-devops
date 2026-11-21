@@ -148,6 +148,44 @@ Resources:
       Tags:
         - { Key: Name, Value: !Sub '${EnvName}-node-sg' }
 
+  # Stable public IPs. Nodes claim a free one at boot (nb-boot.sh); map DNS to these.
+
+  PoolEip1:
+    Type: AWS::EC2::EIP
+    DependsOn: GatewayAttachment
+    Properties:
+      Domain: vpc
+      Tags:
+        - { Key: Name, Value: !Sub '${EnvName}-pool-1' }
+        - { Key: nb-pool, Value: !Ref EnvName }
+
+  PoolEip2:
+    Type: AWS::EC2::EIP
+    DependsOn: GatewayAttachment
+    Properties:
+      Domain: vpc
+      Tags:
+        - { Key: Name, Value: !Sub '${EnvName}-pool-2' }
+        - { Key: nb-pool, Value: !Ref EnvName }
+
+  PoolEip3:
+    Type: AWS::EC2::EIP
+    DependsOn: GatewayAttachment
+    Properties:
+      Domain: vpc
+      Tags:
+        - { Key: Name, Value: !Sub '${EnvName}-pool-3' }
+        - { Key: nb-pool, Value: !Ref EnvName }
+
+  PoolEip4:
+    Type: AWS::EC2::EIP
+    DependsOn: GatewayAttachment
+    Properties:
+      Domain: vpc
+      Tags:
+        - { Key: Name, Value: !Sub '${EnvName}-pool-4' }
+        - { Key: nb-pool, Value: !Ref EnvName }
+
 Outputs:
   VpcId:
     Value: !Ref Vpc
@@ -160,3 +198,6 @@ Outputs:
     Export: { Name: !Sub '${EnvName}-NodeSecurityGroupId' }
   CloudflarePrefixListId:
     Value: !Ref CloudflarePrefixList
+  PoolEipAddresses:
+    Value: !Join [',', [!Ref PoolEip1, !Ref PoolEip2, !Ref PoolEip3, !Ref PoolEip4]]
+    Description: The 4 pool Elastic IPs (the IPs to map DNS to).

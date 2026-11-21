@@ -67,9 +67,18 @@ class TeamsNotifyTest(unittest.TestCase):
         self.assertEqual(out, {"sent": 2})
         self.assertEqual(len(self.secret_reads), 1)
 
-    def test_given_placeholder_secret_when_handled_then_raises_and_posts_nothing(self):
-        with self.assertRaises(RuntimeError):
-            tn.handler(sns_event("x"), None, lambda arn: "REPLACE_ME", self.post)
+    def test_given_placeholder_secret_when_handled_then_skips_without_posting(self):
+        tn._cache.clear()
+        out = tn.handler(sns_event("x"), None, lambda arn: "REPLACE_ME", self.post)
+        self.assertEqual(out, {"sent": 0, "skipped": True})
+        self.assertEqual(self.posts, [])
+
+    def test_given_secret_without_value_when_handled_then_skips_without_posting(self):
+        tn._cache.clear()
+        def missing(arn):
+            raise KeyError("ResourceNotFoundException")
+        out = tn.handler(sns_event("x"), None, missing, self.post)
+        self.assertEqual(out, {"sent": 0, "skipped": True})
         self.assertEqual(self.posts, [])
 
     def test_given_teams_returns_400_when_handled_then_raises_so_lambda_errors_alarm_fires(self):
