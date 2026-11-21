@@ -435,9 +435,14 @@ cmd_up() {  # up <id> <runners> [machine]
 }
 
 cmd_hold() {  # hold <id> [min]: live-change the VM agent's idle limit (read from instance metadata every minute)
-  local id=$1 min=${2:-40}
-  "${G[@]}" compute instances add-metadata "nb-batch-$id" --zone "$ZONE" --metadata "idle-min=$min" >/dev/null &&
-    log "idle limit for nb-batch-$id = ${min}m"
+  local id=$1 min=${2:-40} got
+  "${G[@]}" compute instances add-metadata "nb-batch-$id" --zone "$ZONE" --metadata "idle-min=$min" >/dev/null ||
+    die "hold: add-metadata failed for nb-batch-$id"
+  # read it back: the agent only sees what is really in the instance metadata
+  got=$("${G[@]}" compute instances describe "nb-batch-$id" --zone "$ZONE" \
+        --format='value(metadata.items.filter(key:idle-min).extract(value).flatten())' 2>/dev/null | tr -d '[:space:]')
+  [ "$got" = "$min" ] || die "hold: idle-min on nb-batch-$id is '${got:-unset}', wanted $min"
+  log "idle limit for nb-batch-$id = ${min}m (verified)"
 }
 cmd_release() { cmd_hold "$1" "$IDLE_MIN"; }
 
