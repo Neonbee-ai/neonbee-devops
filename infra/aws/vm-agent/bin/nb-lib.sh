@@ -63,7 +63,14 @@ nb_render_env() {
   : > "$out"; chmod 600 "$out"
   for id in "${NB_SECRET_PREFIX}_shared" "${NB_SECRET_PREFIX}${svc}"; do
     json=$(aws secretsmanager get-secret-value --secret-id "$id" --query SecretString --output text 2>/dev/null) || continue
-    printf '%s' "$json" | jq -r 'to_entries[] | "\(.key)=\(.value|tostring|@json)"' >> "$out" \
+    # dotenv keeps single-quoted values literal (backslashes, '"', '#', '$', trailing '='),
+    # but in double quotes it turns \n into a newline and keeps \" / \\ as-is, so @json
+    # corrupts any value with a backslash or quote. Single-quote unless the value holds a
+    # ' (then plain double quotes if it has no \ or ", else @json as a last resort).
+    printf '%s' "$json" | jq -r --arg q "'" 'to_entries[] | (.value|tostring) as $v | "\(.key)=" +
+      (if ($v|contains($q)|not) then $q + $v + $q
+       elif ($v|test("[\\\\\"]")|not) then "\"" + $v + "\""
+       else ($v|@json) end)' >> "$out" \
       || nb_die "secret $id is not a JSON object"
   done
   printf 'NB_SCHEDULER_DB_LOCK=true\nNODE_ENV=production\n' >> "$out"
