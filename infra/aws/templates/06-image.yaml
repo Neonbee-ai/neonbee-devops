@@ -1,0 +1,285 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  Neonbee prod (Stage 2.3) - monthly OS image. EC2 Image Builder bakes Ubuntu 24.04 +
+  OS patches + Node 22 + PM2 + nginx + jq/zstd + AWS CLI + CloudWatch agent + nb-agent
+  (no app code, no secrets). When an image is AVAILABLE the ami-promote Lambda moves
+  /neonbee/prod/ami/current -> -previous, points current at the new AMI and starts an
+  instance refresh (launch-before-terminate). If that refresh fails or is cancelled it
+  restores the previous AMI and refreshes again. Everything alerts Teams.
+  Package before deploy (Code points at ../lambdas/ami_promote).
+
+Parameters:
+  EnvName:
+    Type: String
+    Default: nb-prod
+  ParentImage:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id
+    Description: Resolved at stack deploy. Monthly builds still apply all OS updates (update-linux).
+  RecipeVersion:
+    Type: String
+    Default: 1.0.0
+    AllowedPattern: '^\d+\.\d+\.\d+$'
+    Description: Bump whenever ParentImage or the component changes (recipes are immutable).
+  BuildInstanceType:
+    Type: String
+    Default: c6a.large
+  NodeMajorVersion:
+    Type: String
+    Default: '22'
+  ScheduleExpression:
+    Type: String
+    Default: cron(30 20 1 * ? *)
+    Description: Monthly - 1st of the month 20:30 UTC (02:00 IST on the 2nd).
+  AutoRefresh:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: Start an instance refresh automatically after promoting a new AMI.
+
+Resources:
+  BuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+        - arn:aws:iam::aws:policy/EC2InstanceProfileForImageBuilder
+      Policies:
+        - PolicyName: read-agent-bundle
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub
+                  - '${Arn}/agent/*'
+                  - Arn: { 'Fn::ImportValue': !Sub '${EnvName}-ReleaseBucketArn' }
+
+  BuildInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref BuildRole]
+
+  NodeComponent:
+    Type: AWS::ImageBuilder::Component
+    Properties:
+      Name: !Sub '${EnvName}-node-base'
+      Version: !Ref RecipeVersion
+      Platform: Linux
+      Description: Node 22, PM2, nginx, CloudWatch agent, nb-agent (no app code, no secrets)
+      Data: !Sub
+        - |
+          name: nb-node-base
+          schemaVersion: 1.0
+          phases:
+            - name: build
+              steps:
+                - name: packages
+                  action: ExecuteBash
+                  inputs:
+                    commands:
+                      - export DEBIAN_FRONTEND=noninteractive
+                      - apt-get update -y
+                      - apt-get install -y nginx jq zstd curl unzip ca-certificates gnupg
+                      - curl -fsSL https://deb.nodesource.com/setup_${NodeMajorVersion}.x | bash -
+                      - apt-get install -y nodejs
+                      - npm install -g pm2@5
+                      - curl -fsSL https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip -o /tmp/awscli.zip
+                      - unzip -q /tmp/awscli.zip -d /tmp && /tmp/aws/install --update && rm -rf /tmp/aws /tmp/awscli.zip
+                      - curl -fsSL https://amazoncloudwatch-agent.s3.amazonaws.com/ubuntu/amd64/latest/amazon-cloudwatch-agent.deb -o /tmp/cwa.deb
+                      - dpkg -i -E /tmp/cwa.deb && rm -f /tmp/cwa.deb
+                - name: agent
+                  action: ExecuteBash
+                  inputs:
+                    commands:
+                      - id -u neonbee >/dev/null 2>&1 || useradd --system --create-home --home-dir /opt/neonbee --shell /bin/bash neonbee
+                      - install -d -o neonbee -g neonbee /opt/neonbee/services /opt/neonbee/.pm2
+                      - install -d /opt/nb-agent /var/lib/nb-agent/www /var/log/nb-agent /etc/nb-agent
+                      - aws s3 cp s3://${Bucket}/agent/vm-agent.tar.gz /tmp/vm-agent.tar.gz --region ${AWS::Region}
+                      - tar -C /opt/nb-agent -xzf /tmp/vm-agent.tar.gz && rm -f /tmp/vm-agent.tar.gz
+                      - chmod 0755 /opt/nb-agent/bin/*
+                      - install -m 0644 /opt/nb-agent/systemd/*.service /opt/nb-agent/systemd/*.timer /etc/systemd/system/
+                      - install -d /etc/nginx/snippets && install -m 0644 /opt/nb-agent/nginx/nb-lb-health.conf /etc/nginx/snippets/
+                      - ln -sfn /opt/neonbee/services/nb-nginx-sites/current/sites /etc/nginx/sites-enabled/neonbee
+                      - grep -q 'sites-enabled/neonbee/' /etc/nginx/nginx.conf || sed -i 's#include /etc/nginx/sites-enabled/\*;#include /etc/nginx/sites-enabled/*;\n\tinclude /etc/nginx/sites-enabled/neonbee/*.conf;#' /etc/nginx/nginx.conf
+                      - systemctl daemon-reload
+                      - systemctl enable nginx pm2-neonbee.service
+                      - rm -f /etc/nb-agent/agent.conf /var/lib/nb-agent/*.json
+            - name: test
+              steps:
+                - name: smoke
+                  action: ExecuteBash
+                  inputs:
+                    commands:
+                      - node -v | grep -q '^v${NodeMajorVersion}\.'
+                      - pm2 -v
+                      - nginx -t
+                      - jq --version && zstd --version && aws --version
+                      - test -x /opt/nb-agent/bin/nb-deploy.sh && bash -n /opt/nb-agent/bin/nb-deploy.sh
+                      - test -f /etc/systemd/system/nb-boot.service && test -f /etc/systemd/system/nb-health.timer
+                      - test -x /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl
+        - Bucket: { 'Fn::ImportValue': !Sub '${EnvName}-ReleaseBucketName' }
+
+  Recipe:
+    Type: AWS::ImageBuilder::ImageRecipe
+    Properties:
+      Name: !Sub '${EnvName}-node'
+      Version: !Ref RecipeVersion
+      ParentImage: !Ref ParentImage
+      Components:
+        - ComponentArn: !Sub 'arn:${AWS::Partition}:imagebuilder:${AWS::Region}:aws:component/update-linux/x.x.x'
+        - ComponentArn: !Ref NodeComponent
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs: { VolumeSize: 30, VolumeType: gp3, Encrypted: true, DeleteOnTermination: true }
+
+  Infrastructure:
+    Type: AWS::ImageBuilder::InfrastructureConfiguration
+    Properties:
+      Name: !Sub '${EnvName}-node-build'
+      InstanceProfileName: !Ref BuildInstanceProfile
+      InstanceTypes: [!Ref BuildInstanceType]
+      SubnetId: !Select [0, !Split [',', { 'Fn::ImportValue': !Sub '${EnvName}-PublicSubnetIds' }]]
+      SecurityGroupIds: [{ 'Fn::ImportValue': !Sub '${EnvName}-NodeSecurityGroupId' }]
+      TerminateInstanceOnFailure: true
+      InstanceMetadataOptions: { HttpTokens: required, HttpPutResponseHopLimit: 2 }
+      SnsTopicArn: { 'Fn::ImportValue': !Sub '${EnvName}-AlertTopicArn' }
+
+  Distribution:
+    Type: AWS::ImageBuilder::DistributionConfiguration
+    Properties:
+      Name: !Sub '${EnvName}-node'
+      Distributions:
+        - Region: !Ref AWS::Region
+          AmiDistributionConfiguration:
+            Name: !Sub '${EnvName}-node-{{ imagebuilder:buildDate }}'
+            AmiTags: { 'neonbee:env': !Ref EnvName, 'neonbee:role': node }
+
+  Pipeline:
+    Type: AWS::ImageBuilder::ImagePipeline
+    Properties:
+      Name: !Sub '${EnvName}-node-monthly'
+      ImageRecipeArn: !Ref Recipe
+      InfrastructureConfigurationArn: !Ref Infrastructure
+      DistributionConfigurationArn: !Ref Distribution
+      ImageTestsConfiguration: { ImageTestsEnabled: true, TimeoutMinutes: 60 }
+      Schedule:
+        ScheduleExpression: !Ref ScheduleExpression
+        PipelineExecutionStartCondition: EXPRESSION_MATCH_ONLY
+      Status: ENABLED
+
+  # ------------------------------------------------------------ promote / rollback
+  PromoteRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: ami-promote
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [ssm:GetParameter, ssm:PutParameter]
+                Resource: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/neonbee/prod/ami/*'
+              - Effect: Allow
+                Action: imagebuilder:GetImage
+                Resource: '*'
+              - Effect: Allow
+                Action: [ec2:DescribeImages, autoscaling:DescribeAutoScalingGroups]
+                Resource: '*'
+              - Effect: Allow
+                Action: autoscaling:StartInstanceRefresh
+                Resource: !Sub
+                  - 'arn:${AWS::Partition}:autoscaling:${AWS::Region}:${AWS::AccountId}:autoScalingGroup:*:autoScalingGroupName/${Asg}'
+                  - Asg: { 'Fn::ImportValue': !Sub '${EnvName}-AsgName' }
+              - Effect: Allow
+                Action: sns:Publish
+                Resource: { 'Fn::ImportValue': !Sub '${EnvName}-AlertTopicArn' }
+
+  PromoteLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${EnvName}-ami-promote'
+      RetentionInDays: 30
+
+  PromoteFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: PromoteLogGroup
+    Properties:
+      FunctionName: !Sub '${EnvName}-ami-promote'
+      Runtime: python3.12
+      Handler: index.handler
+      Code: ../lambdas/ami_promote
+      Role: !GetAtt PromoteRole.Arn
+      Timeout: 60
+      MemorySize: 128
+      # ReservedConcurrentExecutions omitted: new accounts keep a 10-execution unreserved floor.
+      Environment:
+        Variables:
+          AMI_PARAM: { 'Fn::ImportValue': !Sub '${EnvName}-AmiParameterName' }
+          ASG_NAME: { 'Fn::ImportValue': !Sub '${EnvName}-AsgName' }
+          ALERT_TOPIC_ARN: { 'Fn::ImportValue': !Sub '${EnvName}-AlertTopicArn' }
+          PIPELINE_NAME: !Sub '${EnvName}-node-monthly'
+          AUTO_REFRESH: !Ref AutoRefresh
+
+  ImageAvailableRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub '${EnvName}-image-available'
+      EventPattern:
+        source: [aws.imagebuilder]
+        detail-type: [EC2 Image Builder Image State Change]
+        detail:
+          state: { status: [AVAILABLE] }
+      Targets:
+        - { Id: ami-promote, Arn: !GetAtt PromoteFunction.Arn }
+
+  RefreshEndedRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub '${EnvName}-instance-refresh-ended'
+      EventPattern:
+        source: [aws.autoscaling]
+        detail-type:
+          - EC2 Auto Scaling Instance Refresh Failed
+          - EC2 Auto Scaling Instance Refresh Cancelled
+          - EC2 Auto Scaling Instance Refresh Succeeded
+        detail:
+          AutoScalingGroupName: [{ 'Fn::ImportValue': !Sub '${EnvName}-AsgName' }]
+      Targets:
+        - { Id: ami-promote, Arn: !GetAtt PromoteFunction.Arn }
+
+  ImageAvailablePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref PromoteFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt ImageAvailableRule.Arn
+
+  RefreshEndedPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref PromoteFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt RefreshEndedRule.Arn
+
+Outputs:
+  PipelineArn:
+    Value: !Ref Pipeline
+  PromoteFunctionName:
+    Value: !Ref PromoteFunction

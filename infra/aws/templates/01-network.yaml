@@ -1,0 +1,203 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  Neonbee prod (Stage 2.1) - network. One VPC, 2 public subnets in 2 AZs, no NAT
+  gateway (nodes use their own public IPv4 for egress), free S3 gateway endpoint,
+  node security group that accepts 80/443 ONLY from Cloudflare IPv4 ranges.
+  No SSH ingress: admin access is SSM Session Manager.
+
+Parameters:
+  EnvName:
+    Type: String
+    Default: nb-prod
+    AllowedPattern: '^[a-z][a-z0-9-]{1,20}$'
+    Description: Prefix for names and cross-stack exports.
+  VpcCidr:
+    Type: String
+    Default: 10.40.0.0/16
+  SubnetACidr:
+    Type: String
+    Default: 10.40.0.0/20
+  SubnetBCidr:
+    Type: String
+    Default: 10.40.16.0/20
+
+Resources:
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - { Key: Name, Value: !Sub '${EnvName}-vpc' }
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - { Key: Name, Value: !Sub '${EnvName}-igw' }
+
+  GatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref Vpc
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Ref SubnetACidr
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - { Key: Name, Value: !Sub '${EnvName}-public-a' }
+
+  PublicSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Ref SubnetBCidr
+      AvailabilityZone: !Select [1, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - { Key: Name, Value: !Sub '${EnvName}-public-b' }
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - { Key: Name, Value: !Sub '${EnvName}-public-rt' }
+
+  DefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: GatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  SubnetARouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetA
+      RouteTableId: !Ref PublicRouteTable
+
+  SubnetBRouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetB
+      RouteTableId: !Ref PublicRouteTable
+
+  # Free gateway endpoint: release bundle downloads never count as internet egress.
+  S3GatewayEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref Vpc
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.s3'
+      VpcEndpointType: Gateway
+      RouteTableIds:
+        - !Ref PublicRouteTable
+
+  # Cloudflare published IPv4 ranges (https://www.cloudflare.com/ips-v4).
+  # Refresh this list when Cloudflare changes it (see README "Cloudflare IP ranges").
+  CloudflarePrefixList:
+    Type: AWS::EC2::PrefixList
+    Properties:
+      PrefixListName: !Sub '${EnvName}-cloudflare-ipv4'
+      AddressFamily: IPv4
+      MaxEntries: 20
+      Entries:
+        - { Cidr: 173.245.48.0/20, Description: cloudflare }
+        - { Cidr: 103.21.244.0/22, Description: cloudflare }
+        - { Cidr: 103.22.200.0/22, Description: cloudflare }
+        - { Cidr: 103.31.4.0/22, Description: cloudflare }
+        - { Cidr: 141.101.64.0/18, Description: cloudflare }
+        - { Cidr: 108.162.192.0/18, Description: cloudflare }
+        - { Cidr: 190.93.240.0/20, Description: cloudflare }
+        - { Cidr: 188.114.96.0/20, Description: cloudflare }
+        - { Cidr: 197.234.240.0/22, Description: cloudflare }
+        - { Cidr: 198.41.128.0/17, Description: cloudflare }
+        - { Cidr: 162.158.0.0/15, Description: cloudflare }
+        - { Cidr: 104.16.0.0/13, Description: cloudflare }
+        - { Cidr: 104.24.0.0/14, Description: cloudflare }
+        - { Cidr: 172.64.0.0/13, Description: cloudflare }
+        - { Cidr: 131.0.72.0/22, Description: cloudflare }
+
+  NodeSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Neonbee app nodes - 80/443 from Cloudflare only, no SSH
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourcePrefixListId: !Ref CloudflarePrefixList
+          Description: HTTP from Cloudflare (LB origin + health monitor)
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          SourcePrefixListId: !Ref CloudflarePrefixList
+          Description: HTTPS from Cloudflare (Full strict, Origin CA)
+      SecurityGroupEgress:
+        - IpProtocol: '-1'
+          CidrIp: 0.0.0.0/0
+          Description: Egress to Supabase, AWS APIs, third parties
+      Tags:
+        - { Key: Name, Value: !Sub '${EnvName}-node-sg' }
+
+  # Stable public IPs. Nodes claim a free one at boot (nb-boot.sh); map DNS to these.
+
+  PoolEip1:
+    Type: AWS::EC2::EIP
+    DependsOn: GatewayAttachment
+    Properties:
+      Domain: vpc
+      Tags:
+        - { Key: Name, Value: !Sub '${EnvName}-pool-1' }
+        - { Key: nb-pool, Value: !Ref EnvName }
+
+  PoolEip2:
+    Type: AWS::EC2::EIP
+    DependsOn: GatewayAttachment
+    Properties:
+      Domain: vpc
+      Tags:
+        - { Key: Name, Value: !Sub '${EnvName}-pool-2' }
+        - { Key: nb-pool, Value: !Ref EnvName }
+
+  PoolEip3:
+    Type: AWS::EC2::EIP
+    DependsOn: GatewayAttachment
+    Properties:
+      Domain: vpc
+      Tags:
+        - { Key: Name, Value: !Sub '${EnvName}-pool-3' }
+        - { Key: nb-pool, Value: !Ref EnvName }
+
+  PoolEip4:
+    Type: AWS::EC2::EIP
+    DependsOn: GatewayAttachment
+    Properties:
+      Domain: vpc
+      Tags:
+        - { Key: Name, Value: !Sub '${EnvName}-pool-4' }
+        - { Key: nb-pool, Value: !Ref EnvName }
+
+Outputs:
+  VpcId:
+    Value: !Ref Vpc
+    Export: { Name: !Sub '${EnvName}-VpcId' }
+  PublicSubnetIds:
+    Value: !Join [',', [!Ref PublicSubnetA, !Ref PublicSubnetB]]
+    Export: { Name: !Sub '${EnvName}-PublicSubnetIds' }
+  NodeSecurityGroupId:
+    Value: !Ref NodeSecurityGroup
+    Export: { Name: !Sub '${EnvName}-NodeSecurityGroupId' }
+  CloudflarePrefixListId:
+    Value: !Ref CloudflarePrefixList
+  PoolEipAddresses:
+    Value: !Join [',', [!Ref PoolEip1, !Ref PoolEip2, !Ref PoolEip3, !Ref PoolEip4]]
+    Description: The 4 pool Elastic IPs (the IPs to map DNS to).
