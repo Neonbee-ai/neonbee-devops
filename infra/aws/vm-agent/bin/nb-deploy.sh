@@ -64,7 +64,14 @@ activate() {  # switch `current` to $1 (absolute release dir) and (re)start
   if [ "$TYPE" = nginx ]; then
     ln -sfn "$target" "$CUR.new" && mv -Tf "$CUR.new" "$CUR"
 
-    # Bundle holds sites/*.conf; /etc/nginx/sites-enabled/neonbee -> current/sites (set in the AMI).
+    # Bundle holds sites/*.conf; /etc/nginx/nb-sites -> current/sites (set in the AMI) and nginx.conf
+    # includes nb-sites/*.conf. A symlink to a directory inside sites-enabled breaks `include sites-enabled/*`
+    # ("Is a directory"), so self-heal nodes baked with the old layout.
+    if [ -e /etc/nginx/sites-enabled/neonbee ]; then
+      rm -f /etc/nginx/sites-enabled/neonbee
+      ln -sfn "$CUR/sites" /etc/nginx/nb-sites
+      sed -i 's#include /etc/nginx/sites-enabled/neonbee/\*\.conf;#include /etc/nginx/nb-sites/*.conf;#' /etc/nginx/nginx.conf
+    fi
     # Optional bundle hook (nb-nginx-sites: origin TLS certs) runs before the config test.
     if [ -x "$target/ensure-tls.sh" ]; then "$target/ensure-tls.sh" || return 1; fi
     nginx -t -q && systemctl reload nginx
