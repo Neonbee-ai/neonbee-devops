@@ -1,0 +1,185 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  Neonbee prod (Stage 2.1) - alert channel and budget. SNS topic -> small Lambda that
+  posts to a Microsoft Teams incoming webhook (URL read from Secrets Manager).
+  AWS Budget with 80% / 100% actual and 100% forecast notifications.
+  Package before deploy: aws cloudformation package (Code points at ../lambdas/teams_notify).
+
+Parameters:
+  EnvName:
+    Type: String
+    Default: nb-prod
+  MonthlyBudgetUsd:
+    Type: Number
+    Default: 350
+  BudgetEmail:
+    Type: String
+    Default: ''
+    Description: Optional email that also receives budget notifications (blank = Teams only).
+
+Conditions:
+  HasBudgetEmail: !Not [!Equals [!Ref BudgetEmail, '']]
+
+Resources:
+  AlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub '${EnvName}-alerts'
+      DisplayName: Neonbee prod alerts
+
+  AlertTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics: [!Ref AlertTopic]
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowBudgets
+            Effect: Allow
+            Principal: { Service: budgets.amazonaws.com }
+            Action: sns:Publish
+            Resource: !Ref AlertTopic
+            Condition:
+              StringEquals: { 'aws:SourceAccount': !Ref 'AWS::AccountId' }
+          - Sid: AllowCloudWatchAlarms
+            Effect: Allow
+            Principal: { Service: cloudwatch.amazonaws.com }
+            Action: sns:Publish
+            Resource: !Ref AlertTopic
+            Condition:
+              StringEquals: { 'aws:SourceAccount': !Ref 'AWS::AccountId' }
+          - Sid: AllowEventBridge
+            Effect: Allow
+            Principal: { Service: events.amazonaws.com }
+            Action: sns:Publish
+            Resource: !Ref AlertTopic
+
+  TeamsNotifyRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: read-teams-webhook
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource:
+                  Fn::ImportValue: !Sub '${EnvName}-TeamsWebhookSecretArn'
+
+  TeamsNotifyLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${EnvName}-teams-notify'
+      RetentionInDays: 14
+
+  TeamsNotifyFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: TeamsNotifyLogGroup
+    Properties:
+      FunctionName: !Sub '${EnvName}-teams-notify'
+      Runtime: python3.12
+      Handler: index.handler
+      Code: ../lambdas/teams_notify
+      Role: !GetAtt TeamsNotifyRole.Arn
+      Timeout: 15
+      MemorySize: 128
+      Environment:
+        Variables:
+          TEAMS_WEBHOOK_SECRET_ARN:
+            Fn::ImportValue: !Sub '${EnvName}-TeamsWebhookSecretArn'
+          ENV_NAME: !Ref EnvName
+
+  TeamsNotifyPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref TeamsNotifyFunction
+      Action: lambda:InvokeFunction
+      Principal: sns.amazonaws.com
+      SourceArn: !Ref AlertTopic
+
+  TeamsNotifySubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref AlertTopic
+      Protocol: lambda
+      Endpoint: !GetAtt TeamsNotifyFunction.Arn
+
+  # If the Teams Lambda itself fails there is no Teams message; email is the backstop.
+  TeamsNotifyErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: HasBudgetEmail
+    Properties:
+      AlarmName: !Sub '${EnvName}-teams-notify-errors'
+      AlarmDescription: The Teams alert Lambda is failing (webhook URL wrong or Teams down).
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - { Name: FunctionName, Value: !Ref TeamsNotifyFunction }
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref BackstopEmailTopic]
+
+  BackstopEmailTopic:
+    Type: AWS::SNS::Topic
+    Condition: HasBudgetEmail
+    Properties:
+      TopicName: !Sub '${EnvName}-alerts-backstop'
+      Subscription:
+        - { Protocol: email, Endpoint: !Ref BudgetEmail }
+
+  MonthlyBudget:
+    Type: AWS::Budgets::Budget
+    Properties:
+      Budget:
+        BudgetName: !Sub '${EnvName}-monthly'
+        BudgetType: COST
+        TimeUnit: MONTHLY
+        BudgetLimit:
+          Amount: !Ref MonthlyBudgetUsd
+          Unit: USD
+      NotificationsWithSubscribers:
+        - Notification:
+            NotificationType: ACTUAL
+            ComparisonOperator: GREATER_THAN
+            Threshold: 80
+            ThresholdType: PERCENTAGE
+          Subscribers: !If
+            - HasBudgetEmail
+            - [{ SubscriptionType: SNS, Address: !Ref AlertTopic }, { SubscriptionType: EMAIL, Address: !Ref BudgetEmail }]
+            - [{ SubscriptionType: SNS, Address: !Ref AlertTopic }]
+        - Notification:
+            NotificationType: ACTUAL
+            ComparisonOperator: GREATER_THAN
+            Threshold: 100
+            ThresholdType: PERCENTAGE
+          Subscribers: !If
+            - HasBudgetEmail
+            - [{ SubscriptionType: SNS, Address: !Ref AlertTopic }, { SubscriptionType: EMAIL, Address: !Ref BudgetEmail }]
+            - [{ SubscriptionType: SNS, Address: !Ref AlertTopic }]
+        - Notification:
+            NotificationType: FORECASTED
+            ComparisonOperator: GREATER_THAN
+            Threshold: 100
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - { SubscriptionType: SNS, Address: !Ref AlertTopic }
+
+Outputs:
+  AlertTopicArn:
+    Value: !Ref AlertTopic
+    Export: { Name: !Sub '${EnvName}-AlertTopicArn' }
+  TeamsNotifyFunctionName:
+    Value: !Ref TeamsNotifyFunction

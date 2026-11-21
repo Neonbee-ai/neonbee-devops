@@ -1,0 +1,14 @@
+[Unit]
+Description=Neonbee node bootstrap (pull current releases from S3, start PM2 apps)
+Wants=network-online.target
+After=network-online.target nginx.service snap.amazon-ssm-agent.amazon-ssm-agent.service
+ConditionPathExists=/etc/nb-agent/agent.conf
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/opt/nb-agent/bin/nb-boot.sh
+TimeoutStartSec=900
+
+[Install]
+WantedBy=multi-user.target

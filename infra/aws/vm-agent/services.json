@@ -1,0 +1,567 @@
+{
+  "_comment": "Real prod catalog, 2026-11-20. Upload as s3://<release-bucket>/agent/services.json (scripts/package-agent.sh). name = prod deploy service_name (PM2 app name; the HA VM runs the same apps with a -ha suffix). Ports, instances, scripts and max_memory (500M = neonbee-deploy-prod.yml pm2_max_memory default) come from each repo's prod caller of neonbee-deploy-prod.yml and pm2/ss on the prod HA VM 84.247.131.148; every health_path answered 200 on that VM. type=nginx + static=true = a static bundle (Vite MFE remote / shell / SSO / portal) served by nginx from /opt/neonbee/services/<name>/current; prod_nginx_root is the current VM doc root, for writing the nb-nginx-sites site files. critical=true: Core, every backend routed by the api.neonbee.app gateway, storefront-api, storefront-web, shell and SSO. nb-health probes node apps on 127.0.0.1:<port><health_path> and critical static entries through local nginx with Host: <server_name> + health_path (default /index.html); non-critical static entries are not probed. Next.js apps run `npm start -- -p <port>` on the VM today; on AWS the bundle is the same as the prod rsync (.next/, public/, package.json, package-lock.json) and the catalog reproduces `npm start`: storefront-web (output: 'standalone') runs .next/standalone/server.js with PORT + HOSTNAME=0.0.0.0 (nb-deploy copies .next/static, public/ and .env beside it, as its npm start does); partner-portal (not standalone) runs node_modules/next/dist/bin/next with args [start, -p, <port>], cwd = release dir, runtime deps via install=true. Optional per-service fields: args (string array -> PM2 args), env (string map -> PM2 env; PORT/NODE_ENV always set). EXCLUDED by owner decision 2026-11-20: so360-command, so360-command-be, the marketing website (neonbee.ai), Internal Tools apps (tools-prod, shell-fe-tools) and so360-mobility* - never list them here. Backends (dist/**/main.js) set install=true: the bundle carries dist + package.json + package-lock.json like the prod rsync, and nb-deploy installs runtime deps once per release (npm ci --omit=dev --legacy-peer-deps, as the VM's npm install --omit=dev --legacy-peer-deps).",
+  "services": [
+    {
+      "name": "nb-nginx-sites",
+      "type": "nginx",
+      "critical": true
+    },
+    {
+      "name": "shell-fe",
+      "type": "nginx",
+      "static": true,
+      "prod_nginx_root": "/var/www/dashboard.neonbee.app/html",
+      "critical": true,
+      "server_name": "dashboard.neonbee.app",
+      "health_path": "/index.html"
+    },
+    {
+      "name": "sso-fe",
+      "type": "nginx",
+      "static": true,
+      "prod_nginx_root": "/var/www/sso.neonbee.app/html",
+      "critical": true,
+      "server_name": "sso.neonbee.app",
+      "health_path": "/index.html"
+    },
+    {
+      "name": "client-portal-pwa",
+      "type": "nginx",
+      "static": true,
+      "prod_nginx_root": "/var/www/portal.neonbee.app/html",
+      "critical": false
+    },
+    {
+      "name": "sign-public-fe",
+      "type": "nginx",
+      "static": true,
+      "prod_nginx_root": "/var/www/sign.neonbee.app/html/s",
+      "critical": false
+    },
+    {
+      "name": "accounting-fe",
+      "type": "nginx",
+      "static": true,
+      "prod_nginx_root": "/var/www/cdn.neonbee.app/html/accounting",
+      "critical": false
+    },
+    {
+      "name": "chat-fe",
+      "type": "nginx",
+      "static": true,
+      "prod_nginx_root": "/var/www/cdn.neonbee.app/html/chat",
+      "critical": false
+    },
+    {
+      "name": "connect-fe",
+      "type": "nginx",
+      "static": true,
+      "prod_nginx_root": "/var/www/cdn.neonbee.app/html/connect",
+      "critical": false
+    },
+    {
+      "name": "help-fe",
+      "type": "nginx",
+      "static": true,
+      "prod_nginx_root": "/var/www/cdn.neonbee.app/html/contact-support",
+      "critical": false
+    },
+    {
+      "name": "crm-fe",
+      "type": "nginx",
+      "static": true,
+      "prod_nginx_root": "/var/www/cdn.neonbee.app/html/crm",
+      "critical": false
+    },
+    {
+      "name": "dailystore-admin-fe",
+      "type": "nginx",
+      "static": true,
+      "prod_nginx_root": "/var/www/cdn.neonbee.app/html/dailystore-admin",
+      "critical": false
+    },
+    {
+      "name": "documents-fe",
+      "type": "nginx",
+      "static": true,
+      "prod_nginx_root": "/var/www/cdn.neonbee.app/html/documents",
+      "critical": false
+    },
+    {
+      "name": "flow-fe",
+      "type": "nginx",
+      "static": true,
+      "prod_nginx_root": "/var/www/cdn.neonbee.app/html/flow",
+      "critical": false
+    },
+    {
+      "name": "folio-fe",
+      "type": "nginx",
+      "static": true,
+      "prod_nginx_root": "/var/www/cdn.neonbee.app/html/folio",
+      "critical": false
+    },
+    {
+      "name": "forms-fe",
+      "type": "nginx",
+      "static": true,
+      "prod_nginx_root": "/var/www/cdn.neonbee.app/html/forms",
+      "critical": false
+    },
+    {
+      "name": "fulfillment-fe",
+      "type": "nginx",
+      "static": true,
+      "prod_nginx_root": "/var/www/cdn.neonbee.app/html/fulfillment",
+      "critical": false
+    },
+    {
+      "name": "inbox-fe",
+      "type": "nginx",
+      "static": true,
+      "prod_nginx_root": "/var/www/cdn.neonbee.app/html/inbox",
+      "critical": false
+    },
+    {
+      "name": "insight-fe",
+      "type": "nginx",
+      "static": true,
+      "prod_nginx_root": "/var/www/cdn.neonbee.app/html/insight",
+      "critical": false
+    },
+    {
+      "name": "inventory-fe",
+      "type": "nginx",
+      "static": true,
+      "prod_nginx_root": "/var/www/cdn.neonbee.app/html/inventory",
+      "critical": false
+    },
+    {
+      "name": "maintenance-fe",
+      "type": "nginx",
+      "static": true,
+      "prod_nginx_root": "/var/www/cdn.neonbee.app/html/maintenance",
+      "critical": false
+    },
+    {
+      "name": "manufacturing-fe",
+      "type": "nginx",
+      "static": true,
+      "prod_nginx_root": "/var/www/cdn.neonbee.app/html/manufacturing",
+      "critical": false
+    },
+    {
+      "name": "marketing-fe",
+      "type": "nginx",
+      "static": true,
+      "prod_nginx_root": "/var/www/cdn.neonbee.app/html/marketing",
+      "critical": false
+    },
+    {
+      "name": "neura-fe",
+      "type": "nginx",
+      "static": true,
+      "prod_nginx_root": "/var/www/cdn.neonbee.app/html/neura",
+      "critical": false
+    },
+    {
+      "name": "people-connect-fe",
+      "type": "nginx",
+      "static": true,
+      "prod_nginx_root": "/var/www/cdn.neonbee.app/html/people",
+      "critical": false
+    },
+    {
+      "name": "platform-help-fe",
+      "type": "nginx",
+      "static": true,
+      "prod_nginx_root": "/var/www/cdn.neonbee.app/html/platform-help",
+      "critical": false
+    },
+    {
+      "name": "projects-fe",
+      "type": "nginx",
+      "static": true,
+      "prod_nginx_root": "/var/www/cdn.neonbee.app/html/projects",
+      "critical": false
+    },
+    {
+      "name": "sign-fe",
+      "type": "nginx",
+      "static": true,
+      "prod_nginx_root": "/var/www/cdn.neonbee.app/html/sign",
+      "critical": false
+    },
+    {
+      "name": "signal-fe",
+      "type": "nginx",
+      "static": true,
+      "prod_nginx_root": "/var/www/cdn.neonbee.app/html/signal",
+      "critical": false
+    },
+    {
+      "name": "support-fe",
+      "type": "nginx",
+      "static": true,
+      "prod_nginx_root": "/var/www/cdn.neonbee.app/html/support",
+      "critical": false
+    },
+    {
+      "name": "timesheet-fe",
+      "type": "nginx",
+      "static": true,
+      "prod_nginx_root": "/var/www/cdn.neonbee.app/html/timesheet",
+      "critical": false
+    },
+    {
+      "name": "core-prod",
+      "type": "node",
+      "port": 8000,
+      "health_path": "/v1/health",
+      "script": "dist/src/main.js",
+      "instances": 2,
+      "max_memory": "500M",
+      "critical": true,
+      "install": true
+    },
+    {
+      "name": "crm-prod",
+      "type": "node",
+      "port": 8003,
+      "health_path": "/health",
+      "script": "dist/src/main.js",
+      "instances": 2,
+      "max_memory": "500M",
+      "critical": true,
+      "install": true
+    },
+    {
+      "name": "inventory-prod",
+      "type": "node",
+      "port": 8006,
+      "health_path": "/health",
+      "script": "dist/main.js",
+      "instances": 2,
+      "max_memory": "500M",
+      "critical": true,
+      "install": true
+    },
+    {
+      "name": "accounting-prod",
+      "type": "node",
+      "port": 8008,
+      "health_path": "/health",
+      "script": "dist/src/main.js",
+      "instances": 2,
+      "max_memory": "500M",
+      "critical": true,
+      "install": true
+    },
+    {
+      "name": "projects-prod",
+      "type": "node",
+      "port": 8010,
+      "health_path": "/health",
+      "script": "dist/main.js",
+      "instances": 2,
+      "max_memory": "500M",
+      "critical": true,
+      "install": true
+    },
+    {
+      "name": "timesheet-prod",
+      "type": "node",
+      "port": 8012,
+      "health_path": "/health",
+      "script": "dist/main.js",
+      "instances": 2,
+      "max_memory": "500M",
+      "critical": true,
+      "install": true
+    },
+    {
+      "name": "people-connect-prod",
+      "type": "node",
+      "port": 8015,
+      "health_path": "/health",
+      "script": "dist/main.js",
+      "instances": 2,
+      "max_memory": "500M",
+      "critical": true,
+      "install": true
+    },
+    {
+      "name": "inbox-prod",
+      "type": "node",
+      "port": 8017,
+      "health_path": "/health",
+      "script": "dist/src/main.js",
+      "instances": 2,
+      "max_memory": "500M",
+      "critical": true,
+      "install": true
+    },
+    {
+      "name": "neura-prod",
+      "type": "node",
+      "port": 8018,
+      "health_path": "/health",
+      "script": "dist/src/main.js",
+      "instances": 2,
+      "max_memory": "500M",
+      "critical": true,
+      "install": true
+    },
+    {
+      "name": "storefront-api-prod",
+      "type": "node",
+      "port": 8020,
+      "health_path": "/health",
+      "script": "dist/main.js",
+      "instances": 2,
+      "max_memory": "500M",
+      "critical": true,
+      "install": true
+    },
+    {
+      "name": "flow-prod",
+      "type": "node",
+      "port": 8021,
+      "health_path": "/health",
+      "script": "dist/main.js",
+      "instances": 2,
+      "max_memory": "500M",
+      "critical": true,
+      "install": true
+    },
+    {
+      "name": "insight-prod",
+      "type": "node",
+      "port": 8023,
+      "health_path": "/health",
+      "script": "dist/main.js",
+      "instances": 2,
+      "max_memory": "500M",
+      "critical": true,
+      "install": true
+    },
+    {
+      "name": "subscription-prod",
+      "type": "node",
+      "port": 8026,
+      "health_path": "/health",
+      "script": "dist/main.js",
+      "instances": 2,
+      "max_memory": "500M",
+      "critical": true,
+      "install": true
+    },
+    {
+      "name": "forms-prod",
+      "type": "node",
+      "port": 8027,
+      "health_path": "/health",
+      "script": "dist/main.js",
+      "instances": 2,
+      "max_memory": "500M",
+      "critical": true,
+      "install": true
+    },
+    {
+      "name": "dailystore-admin-prod",
+      "type": "node",
+      "port": 8029,
+      "health_path": "/health",
+      "script": "dist/main.js",
+      "instances": 2,
+      "max_memory": "500M",
+      "critical": true,
+      "install": true
+    },
+    {
+      "name": "fulfillment-prod",
+      "type": "node",
+      "port": 8032,
+      "health_path": "/health",
+      "script": "dist/main.js",
+      "instances": 2,
+      "max_memory": "500M",
+      "critical": true,
+      "install": true
+    },
+    {
+      "name": "support-prod",
+      "type": "node",
+      "port": 8033,
+      "health_path": "/health",
+      "script": "dist/src/main.js",
+      "instances": 2,
+      "max_memory": "500M",
+      "critical": true,
+      "install": true
+    },
+    {
+      "name": "manufacturing-prod",
+      "type": "node",
+      "port": 8034,
+      "health_path": "/health",
+      "script": "dist/src/main.js",
+      "instances": 1,
+      "max_memory": "500M",
+      "critical": true,
+      "install": true
+    },
+    {
+      "name": "chat-prod",
+      "type": "node",
+      "port": 8036,
+      "health_path": "/health",
+      "script": "dist/main.js",
+      "instances": 2,
+      "max_memory": "500M",
+      "critical": true,
+      "install": true
+    },
+    {
+      "name": "documents-prod",
+      "type": "node",
+      "port": 8037,
+      "health_path": "/api",
+      "script": "dist/src/main.js",
+      "instances": 2,
+      "max_memory": "500M",
+      "critical": true,
+      "install": true
+    },
+    {
+      "name": "sign-prod",
+      "type": "node",
+      "port": 8038,
+      "health_path": "/api",
+      "script": "dist/src/main.js",
+      "instances": 2,
+      "max_memory": "500M",
+      "critical": true,
+      "install": true
+    },
+    {
+      "name": "folio-prod",
+      "type": "node",
+      "port": 8044,
+      "health_path": "/health",
+      "script": "dist/main.js",
+      "instances": 2,
+      "max_memory": "500M",
+      "critical": true,
+      "install": true
+    },
+    {
+      "name": "connect-prod",
+      "type": "node",
+      "port": 8048,
+      "health_path": "/health",
+      "script": "dist/main.js",
+      "instances": 1,
+      "max_memory": "500M",
+      "critical": false,
+      "install": true
+    },
+    {
+      "name": "signal-prod",
+      "type": "node",
+      "port": 8049,
+      "health_path": "/health",
+      "script": "dist/src/main.js",
+      "instances": 1,
+      "max_memory": "500M",
+      "critical": true,
+      "install": true
+    },
+    {
+      "name": "platform-help-prod",
+      "type": "node",
+      "port": 8052,
+      "health_path": "/health",
+      "script": "dist/src/main.js",
+      "instances": 1,
+      "max_memory": "500M",
+      "critical": false,
+      "install": true
+    },
+    {
+      "name": "contentforge-prod",
+      "type": "node",
+      "port": 8053,
+      "health_path": "/health",
+      "script": "dist/main.js",
+      "instances": 2,
+      "max_memory": "500M",
+      "critical": false,
+      "install": true
+    },
+    {
+      "name": "lumen-prod",
+      "type": "node",
+      "port": 8054,
+      "health_path": "/health",
+      "script": "dist/main.js",
+      "instances": 1,
+      "max_memory": "500M",
+      "critical": false,
+      "install": true
+    },
+    {
+      "name": "marketing-prod",
+      "type": "node",
+      "port": 8056,
+      "health_path": "/health",
+      "script": "dist/main.js",
+      "instances": 1,
+      "max_memory": "500M",
+      "critical": true,
+      "install": true
+    },
+    {
+      "name": "maintenance-prod",
+      "type": "node",
+      "port": 8058,
+      "health_path": "/health",
+      "script": "dist/main.js",
+      "instances": 2,
+      "max_memory": "500M",
+      "critical": false,
+      "install": true
+    },
+    {
+      "name": "storefront-web-prod",
+      "type": "node",
+      "port": 8031,
+      "health_path": "/",
+      "exec_mode": "fork",
+      "script": ".next/standalone/server.js",
+      "instances": 1,
+      "max_memory": "500M",
+      "critical": true,
+      "env": {
+        "HOSTNAME": "0.0.0.0"
+      }
+    },
+    {
+      "name": "partner-portal-prod",
+      "type": "node",
+      "port": 8046,
+      "health_path": "/api/health",
+      "exec_mode": "fork",
+      "script": "node_modules/next/dist/bin/next",
+      "instances": 1,
+      "max_memory": "500M",
+      "critical": false,
+      "args": [
+        "start",
+        "-p",
+        "8046"
+      ],
+      "install": true
+    }
+  ]
+}

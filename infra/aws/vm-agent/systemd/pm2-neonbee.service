@@ -1,0 +1,19 @@
+[Unit]
+Description=PM2 process manager for the neonbee user (resurrects saved apps on reboot)
+After=network-online.target
+Before=nb-boot.service
+
+[Service]
+Type=forking
+User=neonbee
+Environment=PM2_HOME=/opt/neonbee/.pm2
+Environment=NB_SCHEDULER_DB_LOCK=true
+PIDFile=/opt/neonbee/.pm2/pm2.pid
+ExecStart=/usr/bin/pm2 resurrect
+ExecReload=/usr/bin/pm2 reload /opt/neonbee/.pm2/dump.pm2
+ExecStop=/usr/bin/pm2 kill
+Restart=on-failure
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

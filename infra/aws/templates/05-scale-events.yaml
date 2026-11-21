@@ -1,0 +1,183 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  Neonbee prod (Stage 2.5) - ASG lifecycle hooks -> EventBridge -> cf-lb-sync Lambda that
+  adds healthy new nodes to the Cloudflare LB pool and drains/removes terminating ones,
+  plus a 15-minute reconcile. Alerts go to the Teams alert topic.
+  Package before deploy (Code points at ../lambdas/cf_lb_sync).
+
+Parameters:
+  EnvName:
+    Type: String
+    Default: nb-prod
+  CloudflareAccountId:
+    Type: String
+    AllowedPattern: '^[a-f0-9]{32}$'
+    Description: Cloudflare account id that owns the LB pool.
+  CloudflarePoolId:
+    Type: String
+    AllowedPattern: '^[a-f0-9]{32}$'
+    Description: Pool that holds the AWS nodes (create it once; see README).
+  HealthWaitSeconds:
+    Type: Number
+    Default: 480
+    Description: Must stay below the nb-ready hook timeout (600 s).
+  DrainSeconds:
+    Type: Number
+    Default: 45
+    Description: Time an origin stays disabled before removal (must stay below nb-drain timeout).
+  OriginWeight:
+    Type: String
+    Default: '1'
+  HealthHostHeader:
+    Type: String
+    Default: api.neonbee.app
+    Description: Host header for the on-node /__lb_health check (same host the CF monitor uses).
+  ReconcileSchedule:
+    Type: String
+    Default: rate(15 minutes)
+
+Resources:
+  CfLbSyncRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: cf-lb-sync
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: { 'Fn::ImportValue': !Sub '${EnvName}-CfLbApiTokenSecretArn' }
+              - Effect: Allow
+                Action: sns:Publish
+                Resource: { 'Fn::ImportValue': !Sub '${EnvName}-AlertTopicArn' }
+              - Effect: Allow
+                Action: autoscaling:CompleteLifecycleAction
+                Resource: !Sub
+                  - 'arn:${AWS::Partition}:autoscaling:${AWS::Region}:${AWS::AccountId}:autoScalingGroup:*:autoScalingGroupName/${Asg}'
+                  - Asg: { 'Fn::ImportValue': !Sub '${EnvName}-AsgName' }
+              - Effect: Allow
+                Action: [autoscaling:DescribeAutoScalingGroups, ec2:DescribeInstances, ssm:GetCommandInvocation]
+                Resource: '*'
+              - Effect: Allow
+                Action: ssm:SendCommand
+                Resource: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}::document/AWS-RunShellScript'
+              - Effect: Allow
+                Action: ssm:SendCommand
+                Resource: !Sub 'arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/*'
+                Condition:
+                  StringEquals: { 'ssm:resourceTag/neonbee:env': !Ref EnvName }
+
+  CfLbSyncLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${EnvName}-cf-lb-sync'
+      RetentionInDays: 14
+
+  CfLbSyncFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: CfLbSyncLogGroup
+    Properties:
+      FunctionName: !Sub '${EnvName}-cf-lb-sync'
+      Runtime: python3.12
+      Handler: index.handler
+      Code: ../lambdas/cf_lb_sync
+      Role: !GetAtt CfLbSyncRole.Arn
+      Timeout: 900
+      MemorySize: 128
+      ReservedConcurrentExecutions: 1
+      Environment:
+        Variables:
+          CF_ACCOUNT_ID: !Ref CloudflareAccountId
+          CF_POOL_ID: !Ref CloudflarePoolId
+          CF_TOKEN_SECRET_ARN: { 'Fn::ImportValue': !Sub '${EnvName}-CfLbApiTokenSecretArn' }
+          ALERT_TOPIC_ARN: { 'Fn::ImportValue': !Sub '${EnvName}-AlertTopicArn' }
+          ASG_NAME: { 'Fn::ImportValue': !Sub '${EnvName}-AsgName' }
+          ORIGIN_PREFIX: aws-
+          ORIGIN_WEIGHT: !Ref OriginWeight
+          HEALTH_WAIT_SECONDS: !Ref HealthWaitSeconds
+          HEALTH_POLL_SECONDS: '15'
+          DRAIN_SECONDS: !Ref DrainSeconds
+          HEALTH_CHECK_CMD: !Sub "curl -fsS -m 5 -o /dev/null -H 'Host: ${HealthHostHeader}' http://127.0.0.1/__lb_health"
+
+  # Failed async invocations (after EventBridge/Lambda retries) still alert.
+  CfLbSyncEventConfig:
+    Type: AWS::Lambda::EventInvokeConfig
+    Properties:
+      FunctionName: !Ref CfLbSyncFunction
+      Qualifier: $LATEST
+      MaximumRetryAttempts: 1
+      MaximumEventAgeInSeconds: 3600
+      DestinationConfig:
+        OnFailure:
+          Destination: { 'Fn::ImportValue': !Sub '${EnvName}-AlertTopicArn' }
+
+  LifecycleRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub '${EnvName}-asg-lifecycle'
+      EventPattern:
+        source: [aws.autoscaling]
+        detail-type:
+          - EC2 Instance-launch Lifecycle Action
+          - EC2 Instance-terminate Lifecycle Action
+        detail:
+          AutoScalingGroupName:
+            - { 'Fn::ImportValue': !Sub '${EnvName}-AsgName' }
+      Targets:
+        - Id: cf-lb-sync
+          Arn: !GetAtt CfLbSyncFunction.Arn
+
+  ReconcileRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub '${EnvName}-cf-pool-reconcile'
+      ScheduleExpression: !Ref ReconcileSchedule
+      Targets:
+        - Id: cf-lb-reconcile
+          Arn: !GetAtt CfLbSyncFunction.Arn
+
+  LifecyclePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref CfLbSyncFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt LifecycleRule.Arn
+
+  ReconcilePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref CfLbSyncFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt ReconcileRule.Arn
+
+  CfLbSyncErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${EnvName}-cf-lb-sync-errors'
+      AlarmDescription: The Cloudflare pool sync Lambda threw an error.
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - { Name: FunctionName, Value: !Ref CfLbSyncFunction }
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [{ 'Fn::ImportValue': !Sub '${EnvName}-AlertTopicArn' }]
+
+Outputs:
+  CfLbSyncFunctionName:
+    Value: !Ref CfLbSyncFunction
