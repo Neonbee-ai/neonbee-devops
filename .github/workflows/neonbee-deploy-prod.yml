@@ -57,6 +57,34 @@ on:
         required: false
         type: string
         default: '500M'
+      # ── Opt-in zero-downtime PM2 (Stage 1.6, backend only). Default OFF =
+      #    today's delete+start path is unchanged. Repo var NB_PM2_RELOAD=true
+      #    also turns it on. Uses pm2_instances / pm2_max_memory above.
+      pm2_reload:
+        description: 'Use a generated per-service ecosystem file + pm2 reload <name> (zero downtime) instead of delete+start'
+        required: false
+        type: boolean
+        default: false
+      pm2_exec_mode:
+        description: 'cluster (stateless NestJS) or fork (pm2_reload path only)'
+        required: false
+        type: string
+        default: 'cluster'
+      pm2_kill_timeout:
+        description: 'ms PM2 waits after SIGINT before SIGKILL (pm2_reload path only)'
+        required: false
+        type: number
+        default: 10000
+      pm2_listen_timeout:
+        description: 'ms PM2 waits for a new worker to listen/ready (pm2_reload path only)'
+        required: false
+        type: number
+        default: 15000
+      pm2_wait_ready:
+        description: 'Wait for process.send("ready") - only for apps that emit it (pm2_reload path only)'
+        required: false
+        type: boolean
+        default: false
 
       # ── Vite MFE ──────────────────────────────────────────────────────────
       nginx_root:
@@ -2001,6 +2029,50 @@ jobs:
             rm -f "$LINK"
           fi
 
+      # ── Opt-in AWS release artifact (Stage 3.1) ─────────────────────────────
+      # Only when the caller repo/org var NB_AWS_DEPLOY == 'true' on main: the
+      # caller's deploy-aws job (neonbee-deploy-s3-release.yml) bundles this exact
+      # build — build once, never on a VM. Unset var = both steps skipped, so
+      # today's deploy is unchanged; continue-on-error so it can never fail it.
+      # package.json is always listed so the artifact root stays the workspace
+      # (upload-artifact roots at the paths' common ancestor). Vite = dist only
+      # (artifact root = dist, the release workflow's legacy layout).
+      - name: AWS release artifact paths
+        id: nb_aws_paths
+        if: success() && vars.NB_AWS_DEPLOY == 'true' && github.ref == 'refs/heads/main'
+        continue-on-error: true
+        shell: bash
+        env:
+          KIND: ${{ inputs.deploy_type }}
+          STANDALONE: ${{ inputs.standalone }}
+        run: |
+          set -euo pipefail
+          case "$KIND" in
+            backend)  P=$'dist\npackage.json\npackage-lock.json' ;;
+            vite-mfe) P='dist' ;;
+            nextjs)
+              if [ "$STANDALONE" = true ]; then
+                P=$'.next/standalone\n.next/static\npublic\npackage.json\n!.next/standalone/.env*'
+              else
+                # Whole .next (an output:'standalone' app deployed the npm-start way,
+                # e.g. storefront-web, still needs .next/standalone on AWS).
+                P=$'.next\npublic\npackage.json\npackage-lock.json\nnext.config.*\n!.next/cache\n!.next/standalone/.env*'
+              fi ;;
+            *) echo "::warning::no AWS release layout for deploy_type=$KIND"; exit 1 ;;
+          esac
+          { echo 'paths<<NB_PATHS_EOF'; printf '%s\n' "$P"; echo 'NB_PATHS_EOF'; } >> "$GITHUB_OUTPUT"
+
+      - name: Upload AWS release artifact
+        if: success() && steps.nb_aws_paths.outcome == 'success' && steps.nb_aws_paths.outputs.paths != ''
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: nb-release-${{ inputs.service_name }}
+          path: ${{ steps.nb_aws_paths.outputs.paths }}
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 1
+
       # ── SSH + VM resolution (shared) ────────────────────────────────────────
       - name: Resolve target VM
         id: vm
@@ -2214,9 +2286,67 @@ jobs:
               [ -n "$CI_KEYS" ] && grep -vE "^(${CI_KEYS})=" .env >> .env.ci 2>/dev/null || true
             fi
             mv .env.ci .env
-            pm2 delete "$PM2_NAME" 2>/dev/null || true
-            MAIN_JS=$(find dist -name main.js | head -1)
-            pm2 start "$MAIN_JS" --name "$PM2_NAME" --instances ${{ inputs.pm2_instances }} --max-memory-restart ${{ inputs.pm2_max_memory }} --update-env
+            NB_PM2_RELOAD="${{ (inputs.pm2_reload || vars.NB_PM2_RELOAD == 'true') && 'true' || 'false' }}"
+            NB_PM2_EXEC_MODE="${{ inputs.pm2_exec_mode }}"
+            NB_PM2_KILL_TIMEOUT="${{ inputs.pm2_kill_timeout }}"
+            NB_PM2_LISTEN_TIMEOUT="${{ inputs.pm2_listen_timeout }}"
+            NB_PM2_WAIT_READY="${{ inputs.pm2_wait_ready }}"
+            if [ "$NB_PM2_RELOAD" = "true" ]; then
+              # ── Opt-in zero-downtime PM2 reload (input pm2_reload / repo var NB_PM2_RELOAD) ──
+              # Writes a per-service ecosystem file (.nb-ecosystem.<name>.json in the service
+              # dir) and runs `pm2 reload <file> --only <name>`: a rolling worker swap in
+              # cluster mode, so the port never goes dark. Touches ONLY the named app (never
+              # `pm2 ... all`) and never kills anything by port. If the app is absent or its
+              # exec mode / instance count / cwd / script differ from the wanted config, it
+              # does a one-off delete+start of this app only. NODE_APP_INSTANCE stays PM2's
+              # instance_var, so isSchedulerLeader() (instance 0 runs crons) is unchanged.
+              nb_pm2_reload() {
+                local NAME="$1" SCRIPT="$2" CWD="$3" INST="$4" MEM="$5" APP_PORT="$6"
+                local ECO="$CWD/.nb-ecosystem.$NAME.json" WANT CUR
+                WANT=$(NB_NAME="$NAME" NB_SCRIPT="$SCRIPT" NB_CWD="$CWD" NB_INST="$INST" NB_MEM="$MEM" \
+                  NB_PORT="$APP_PORT" NB_ECO="$ECO" NB_EXEC="$NB_PM2_EXEC_MODE" NB_KILL="$NB_PM2_KILL_TIMEOUT" \
+                  NB_LISTEN="$NB_PM2_LISTEN_TIMEOUT" NB_READY="$NB_PM2_WAIT_READY" node -e '
+                  const e = process.env, cluster = e.NB_EXEC !== "fork";
+                  const app = { name: e.NB_NAME, script: e.NB_SCRIPT, cwd: e.NB_CWD,
+                    exec_mode: cluster ? "cluster" : "fork",
+                    instances: cluster ? (Number(e.NB_INST) || 1) : 1,
+                    instance_var: "NODE_APP_INSTANCE",
+                    max_memory_restart: e.NB_MEM,
+                    kill_timeout: Number(e.NB_KILL) || 10000,
+                    listen_timeout: Number(e.NB_LISTEN) || 15000,
+                    wait_ready: e.NB_READY === "true",
+                    autorestart: true, merge_logs: true,
+                    env: { PORT: String(e.NB_PORT) } };
+                  require("fs").writeFileSync(e.NB_ECO, JSON.stringify({ apps: [app] }, null, 2) + "\n");
+                  console.log([app.exec_mode, app.instances, app.cwd, app.script].join("|"));
+                ') || { echo "FATAL: cannot write PM2 ecosystem $ECO"; return 1; }
+                CUR=$(pm2 jlist 2>/dev/null | NB_NAME="$NAME" node -e '
+                  let s = "";
+                  process.stdin.on("data", d => s += d).on("end", () => {
+                    let l;
+                    try { l = JSON.parse(s.slice(s.search(/^\[(\{|\])/m))); } catch (_) { console.log("unknown"); return; }
+                    const p = l.filter(x => x.name === process.env.NB_NAME);
+                    if (!p.length) { console.log("absent"); return; }
+                    const v = p[0].pm2_env || {};
+                    console.log([v.exec_mode === "cluster_mode" ? "cluster" : "fork", p.length, v.pm_cwd, v.pm_exec_path].join("|"));
+                  });
+                ') || CUR="unknown"
+                echo "PM2 $NAME: running=[$CUR] wanted=[$WANT]"
+                if [ "$CUR" = "$WANT" ]; then
+                  pm2 reload "$ECO" --only "$NAME" --update-env && { echo "pm2 reload $NAME: OK (zero-downtime)"; return 0; }
+                  echo "pm2 reload $NAME failed - falling back to delete+start of this app only"
+                fi
+                pm2 delete "$NAME" 2>/dev/null || true
+                pm2 start "$ECO" --only "$NAME" --update-env
+              }
+              MAIN_JS=$(find dist -name main.js | head -1)
+              [ -n "$MAIN_JS" ] || { echo "FATAL: no dist/**/main.js"; exit 1; }
+              nb_pm2_reload "$PM2_NAME" "$(pwd)/$MAIN_JS" "$(pwd)" "${{ inputs.pm2_instances }}" "${{ inputs.pm2_max_memory }}" "$PORT" || exit 1
+            else
+              pm2 delete "$PM2_NAME" 2>/dev/null || true
+              MAIN_JS=$(find dist -name main.js | head -1)
+              pm2 start "$MAIN_JS" --name "$PM2_NAME" --instances ${{ inputs.pm2_instances }} --max-memory-restart ${{ inputs.pm2_max_memory }} --update-env
+            fi
             pm2 save
             for i in $(seq 1 15); do
               curl -fsS "http://127.0.0.1:$PORT${{ inputs.health_path }}" >/dev/null 2>&1 && echo "Health check passed on port $PORT" && break
