@@ -176,6 +176,7 @@ jobs:
         run: |
           set -euo pipefail
           fail() { echo "::error::$1"; exit 1; }
+          [ "${{ runner.environment }}" != "github-hosted" ] || { echo "::error::self-hosted runners only (runs_on)"; exit 1; }
           [[ "$SERVICE" =~ ^[a-z0-9][a-z0-9-]{1,62}$ ]] || fail "service_name must be lowercase letters, digits, dash"
           [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || fail "unexpected github.sha"
           [[ "$ASG" =~ ^[A-Za-z0-9._:/-]{1,255}$ ]] || fail "invalid asg_name"
