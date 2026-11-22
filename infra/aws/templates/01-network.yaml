@@ -167,6 +167,7 @@ Resources:
       Tags:
         - { Key: Name, Value: !Sub '${EnvName}-pool-2' }
         - { Key: nb-pool, Value: !Ref EnvName }
+        - { Key: nb-serving, Value: 'true' }   # Cloudflare origin (LB pool + proxied A); nb-eip.sh claims these first
 
   PoolEip3:
     Type: AWS::EC2::EIP
@@ -185,6 +186,7 @@ Resources:
       Tags:
         - { Key: Name, Value: !Sub '${EnvName}-pool-4' }
         - { Key: nb-pool, Value: !Ref EnvName }
+        - { Key: nb-serving, Value: 'true' }   # Cloudflare origin (LB pool + proxied A); nb-eip.sh claims these first
 
 Outputs:
   VpcId:
