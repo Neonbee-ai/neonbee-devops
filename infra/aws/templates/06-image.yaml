@@ -99,6 +99,7 @@ Resources:
                   inputs:
                     commands:
                       - id -u neonbee >/dev/null 2>&1 || useradd --system --create-home --home-dir /opt/neonbee --shell /bin/bash neonbee
+                      - chmod 711 /opt/neonbee
                       - install -d -o neonbee -g neonbee /opt/neonbee/services /opt/neonbee/.pm2
                       - install -d /opt/nb-agent /var/lib/nb-agent/www /var/log/nb-agent /etc/nb-agent
                       - aws s3 cp s3://${Bucket}/agent/vm-agent.tar.gz /tmp/vm-agent.tar.gz --region ${AWS::Region}

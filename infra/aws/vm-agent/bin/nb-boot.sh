@@ -12,6 +12,8 @@ NB_COMPONENT=nb-boot
 . "$(dirname "$0")/nb-lib.sh"
 
 rm -f "$NB_STATE/boot.done" "$NB_STATE/www/__lb_health"
+# useradd --create-home gives /opt/neonbee mode 750; nginx (www-data) must traverse it to serve FE dist roots.
+chmod 711 /opt/neonbee 2>/dev/null || true
 : "${NB_RELEASE_BUCKET:?NB_RELEASE_BUCKET missing in $NB_CONF}"
 
 # Claim a free pool Elastic IP (tag nb-pool=<env>) so this node has a stable public IP.
