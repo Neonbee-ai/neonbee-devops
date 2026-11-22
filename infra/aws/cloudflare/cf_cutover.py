@@ -527,7 +527,9 @@ def dns_only_upsert(clients, host, eips, dry_run):
 def monitor_ensure(clients, zone_name, dry_run):
     cf, z, acct = _acct_for(clients, zone_name)
     cur = _find_monitor(cf, acct)
-    res = {"action": "monitor-ensure", "account": acct, "dry_run": dry_run, "time": _now(), "prior": cur}
+    # deep copy: the saved prior must not change when the live monitor is patched (restore relies on it)
+    res = {"action": "monitor-ensure", "account": acct, "dry_run": dry_run, "time": _now(),
+           "prior": json.loads(json.dumps(cur)) if cur else cur}
     if cur and all(cur.get(k) == v for k, v in MONITOR_BODY.items()):
         res.update(plan="no-op", after=cur)
         return res
