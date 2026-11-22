@@ -66,7 +66,7 @@ class HostGuardTest(unittest.TestCase):
         self.assertNotIn("_", hosts)
 
     def test_given_dev_or_preview_host_when_checked_then_it_is_refused(self):
-        for h in ("dev-dashboard.neonbee.app", "pr-fix-x.skyoffice360.com", "tools.neonbee.app",
+        for h in ("dev-dashboard.neonbee.app", "pr-fix-x.skyoffice360.com", "dev-tools.neonbee.app",
                   "autoqa.moonhive.in", "dev.api.neonbee.app"):
             with self.assertRaises(cc.CutoverError):
                 cc.check_host(h, ALLOWED | {h})
@@ -284,7 +284,7 @@ class LoadBalancerTest(unittest.TestCase):
         with self.assertRaises(cc.CutoverError):
             cc.lb_change([FakeLB()], "api.neonbee.app", ALLOWED, revert=False, dry_run=True)
         with self.assertRaises(cc.CutoverError):
-            cc.lb_change([FakeLB()], "tools.neonbee.app", ALLOWED, revert=False, dry_run=True)
+            cc.lb_change([FakeLB()], "dev-dashboard.neonbee.app", ALLOWED | {"dev-dashboard.neonbee.app"}, revert=False, dry_run=True)
 
     def test_given_dry_run_when_switching_then_nothing_is_written(self):
         cf = FakeLB(pools=[HA_EXISTING])
@@ -660,9 +660,9 @@ class ItvmTargetTest(unittest.TestCase):
         self.assertEqual([(r["id"], r["content"], r["proxied"]) for r in cf.records], [("r1", cc.ITVM_IP, True)])
 
     def test_given_switched_itvm_host_when_reverting_then_ha_is_restored(self):
-        cf = FakeCF([rec("r1", HA, name="tools.neonbee.app")])
-        cc.dns_change([cf], "tools.neonbee.app", self.ITVM, set(), revert=False, dry_run=False)
-        res = cc.dns_change([cf], "tools.neonbee.app", self.ITVM, set(), revert=True, dry_run=False)
+        cf = FakeCF([rec("r1", HA, name="pulse.neonbee.app")])
+        cc.dns_change([cf], "pulse.neonbee.app", self.ITVM, set(), revert=False, dry_run=False)
+        res = cc.dns_change([cf], "pulse.neonbee.app", self.ITVM, set(), revert=True, dry_run=False)
         self.assertTrue(res["verified"])
         self.assertEqual([r["content"] for r in cf.records], [HA])
 
@@ -675,9 +675,12 @@ class ItvmTargetTest(unittest.TestCase):
         with self.assertRaises(cc.CutoverError):
             cc.check_host("neonbee.ai", set(), (cc.ITVM_IP, EIPS[0]))
 
-    def test_given_aws_eips_when_switching_tools_app_then_deny_list_still_applies(self):
+    def test_given_aws_bundle_serves_tools_app_when_switching_to_aws_eips_then_it_is_allowed(self):
+        self.assertEqual(cc.check_host("tools.neonbee.app", cc.bundle_hosts(), EIPS), "tools.neonbee.app")
+
+    def test_given_tools_app_when_targeting_itvm_then_it_refuses(self):
         with self.assertRaises(cc.CutoverError):
-            cc.check_host("tools.neonbee.app", {"tools.neonbee.app"}, EIPS)
+            cc.check_host("tools.neonbee.app", {"tools.neonbee.app"}, self.ITVM)
 
 
 class StoreSitesTest(unittest.TestCase):

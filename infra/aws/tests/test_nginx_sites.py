@@ -27,9 +27,16 @@ class NginxSitesTest(unittest.TestCase):
         self.assertIn("neonbee.app.conf", names)
         self.assertIn("neonbee-store.conf", names)
 
+    def test_given_free_tools_catalog_entry_when_generated_then_tools_app_serves_shell_fe_tools_spa(self):
+        tools = FILES["tools.neonbee.app.conf"]
+        self.assertIn("server_name tools.neonbee.app;", tools)
+        self.assertIn("root /opt/neonbee/services/shell-fe-tools/current/dist;", tools)
+        self.assertIn("try_files $uri $uri/ /index.html;", tools)
+        self.assertIn("/etc/ssl/cloudflare/neonbee.app.crt", tools)
+
     def test_given_dev_command_website_tools_hosts_when_generated_then_excluded(self):
         blob = "\n".join(FILES.values())
-        for bad in ("skyoffice360", "command.neonbee", "tools.neonbee", "neonbee.ai", "moonhive", "pulse.neonbee", "app.neonbee.app"):
+        for bad in ("skyoffice360", "command.neonbee", "tools.neonbee.ai", "neonbee.ai", "moonhive", "pulse.neonbee", "app.neonbee.app"):
             self.assertNotIn(bad, blob)
 
     def test_given_gateway_when_generated_then_every_catalog_backend_has_module_route_on_catalog_port(self):
