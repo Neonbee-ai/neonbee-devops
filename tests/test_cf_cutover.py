@@ -1,5 +1,6 @@
 """BDD: Cloudflare HA -> AWS cut-over script (infra/aws/cloudflare/cf_cutover.py)."""
 import importlib.util
+import json
 import os
 import pathlib
 import unittest
@@ -291,6 +292,246 @@ class LoadBalancerTest(unittest.TestCase):
         cf.calls.clear()
         cc.lb_change([cf], "api.neonbee.app", ALLOWED, revert=False, dry_run=True)
         self.assertEqual([m for m, _, _ in cf.calls], [])
+
+
+OLD = cc.OLD_ORIGIN_IP
+AWSH = cc.AWS_ORIGIN_HOST
+MON = {"id": "mon-1", "description": cc.AWS_MONITOR, **{k: v for k, v in cc.MONITOR_BODY.items()}}
+
+
+def ha_pool(origins=None, monitor="mon-old", name="neonbee-ha-failover"):
+    return {"id": "p-" + name, "name": name, "monitor": monitor, "enabled": True,
+            "origins": origins if origins is not None else [
+                {"name": "ha", "address": HA, "weight": 0.01, "enabled": True, "port": 443},
+                {"name": "old", "address": OLD, "weight": 0.99, "enabled": True}]}
+
+
+class FakeD(FakeLB):
+    """FakeLB plus monitor PATCH/DELETE and pool health."""
+
+    def __init__(self, pools=(), monitors=(), records=()):
+        super().__init__(pools=pools, monitors=monitors)
+        self.records = list(records)
+
+    def call(self, method, path, params=None, body=None):
+        if "/monitors/" in path and method in ("PATCH", "DELETE"):
+            self.calls.append((method, path, body))
+            mid = path.rsplit("/", 1)[1]
+            if method == "PATCH":
+                next(m for m in self.monitors if m["id"] == mid).update(body)
+            else:
+                self.monitors = [m for m in self.monitors if m["id"] != mid]
+            return {"result": {}}
+        if path.endswith("/health"):
+            self.calls.append((method, path, body))
+            return {"result": {"healthy": True, "pop_health": {
+                "BOM": {"healthy": True, "origins": [{HA: {"healthy": True}}, {AWSH: {"healthy": False, "failure_reason": "HTTP status code 404"}}]},
+                "LHR": {"healthy": True, "origins": [{HA: {"healthy": True}}, {AWSH: {"healthy": True}}]}}}}
+        return super().call(method, path, params, body)
+
+
+class DnsOnlyTest(unittest.TestCase):
+    def test_given_other_host_when_planning_then_it_is_refused(self):
+        for h in ("api.neonbee.app", "aws-origin.moonhive.in", "x.aws-origin.neonbee.app"):
+            with self.assertRaises(cc.CutoverError):
+                cc.plan_dns_only([], h, EIPS)
+
+    def test_given_no_records_when_planning_then_one_dns_only_ttl60_a_per_eip_is_created(self):
+        ops = cc.plan_dns_only([], AWSH, EIPS)
+        self.assertEqual([o for o, _, _ in ops], ["create", "create"])
+        for _, _, b in ops:
+            self.assertEqual((b["type"], b["proxied"], b["ttl"], b["comment"]), ("A", False, 60, cc.ADDED))
+
+    def test_given_our_proxied_record_when_planning_then_it_is_fixed_and_missing_eip_created(self):
+        r = rec("r1", EIPS[0], name=AWSH, proxied=True, comment=cc.ADDED)
+        ops = cc.plan_dns_only([r], AWSH, EIPS)
+        self.assertEqual([o for o, _, _ in ops], ["update", "create"])
+        self.assertEqual(ops[0][2], {"proxied": False, "ttl": 60})
+
+    def test_given_foreign_or_non_a_record_when_planning_then_it_refuses(self):
+        with self.assertRaises(cc.CutoverError):
+            cc.plan_dns_only([rec("r1", "9.9.9.9", name=AWSH, comment=None)], AWSH, EIPS)
+        with self.assertRaises(cc.CutoverError):
+            cc.plan_dns_only([rec("r1", "x.example", name=AWSH, typ="CNAME", comment=cc.ADDED)], AWSH, EIPS)
+
+    def test_given_dry_run_when_upserting_then_nothing_is_written(self):
+        cf = FakeCF([])
+        res = cc.dns_only_upsert([cf], AWSH, EIPS, dry_run=True)
+        self.assertEqual([m for m, _, _ in cf.calls], [])
+        self.assertEqual(len(res["plan"]), 2)
+
+    def test_given_apply_when_upserting_twice_then_second_run_is_a_no_op_with_prior_and_after(self):
+        cf = FakeCF([])
+        first = cc.dns_only_upsert([cf], AWSH, EIPS, dry_run=False)
+        self.assertEqual((first["prior"], len(first["after"])), ([], 2))
+        cf.calls.clear()
+        second = cc.dns_only_upsert([cf], AWSH, EIPS, dry_run=False)
+        self.assertEqual(second["plan"], [])
+        self.assertEqual([m for m, _, _ in cf.calls], [])
+        self.assertNotIn("DELETE", [m for m, _, _ in cf.calls])
+
+
+class MonitorTest(unittest.TestCase):
+    def test_given_monitor_body_when_read_then_it_targets_dashboard_host_not_api(self):
+        self.assertEqual(cc.MONITOR_BODY["header"], {"Host": ["dashboard.neonbee.app"]})
+        self.assertEqual((cc.MONITOR_BODY["type"], cc.MONITOR_BODY["path"], cc.MONITOR_BODY["expected_codes"],
+                          cc.MONITOR_BODY["interval"], cc.MONITOR_BODY["retries"], cc.MONITOR_BODY["timeout"],
+                          cc.MONITOR_BODY["follow_redirects"], cc.MONITOR_BODY["allow_insecure"]),
+                         ("https", "/__lb_health", "200", 60, 2, 5, False, True))
+
+    def test_given_no_monitor_when_ensuring_then_it_is_created(self):
+        cf = FakeD()
+        res = cc.monitor_ensure([cf], "neonbee.app", dry_run=False)
+        self.assertEqual((res["plan"], res["prior"]), ("create", None))
+        self.assertEqual(res["after"]["description"], cc.AWS_MONITOR)
+
+    def test_given_stale_host_header_when_ensuring_then_only_that_monitor_is_patched(self):
+        other = {"id": "mon-other", "description": "something-else", "path": "/x"}
+        stale = dict(MON, header={"Host": ["api.neonbee.app"]})
+        cf = FakeD(monitors=[other, stale])
+        res = cc.monitor_ensure([cf], "neonbee.app", dry_run=False)
+        self.assertEqual(res["plan"], "update")
+        self.assertEqual([(m, p.rsplit("/", 1)[1]) for m, p, _ in cf.calls], [("PATCH", "mon-1")])
+        self.assertEqual(res["prior"]["header"], {"Host": ["api.neonbee.app"]})
+        self.assertEqual(cf.monitors[0], other)
+
+    def test_given_correct_monitor_or_dry_run_when_ensuring_then_nothing_is_written(self):
+        cf = FakeD(monitors=[dict(MON)])
+        self.assertEqual(cc.monitor_ensure([cf], "neonbee.app", dry_run=False)["plan"], "no-op")
+        cf2 = FakeD()
+        cc.monitor_ensure([cf2], "neonbee.app", dry_run=True)
+        self.assertEqual(cf2.calls, [])
+
+
+class PoolSwapTest(unittest.TestCase):
+    def test_given_castle_rock_when_guarding_then_it_is_refused_before_any_write(self):
+        with self.assertRaises(cc.CutoverError):
+            cc.guard_pool("castle-rock")
+        cf = FakeD(pools=[ha_pool(name="castle-rock")], monitors=[dict(MON)])
+        with self.assertRaises(cc.CutoverError):
+            cc._find_pool(cf, "acct", "castle-rock")
+        self.assertEqual(cf.calls, [])
+        with self.assertRaises(cc.CutoverError):
+            cc.plan_pool_swap(ha_pool(name="castle-rock"), "mon-1")
+
+    def test_given_old_origin_when_swapping_then_ha_001_and_aws_hostname_099_with_monitor(self):
+        cf = FakeD(pools=[ha_pool(), ha_pool(name="castle-rock")], monitors=[dict(MON)])
+        res = cc.pool_origin_swap([cf], "neonbee.app", dry_run=False)
+        o = res["after"]["origins"]
+        self.assertEqual([(x["address"], x["weight"], x["enabled"]) for x in o], [(HA, 0.01, True), (AWSH, 0.99, True)])
+        self.assertEqual((o[0]["name"], o[0]["port"]), ("ha", 443))  # HA origin fields kept
+        self.assertEqual((o[1]["name"], res["after"]["monitor"]), ("aws-origin", "mon-1"))
+        self.assertEqual(res["prior"]["origins"][1]["address"], OLD)
+        self.assertEqual([p for _, p, _ in cf.calls if "castle" in p], [])
+
+    def test_given_swap_when_planned_then_new_origin_has_no_per_origin_host_header(self):
+        want = cc.plan_pool_swap(ha_pool(), "mon-1")
+        self.assertNotIn("header", want["origins"][1])
+
+    def test_given_foreign_origin_or_missing_monitor_when_swapping_then_it_refuses(self):
+        with self.assertRaises(cc.CutoverError):
+            cc.plan_pool_swap(ha_pool(origins=[{"address": "1.2.3.4", "weight": 1}]), "mon-1")
+        with self.assertRaises(cc.CutoverError):
+            cc.plan_pool_swap(ha_pool(), None)
+
+    def test_given_already_swapped_when_swapping_again_then_it_is_a_no_op(self):
+        cf = FakeD(pools=[ha_pool()], monitors=[dict(MON)])
+        cc.pool_origin_swap([cf], "neonbee.app", dry_run=False)
+        cf.calls.clear()
+        res = cc.pool_origin_swap([cf], "neonbee.app", dry_run=False)
+        self.assertEqual(res["plan"], "no-op")
+        self.assertEqual([m for m, _, _ in cf.calls], [])
+
+    def test_given_dry_run_when_swapping_then_nothing_is_written_but_prior_is_reported(self):
+        cf = FakeD(pools=[ha_pool()], monitors=[dict(MON)])
+        res = cc.pool_origin_swap([cf], "neonbee.app", dry_run=True)
+        self.assertEqual(cf.calls, [])
+        self.assertEqual(res["prior"]["name"], "neonbee-ha-failover")
+
+
+class PoolRestoreTest(unittest.TestCase):
+    @staticmethod
+    def b64(obj):
+        import base64
+        return base64.b64encode(json.dumps(obj).encode()).decode()
+
+    def test_given_swap_result_when_restoring_then_prior_origins_and_monitor_come_back(self):
+        cf = FakeD(pools=[ha_pool()], monitors=[dict(MON)])
+        prior = cc.pool_origin_swap([cf], "neonbee.app", dry_run=False)["prior"]
+        res = cc.pool_restore([cf], "neonbee.app", self.b64(prior), dry_run=False)
+        self.assertEqual(res["after"]["origins"], prior["origins"])
+        self.assertEqual(res["after"]["monitor"], "mon-old")
+
+    def test_given_other_pool_or_foreign_origin_when_restoring_then_it_refuses_without_writing(self):
+        cf = FakeD(pools=[ha_pool()], monitors=[dict(MON)])
+        with self.assertRaises(cc.CutoverError):
+            cc.pool_restore([cf], "neonbee.app", self.b64(ha_pool(name="castle-rock")), dry_run=False)
+        with self.assertRaises(cc.CutoverError):
+            cc.pool_restore([cf], "neonbee.app", self.b64(ha_pool(origins=[{"address": "1.2.3.4"}])), dry_run=False)
+        with self.assertRaises(cc.CutoverError):
+            cc.pool_restore([cf], "neonbee.app", "not-base64-json", dry_run=False)
+        self.assertEqual(cf.calls, [])
+
+    def test_given_dry_run_when_restoring_then_nothing_is_written(self):
+        cf = FakeD(pools=[ha_pool(origins=[{"address": HA}, {"address": AWSH}])], monitors=[dict(MON)])
+        res = cc.pool_restore([cf], "neonbee.app", self.b64(ha_pool()), dry_run=True)
+        self.assertEqual((res["plan"], cf.calls), ("update", []))
+
+
+class PoolHealthTest(unittest.TestCase):
+    def test_given_pop_health_when_summarising_then_each_origin_has_healthy_and_failure_reason(self):
+        cf = FakeD(pools=[ha_pool(), ha_pool(name="castle-rock")])
+        res = cc.pool_health([cf], "neonbee.app")
+        self.assertTrue(res["origins"][HA]["healthy"])
+        self.assertTrue(res["origins"][AWSH]["healthy"])
+        self.assertEqual(res["origins"][AWSH]["failure_reason"], "HTTP status code 404")
+        self.assertEqual([m for m, _, _ in cf.calls], ["GET"])
+        self.assertTrue(all("p-neonbee-ha-failover" in p for _, p, _ in cf.calls))
+
+    def test_given_no_healthy_pop_when_summarising_then_origin_is_unhealthy(self):
+        out = cc.summarize_health({"pop_health": {"BOM": {"origins": [{AWSH: {"healthy": False, "failure_reason": "timeout"}}]}}})
+        self.assertEqual((out[AWSH]["healthy"], out[AWSH]["failure_reason"]), (False, "timeout"))
+
+
+class MonitorDeleteTest(unittest.TestCase):
+    def test_given_monitor_used_by_a_pool_when_deleting_then_it_refuses(self):
+        cf = FakeD(pools=[ha_pool(monitor="mon-1")], monitors=[dict(MON)])
+        with self.assertRaises(cc.CutoverError):
+            cc.monitor_delete([cf], "neonbee.app", dry_run=False)
+        self.assertEqual([m for m, _, _ in cf.calls], [])
+
+    def test_given_unreferenced_monitor_when_deleting_then_only_it_is_deleted(self):
+        other = {"id": "mon-other", "description": "keep"}
+        cf = FakeD(pools=[ha_pool(monitor="mon-old")], monitors=[dict(MON), other])
+        res = cc.monitor_delete([cf], "neonbee.app", dry_run=False)
+        self.assertEqual(cf.monitors, [other])
+        self.assertEqual((res["prior"]["id"], res["after"]), ("mon-1", None))
+
+    def test_given_dry_run_or_absent_monitor_when_deleting_then_nothing_is_written(self):
+        cf = FakeD(pools=[ha_pool()], monitors=[dict(MON)])
+        self.assertEqual(cc.monitor_delete([cf], "neonbee.app", dry_run=True)["plan"], "delete")
+        self.assertEqual(cf.calls, [])
+        self.assertEqual(cc.monitor_delete([FakeD()], "neonbee.app", dry_run=False)["plan"], "no-op")
+
+
+class LbPoolsEipsTest(unittest.TestCase):
+    def test_given_eips_when_setting_up_pools_then_aws_pool_uses_them_not_pool_eips(self):
+        cf = FakeLB(pools=[HA_EXISTING])
+        res = cc.lb_pools([cf], "neonbee.app", dry_run=False, eips=EIPS)
+        pools = {p["name"]: p for p in res["pools"]}
+        self.assertEqual(sorted(pools[cc.AWS_POOL]["origins"]), sorted(EIPS))
+
+    def test_given_source_when_read_then_main_passes_eips_to_lb_pools(self):
+        src = (ROOT / "infra/aws/cloudflare/cf_cutover.py").read_text()
+        self.assertIn('lb_pools(clients, a.host or "neonbee.app", not a.apply, eips)', src)
+
+
+class OptionDWorkflowTest(unittest.TestCase):
+    def test_given_workflow_when_read_then_new_actions_and_prior_b64_are_wired(self):
+        for act in ("dns-only-upsert", "monitor-ensure", "pool-origin-swap", "pool-restore", "pool-health", "monitor-delete"):
+            self.assertIn(act, WF)
+        self.assertIn("prior_b64:", WF)
+        self.assertIn("PRIOR_B64: ${{ inputs.prior_b64 }}", WF)
 
 
 if __name__ == "__main__":
