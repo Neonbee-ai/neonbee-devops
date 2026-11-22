@@ -149,6 +149,19 @@ class InventoryAndCertTest(unittest.TestCase):
         self.assertIsNone(names["api.neonbee.app"]["excluded"])
         self.assertIsNotNone(names["dev-dashboard.neonbee.app"]["excluded"])
 
+    def test_given_token_without_dns_read_when_inventorying_then_other_token_is_used_and_run_continues(self):
+        class NoDns(FakeCF):
+            def list(self, path, params=None):
+                if path.endswith("/dns_records"):
+                    raise cc.CutoverError("10000: Authentication error")
+                return super().list(path, params)
+        bad, good = NoDns([]), FakeCF([rec("r1", HA, name="api.neonbee.app")], label="CF_PREVIEW_API_TOKEN")
+        rep = cc.inventory([bad, good], EIPS, ALLOWED)
+        self.assertEqual(rep[0]["dns_token"], "CF_PREVIEW_API_TOKEN")
+        self.assertEqual(rep[0]["records"][0]["name"], "api.neonbee.app")
+        rep = cc.inventory([NoDns([])], EIPS, ALLOWED)
+        self.assertIn("unreadable", rep[0]["records"])
+
     def test_given_csr_when_signing_then_zone_and_wildcard_are_requested(self):
         cf = FakeCF([])
         res = cc.origin_cert([cf], "neonbee.app", "-----BEGIN CERTIFICATE REQUEST-----", dry_run=False)

@@ -108,9 +108,25 @@ def zones_by_token(clients):
             print(f"warn: {e}", file=sys.stderr)
             continue
         for z in zones:
-            if z["name"] not in SKIP_ZONES and z["name"] not in seen:
-                seen[z["name"]] = (cf, z)
+            if z["name"] in SKIP_ZONES:
+                continue
+            if z["name"] not in seen:
+                seen[z["name"]] = (cf, dict(z, _alts=[]))
+            else:
+                seen[z["name"]][1]["_alts"].append(cf)
     return seen
+
+
+def try_tokens(cf, z, fn):
+    """Run fn(client) with the zone's first token, then any other token that sees the zone.
+    Returns (result, label) or raises the last error (with every token's failure)."""
+    errs = []
+    for c in [cf] + list(z.get("_alts") or []):
+        try:
+            return fn(c), c.label
+        except CutoverError as e:
+            errs.append(str(e))
+    raise CutoverError(" | ".join(errs))
 
 
 def zone_for(host, zones):
@@ -138,7 +154,13 @@ def inventory(clients, eips, allowed):
         except CutoverError as e:
             row["origin_ca_certs"] = f"unreadable ({e})"
         recs = []
-        for r in cf.list(f"/zones/{z['id']}/dns_records"):
+        try:
+            all_recs, row["dns_token"] = try_tokens(cf, z, lambda c: c.list(f"/zones/{z['id']}/dns_records"))
+        except CutoverError as e:
+            row["records"] = f"unreadable ({e})"
+            report.append(row)
+            continue
+        for r in all_recs:
             if r.get("content") not in watch:
                 continue
             excluded, in_bundle = None, r["name"] in allowed
@@ -302,7 +324,7 @@ def lb_inventory(clients):
         cf, z = zones[name]
         accounts.setdefault(_account(z), cf)
         try:
-            lbs = cf.list(f"/zones/{z['id']}/load_balancers")
+            lbs, _ = try_tokens(cf, z, lambda c: c.list(f"/zones/{z['id']}/load_balancers"))
         except CutoverError as e:
             lbs = f"unreadable ({e})"
         out["zones"].append({"zone": name, "load_balancers": lbs})
@@ -426,7 +448,7 @@ def main(argv=None):
     eips = tuple(x.strip() for x in a.eips.split(",") if x.strip())
     allowed = bundle_hosts()
     os.makedirs(a.out, exist_ok=True)
-    try:
+    def run(clients):
         if a.action == "inventory":
             res = inventory(clients, eips, allowed)
         elif a.action == "origin-cert":
@@ -443,6 +465,17 @@ def main(argv=None):
             res = lb_change(clients, a.host, allowed, a.action == "lb-revert", not a.apply)
         else:
             res = dns_change(clients, a.host, eips, allowed, a.action == "dns-revert", not a.apply)
+        return res
+
+    try:
+        try:
+            res = run(clients)
+        except CutoverError as e:
+            # Permission errors with the first token: retry once with the other token(s) first.
+            if len(clients) < 2 or not re.search(r"Authentication error|\b(10000|9109|10001)\b", str(e)):
+                raise
+            print(f"warn: {e} - retrying with {clients[1].label} first", file=sys.stderr)
+            res = run(clients[1:] + clients[:1])
     except CutoverError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         with open(os.path.join(a.out, "error.txt"), "w") as fh:
