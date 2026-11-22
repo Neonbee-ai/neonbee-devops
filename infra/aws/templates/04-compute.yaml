@@ -241,6 +241,19 @@ Resources:
               NB_CWAGENT_PARAM=/neonbee/prod/cwagent-config
               NB_SCHEDULER_DB_LOCK=true
               EOF
+              # Agent hot-update: the latest vetted agent (s3://<bucket>/agent/vm-agent.tar.gz, the same
+              # tarball the image bakes) replaces the baked copy, so agent fixes reach new nodes without
+              # an AMI rebuild. Any failure keeps the baked agent.
+              NBA=$(mktemp -d)
+              if aws s3 cp "s3://${Bucket}/agent/vm-agent.tar.gz" "$NBA/a.tgz" --region ${AWS::Region} --only-show-errors \
+                 && tar -C "$NBA" -xzf "$NBA/a.tgz" && ( for f in "$NBA"/bin/*.sh; do bash -n "$f" || exit 1; done ); then
+                install -m 0755 "$NBA"/bin/* /opt/nb-agent/bin/ \
+                  && install -m 0644 "$NBA"/systemd/*.service "$NBA"/systemd/*.timer /etc/systemd/system/ \
+                  && systemctl daemon-reload && echo "nb-agent hot-updated from s3" || echo "nb-agent hot-update failed (baked agent kept)"
+              else
+                echo "nb-agent hot-update skipped (baked agent kept)"
+              fi
+              rm -rf "$NBA"
               systemctl enable --now nb-boot.service nb-health.timer
             - Bucket: { 'Fn::ImportValue': !Sub '${EnvName}-ReleaseBucketName' }
               Prefix: { 'Fn::ImportValue': !Sub '${EnvName}-AppEnvSecretPrefix' }

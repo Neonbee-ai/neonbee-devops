@@ -16,25 +16,8 @@ rm -f "$NB_STATE/boot.done" "$NB_STATE/www/__lb_health"
 chmod 711 /opt/neonbee 2>/dev/null || true
 : "${NB_RELEASE_BUCKET:?NB_RELEASE_BUCKET missing in $NB_CONF}"
 
-# Claim a free pool Elastic IP (tag nb-pool=<env>) so this node has a stable public IP.
-# No Cloudflare LB: DNS points at the pool IPs. Conflicts (another node won) -> try the next.
-nb_claim_eip() {
-  local iid ids id
-  iid=$(nb_imds instance-id) || { nb_log "eip: no instance id (continuing)"; return 0; }
-  for round in 1 2 3; do
-    ids=$(aws ec2 describe-addresses --filters "Name=tag-key,Values=nb-pool" \
-      --query 'Addresses[?AssociationId==`null`].AllocationId' --output text 2>/dev/null | tr '\t' '\n' | shuf)
-    for id in $ids; do
-      if aws ec2 associate-address --instance-id "$iid" --allocation-id "$id" \
-           --no-allow-reassociation >/dev/null 2>&1; then
-        nb_log "eip: associated $id"; return 0
-      fi
-    done
-    sleep $((round * 3))
-  done
-  nb_log "eip: no free pool address (continuing with the auto-assigned IP)"
-}
-nb_claim_eip
+# Claim a pool Elastic IP, serving ones (tag nb-serving=true, what Cloudflare points at) first.
+"$(dirname "$0")/nb-eip.sh" boot
 
 if [ -n "${NB_CWAGENT_PARAM:-}" ] && [ -x /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl ]; then
   /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 \

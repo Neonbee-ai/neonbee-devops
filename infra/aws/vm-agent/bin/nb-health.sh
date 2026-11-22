@@ -46,6 +46,15 @@ else
   OK=false; REASONS+=("no catalog")
 fi
 
+# Every 60 s on a real node: move off a spare EIP onto a serving one that has freed up
+# (nb-eip.sh reconcile; a node already on a serving EIP is never moved).
+if [ -n "${NB_RELEASE_BUCKET:-}" ] && [ -x "$(dirname "$0")/nb-eip.sh" ]; then
+  STAMP="$NB_STATE/eip.reconcile"
+  if [ ! -f "$STAMP" ] || [ $(( $(date +%s) - $(stat -c %Y "$STAMP" 2>/dev/null || echo 0) )) -ge 60 ]; then
+    touch "$STAMP"; "$(dirname "$0")/nb-eip.sh" reconcile || true
+  fi
+fi
+
 if $OK; then
   printf 'ok\n' > "$FLAG.tmp" && mv -f "$FLAG.tmp" "$FLAG"
 else
