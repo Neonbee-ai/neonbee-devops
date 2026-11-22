@@ -183,6 +183,20 @@ class WorkflowTest(unittest.TestCase):
         for a in ("inventory", "origin-cert", "dns-switch", "dns-revert"):
             self.assertIn(a, WF)
 
+    def test_given_workflow_when_read_then_lb_token_is_passed_first(self):
+        self.assertLess(WF.index("CF_LB_API_TOKEN"), WF.index("CF_SAAS_API_TOKEN"))
+
+    def test_given_empty_tokens_when_verifying_then_status_only_is_reported(self):
+        import contextlib, io
+        env = {k: os.environ.pop(k, None) for k in ("CF_LB_API_TOKEN", "CF_SAAS_API_TOKEN", "CF_PREVIEW_API_TOKEN")}
+        try:
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                self.assertEqual(cc.main(["verify"]), 0)
+            self.assertIn('"CF_LB_API_TOKEN": "empty"', buf.getvalue())
+        finally:
+            os.environ.update({k: v for k, v in env.items() if v})
+
     def test_given_workflow_when_read_then_tokens_are_never_echoed(self):
         self.assertNotRegex(WF, r"echo[^\n]*secrets\.")
         self.assertNotRegex(WF, r"echo[^\n]*\$CF_")

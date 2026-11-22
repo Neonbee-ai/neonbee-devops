@@ -8,9 +8,9 @@ on:
   workflow_dispatch:
     inputs:
       action:
-        description: 'inventory | origin-cert | dns-switch | dns-revert | lb-inventory | lb-pools | lb-switch | lb-revert'
+        description: 'inventory | origin-cert | dns-switch | dns-revert | lb-inventory | lb-pools | lb-switch | lb-revert | verify'
         type: choice
-        options: [inventory, origin-cert, dns-switch, dns-revert, lb-inventory, lb-pools, lb-switch, lb-revert]
+        options: [inventory, origin-cert, dns-switch, dns-revert, lb-inventory, lb-pools, lb-switch, lb-revert, verify]
         default: inventory
       hostname:
         description: 'Host for dns-switch/dns-revert (e.g. sso.neonbee.app); zone for origin-cert (neonbee.app)'
@@ -44,6 +44,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Run ${{ inputs.action }}
         env:
+          CF_LB_API_TOKEN: ${{ secrets.CF_LB_API_TOKEN }}
           CF_SAAS_API_TOKEN: ${{ secrets.CF_SAAS_API_TOKEN }}
           CF_PREVIEW_API_TOKEN: ${{ secrets.CF_PREVIEW_API_TOKEN }}
           ACTION: ${{ inputs.action }}
