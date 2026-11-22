@@ -10,7 +10,7 @@ import unittest
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 BIN = os.path.join(ROOT, "vm-agent", "bin")
-TOOLS = all(shutil.which(t) for t in ("jq", "openssl", "shuf", "timeout"))
+TOOLS = all(shutil.which(t) for t in ("jq", "openssl"))
 
 
 def read(*p):
@@ -36,7 +36,7 @@ def read_abs(p):
         return f.read()
 
 
-@unittest.skipUnless(TOOLS, "jq, openssl, shuf and timeout are required")
+@unittest.skipUnless(TOOLS, "jq and openssl are required")
 class FreshNodeTlsTest(unittest.TestCase):
     """ensure-tls.sh is the nb-nginx-sites post-extract hook (nb-deploy.sh runs it before nginx -t)."""
 
@@ -117,7 +117,7 @@ def addr(alloc, tags, instance=None):
     return a
 
 
-@unittest.skipUnless(TOOLS, "jq, openssl, shuf and timeout are required")
+@unittest.skipUnless(TOOLS, "jq and openssl are required")
 class EipClaimTest(unittest.TestCase):
     ME = "i-new"
 
@@ -129,6 +129,9 @@ class EipClaimTest(unittest.TestCase):
         # IMDS stub: token PUT, then instance-id.
         write_exe(os.path.join(self.stub, "curl"), '#!/bin/bash\n[[ "$*" == *instance-id* ]] && echo "$ME_ID"; exit 0\n')
         write_exe(os.path.join(self.stub, "sleep"), "#!/bin/sh\nexit 0\n")
+        # Portable stand-ins (the CI runner may be macOS): identity shuf, pass-through timeout.
+        write_exe(os.path.join(self.stub, "shuf"), "#!/bin/sh\ncat\n")
+        write_exe(os.path.join(self.stub, "timeout"), '#!/bin/sh\nshift\nexec "$@"\n')
         # aws stub: describe-addresses -> fixture; associate-address logs and fails for $DENY ids.
         write_exe(os.path.join(self.stub, "aws"),
                   '#!/bin/bash\nif [[ "$*" == *describe-addresses* ]]; then cat "$FIXTURE"; exit 0; fi\n'
