@@ -18,7 +18,7 @@ Actions (run by .github/workflows/neonbee-cf-cutover.yml, tokens come from GH se
 
 Safety rules (enforced here, covered by tests/test_cf_cutover.py):
   * only hostnames served by the AWS nb-nginx-sites bundle (server_name in infra/aws/nginx/sites)
-  * never Dev/preview hosts (dev-*, pr-*, *.skyoffice360.com, tools.neonbee.app) or moonhive.in
+  * never Dev/preview hosts (dev-*, pr-*, *.skyoffice360.com) or moonhive.in
   * never deletes a pre-existing record: switch edits the HA record's content and ADDS the second
     EIP record (comment "cf-cutover:added"); revert edits content back to HA and removes only the
     records this tool added
@@ -46,11 +46,12 @@ ADDED = "cf-cutover:added"
 WAS = "cf-cutover: was "
 SKIP_ZONES = ("moonhive.in", "skyoffice360.com")
 DENY = (re.compile(r"(^|\.)(dev|pr)-"), re.compile(r"(^|\.)dev\."), re.compile(r"skyoffice360\.com$"),
-        re.compile(r"moonhive\.in$"), re.compile(r"^tools\.neonbee\.app$"), re.compile(r"preview"))
-# Internal Tools VM target (phase 3): the website apex, Pulse and Free Tools leave HA for the ITVM,
-# never AWS. Only these hosts, only with --eips exactly this IP; revert still goes back to HA.
+        re.compile(r"moonhive\.in$"), re.compile(r"preview"))
+# Internal Tools VM target (phase 3): the website apex and Pulse leave HA for the ITVM, never AWS.
+# Only these hosts, only with --eips exactly this IP; revert still goes back to HA.
+# tools.neonbee.app (Free Tools = shell-fe-tools) is platform -> AWS bundle (user decision 2026-11-22).
 ITVM_IP = "167.114.98.177"
-ITVM_HOSTS = frozenset({"neonbee.ai", "pulse.neonbee.app", "tools.neonbee.app"})
+ITVM_HOSTS = frozenset({"neonbee.ai", "pulse.neonbee.app"})
 SITES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "nginx", "sites")
 
 

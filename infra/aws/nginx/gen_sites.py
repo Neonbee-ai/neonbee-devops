@@ -4,7 +4,8 @@
 Source of truth for routing = the prod HA VM nginx (api/dashboard/sso/cdn/sign/portal/
 partner/mcp/apex/neonbee-store), re-rooted for AWS nodes: static frontends are served
 from /opt/neonbee/services/<svc>/current/dist, backends/Next apps from 127.0.0.1:<port>.
-Only catalog apps are emitted (no Dev, Command, website, tools or client sites).
+Only catalog apps are emitted (no Dev, Command, website or client sites). tools.neonbee.app
+(Free Tools = shell-fe-tools) is platform and served here since phase 3 (2026-11-22).
 
     python3 gen_sites.py [--out DIR]      # default: ./sites next to this file
 """
@@ -231,6 +232,17 @@ def store_conf(cat):
         "        proxy_cache_bypass $http_upgrade;\n        proxy_read_timeout 60s;\n    }\n}\n" % web])
 
 
+def tools_conf(cat):
+    """tools.neonbee.app = shell-fe-tools (shell, tools flavor). Mirrors the HA vhost: SPA, index no-cache."""
+    return "".join([HEADER, redirect80("tools.neonbee.app"), tls_server_head("tools.neonbee.app", CF_CERT),
+        "    root %s;\n    index index.html;\n\n" % dist("shell-fe-tools"),
+        "    location = /index.html {\n"
+        '        add_header Cache-Control "no-cache, no-store, must-revalidate" always;\n        expires 0;\n    }\n\n',
+        "    location / {\n        try_files $uri $uri/ /index.html;\n    }\n\n",
+        "    location ~* \\.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot|mjs)$ {\n"
+        '        expires 1y;\n        add_header Cache-Control "public, immutable" always;\n    }\n}\n'])
+
+
 def render_all(cat):
     return {
         "00-nb-http.conf": http_conf(cat),
@@ -244,6 +256,7 @@ def render_all(cat):
         "mcp.neonbee.app.conf": mcp_conf(cat),
         "neonbee.app.conf": apex_conf(cat),
         "neonbee-store.conf": store_conf(cat),
+        "tools.neonbee.app.conf": tools_conf(cat),
     }
 
 
