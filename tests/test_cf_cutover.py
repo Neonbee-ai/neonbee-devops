@@ -647,3 +647,41 @@ class DnsOnlyDeleteTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ItvmTargetTest(unittest.TestCase):
+    """Phase 3: website apex, Pulse and Free Tools go HA -> Internal Tools VM (never AWS)."""
+    ITVM = (cc.ITVM_IP,)
+
+    def test_given_itvm_host_when_switching_to_itvm_then_ha_record_is_edited_to_itvm(self):
+        cf = FakeCF([rec("r1", HA, name="neonbee.ai")], zones=("neonbee.ai",))
+        res = cc.dns_change([cf], "neonbee.ai", self.ITVM, set(), revert=False, dry_run=False)
+        self.assertTrue(res["verified"])
+        self.assertEqual([(r["id"], r["content"], r["proxied"]) for r in cf.records], [("r1", cc.ITVM_IP, True)])
+
+    def test_given_switched_itvm_host_when_reverting_then_ha_is_restored(self):
+        cf = FakeCF([rec("r1", HA, name="tools.neonbee.app")])
+        cc.dns_change([cf], "tools.neonbee.app", self.ITVM, set(), revert=False, dry_run=False)
+        res = cc.dns_change([cf], "tools.neonbee.app", self.ITVM, set(), revert=True, dry_run=False)
+        self.assertTrue(res["verified"])
+        self.assertEqual([r["content"] for r in cf.records], [HA])
+
+    def test_given_non_itvm_host_when_targeting_itvm_then_it_refuses(self):
+        for h in ("dashboard.neonbee.app", "neonbee.store", "dev-dashboard.neonbee.app", "shop.moonhive.in"):
+            with self.assertRaises(cc.CutoverError, msg=h):
+                cc.check_host(h, {"dashboard.neonbee.app", "neonbee.store"}, self.ITVM)
+
+    def test_given_itvm_mixed_with_aws_eips_when_switching_then_it_refuses(self):
+        with self.assertRaises(cc.CutoverError):
+            cc.check_host("neonbee.ai", set(), (cc.ITVM_IP, EIPS[0]))
+
+    def test_given_aws_eips_when_switching_tools_app_then_deny_list_still_applies(self):
+        with self.assertRaises(cc.CutoverError):
+            cc.check_host("tools.neonbee.app", {"tools.neonbee.app"}, EIPS)
+
+
+class StoreSitesTest(unittest.TestCase):
+    def test_given_aws_bundle_when_scanned_then_store_apex_and_saas_fallback_are_switchable(self):
+        hosts = cc.bundle_hosts()
+        self.assertIn("neonbee.store", hosts)
+        self.assertIn("customers-fallback.neonbee.store", hosts)

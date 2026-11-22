@@ -19,8 +19,8 @@ ensure() {  # $1 secret-name  $2 crt path  $3 key path  $4 CN
   # a pair is only swapped in when the key matches the cert, so a bad secret never breaks nginx.
   if json=$(aws secretsmanager get-secret-value --region "$REGION" --secret-id "$PREFIX/tls/$name" \
       --query SecretString --output text 2>/dev/null) && [ -n "$json" ] \
-     && printf '%s' "$json" | jq -er '.crt' >"$crt.tmp" 2>/dev/null \
-     && printf '%s' "$json" | jq -er '.key' >"$key.tmp" 2>/dev/null; then
+     && printf '%s' "$json" | jq -ej '.crt' >"$crt.tmp" 2>/dev/null \
+     && printf '%s' "$json" | jq -ej '.key' >"$key.tmp" 2>/dev/null; then
     if [ -s "$crt" ] && cmp -s "$crt.tmp" "$crt" && cmp -s "$key.tmp" "$key"; then
       rm -f "$crt.tmp" "$key.tmp"; return 0
     fi
