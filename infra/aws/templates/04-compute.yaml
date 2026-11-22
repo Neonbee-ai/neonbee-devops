@@ -106,6 +106,10 @@ Resources:
                 Resource: !Sub
                   - 'arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${Prefix}*'
                   - Prefix: { 'Fn::ImportValue': !Sub '${EnvName}-AppEnvSecretPrefix' }
+              # Cloudflare Origin CA certs read by nginx/ensure-tls.sh: neonbee/prod/tls/<name>.
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Sub 'arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:neonbee/prod/tls/*'
               - Effect: Allow
                 Action: secretsmanager:ListSecrets   # cannot be resource-scoped
                 Resource: '*'
