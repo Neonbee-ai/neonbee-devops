@@ -281,9 +281,138 @@ def origin_cert(clients, zone, csr_pem, dry_run):
             "expires_on": res.get("expires_on"), "certificate": res["certificate"]}
 
 
+# ---------------------------------------------------------------- Cloudflare Load Balancer path
+AWS_POOL, HA_POOL, AWS_MONITOR = "nb-aws-prod", "nb-ha-fallback", "nb-aws-lb-health"
+POOL_EIPS = ("3.110.17.10", "13.233.75.233", "13.126.56.13", "13.234.180.150")
+MONITOR_BODY = {"type": "https", "method": "GET", "path": "/__lb_health", "expected_codes": "200",
+                "header": {"Host": ["api.neonbee.app"]}, "interval": 60, "retries": 2, "timeout": 5,
+                "follow_redirects": False, "allow_insecure": True, "description": AWS_MONITOR}
+
+
+def _account(zone):
+    acct = (zone.get("account") or {}).get("id")
+    if not acct:
+        raise CutoverError(f"{zone.get('name')}: zone has no account id")
+    return acct
+
+
+def lb_inventory(clients):
+    zones, out, accounts = zones_by_token(clients), {"zones": [], "accounts": {}}, {}
+    for name in sorted(zones):
+        cf, z = zones[name]
+        accounts.setdefault(_account(z), cf)
+        try:
+            lbs = cf.list(f"/zones/{z['id']}/load_balancers")
+        except CutoverError as e:
+            lbs = f"unreadable ({e})"
+        out["zones"].append({"zone": name, "load_balancers": lbs})
+    for acct, cf in accounts.items():
+        row = {}
+        for kind in ("pools", "monitors"):
+            try:
+                row[kind] = cf.list(f"/accounts/{acct}/load_balancers/{kind}")
+            except CutoverError as e:
+                row[kind] = f"unreadable ({e})"
+        out["accounts"][acct] = row
+    return out
+
+
+def plan_pools(pools, monitors, eips=POOL_EIPS):
+    """Pure: ops to create/update the AWS + HA pools and the AWS monitor. Never edits other pools."""
+    ops = []
+    mon = next((m for m in monitors if m.get("description") == AWS_MONITOR), None)
+    if not mon:
+        ops.append(("monitor-create", None, dict(MONITOR_BODY)))
+    ha_src = next((p for p in pools if p.get("name") != HA_POOL
+                   and any(o.get("address") == HA_IP for o in p.get("origins") or [])), None)
+    ha_monitor = (ha_src or {}).get("monitor") or (mon or {}).get("id") or "$aws_monitor"
+    want = {AWS_POOL: ([{"name": "aws-" + ip.replace(".", "-"), "address": ip, "enabled": True, "weight": 1}
+                        for ip in eips], (mon or {}).get("id") or "$aws_monitor"),
+            HA_POOL: ([{"name": "ha-84-247-131-148", "address": HA_IP, "enabled": True, "weight": 1}],
+                      ha_monitor)}
+    for name, (origins, monitor) in want.items():
+        body = {"name": name, "origins": origins, "monitor": monitor, "enabled": True,
+                "minimum_origins": 1, "description": "cf-cutover " + name}
+        cur = next((p for p in pools if p.get("name") == name), None)
+        if not cur:
+            ops.append(("pool-create", None, body))
+        elif sorted(o["address"] for o in cur.get("origins") or []) != sorted(o["address"] for o in origins) \
+                or cur.get("monitor") != monitor or not cur.get("enabled"):
+            ops.append(("pool-update", cur, body))
+    return ops
+
+
+def lb_pools(clients, zone_name, dry_run, eips=POOL_EIPS):
+    zones = zones_by_token(clients)
+    if zone_name not in zones:
+        raise CutoverError(f"{zone_name}: no visible zone")
+    cf, z = zones[zone_name]
+    acct = _account(z)
+    pools = cf.list(f"/accounts/{acct}/load_balancers/pools")
+    monitors = cf.list(f"/accounts/{acct}/load_balancers/monitors")
+    ops = plan_pools(pools, monitors, eips)
+    res = {"account": acct, "dry_run": dry_run, "plan": [(o, (b or {}).get("name") or (b or {}).get("description"))
+                                                           for o, _, b in ops]}
+    if dry_run:
+        return res
+    mon_id = next((m["id"] for m in monitors if m.get("description") == AWS_MONITOR), None)
+    for op, cur, body in ops:
+        if op == "monitor-create":
+            mon_id = cf.call("POST", f"/accounts/{acct}/load_balancers/monitors", body=body)["result"]["id"]
+            continue
+        if body.get("monitor") == "$aws_monitor":
+            body["monitor"] = mon_id
+        if op == "pool-create":
+            cf.call("POST", f"/accounts/{acct}/load_balancers/pools", body=body)
+        else:
+            cf.call("PATCH", f"/accounts/{acct}/load_balancers/pools/{cur['id']}", body=body)
+    res["pools"] = [{"id": p["id"], "name": p["name"], "origins": [o["address"] for o in p.get("origins") or []],
+                     "monitor": p.get("monitor")}
+                    for p in cf.list(f"/accounts/{acct}/load_balancers/pools") if p["name"] in (AWS_POOL, HA_POOL)]
+    return res
+
+
+def lb_change(clients, host, allowed, revert, dry_run):
+    """Point host's LB at nb-aws-prod (fallback nb-ha-fallback), or back to HA. Creates the LB if the
+    host has none (an LB overrides a same-name DNS record, which is left untouched)."""
+    host = check_host(host, allowed)
+    cf, z = zone_for(host, zones_by_token(clients))
+    acct = _account(z)
+    pools = {p["name"]: p["id"] for p in cf.list(f"/accounts/{acct}/load_balancers/pools")}
+    if AWS_POOL not in pools or HA_POOL not in pools:
+        raise CutoverError("pools missing - run lb-pools first")
+    lbs = [lb for lb in cf.list(f"/zones/{z['id']}/load_balancers") if lb.get("name") == host]
+    prior = lbs[0] if lbs else None
+    default = [pools[HA_POOL]] if revert else [pools[AWS_POOL]]
+    body = {"default_pools": default, "fallback_pool": pools[HA_POOL], "proxied": True,
+            "steering_policy": "off", "enabled": True}
+    res = {"host": host, "zone": z["name"], "action": "lb-revert" if revert else "lb-switch",
+           "dry_run": dry_run, "time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "prior": prior}
+    if prior and prior.get("default_pools") == default and prior.get("fallback_pool") == pools[HA_POOL] \
+            and prior.get("enabled", True):
+        res["plan"] = "no-op"
+        return res
+    if not prior and revert:
+        raise CutoverError(f"{host}: no load balancer to revert")
+    res["plan"] = ("update" if prior else "create") + f" default={default} fallback={pools[HA_POOL]}"
+    if dry_run:
+        return res
+    if prior:
+        cf.call("PATCH", f"/zones/{z['id']}/load_balancers/{prior['id']}", body=body)
+    else:
+        cf.call("POST", f"/zones/{z['id']}/load_balancers", body=dict(body, name=host, description="cf-cutover"))
+    after = [lb for lb in cf.list(f"/zones/{z['id']}/load_balancers") if lb.get("name") == host]
+    res["after"] = after[0] if after else None
+    if not after or after[0].get("default_pools") != default:
+        raise CutoverError(f"verify failed for {host}")
+    res["verified"] = True
+    return res
+
+
 def main(argv=None):
     p = argparse.ArgumentParser()
-    p.add_argument("action", choices=["inventory", "origin-cert", "dns-switch", "dns-revert"])
+    p.add_argument("action", choices=["inventory", "origin-cert", "dns-switch", "dns-revert",
+                                       "lb-inventory", "lb-pools", "lb-switch", "lb-revert"])
     p.add_argument("--host", default="")
     p.add_argument("--eips", default=",".join(DEFAULT_EIPS))
     p.add_argument("--csr-b64", default=os.environ.get("CSR_B64", ""))
@@ -306,6 +435,12 @@ def main(argv=None):
             if res.get("certificate"):
                 with open(os.path.join(a.out, f"{a.host}.origin.crt"), "w") as fh:
                     fh.write(res.pop("certificate"))
+        elif a.action == "lb-inventory":
+            res = lb_inventory(clients)
+        elif a.action == "lb-pools":
+            res = lb_pools(clients, a.host or "neonbee.app", not a.apply)
+        elif a.action in ("lb-switch", "lb-revert"):
+            res = lb_change(clients, a.host, allowed, a.action == "lb-revert", not a.apply)
         else:
             res = dns_change(clients, a.host, eips, allowed, a.action == "dns-revert", not a.apply)
     except CutoverError as e:

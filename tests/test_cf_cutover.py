@@ -175,5 +175,96 @@ class WorkflowTest(unittest.TestCase):
         self.assertNotRegex(WF, r"echo[^\n]*\$CF_")
 
 
+class FakeLB(FakeCF):
+    """FakeCF plus account pools/monitors and zone load balancers."""
+
+    def __init__(self, pools=(), monitors=(), lbs=()):
+        super().__init__([])
+        self.zones[0]["account"] = {"id": "acct"}
+        self.pools, self.monitors, self.lbs = list(pools), list(monitors), list(lbs)
+
+    def list(self, path, params=None):
+        if path.endswith("/load_balancers/pools"):
+            return [dict(p) for p in self.pools]
+        if path.endswith("/load_balancers/monitors"):
+            return list(self.monitors)
+        if path.endswith("/load_balancers"):
+            return [dict(x) for x in self.lbs]
+        return super().list(path, params)
+
+    def call(self, method, path, params=None, body=None):
+        self.calls.append((method, path, body))
+        if path.endswith("/monitors") and method == "POST":
+            self.monitors.append(dict(body, id="mon-aws"))
+            return {"result": {"id": "mon-aws"}}
+        if path.endswith("/pools") and method == "POST":
+            self.pools.append(dict(body, id="pool-" + body["name"]))
+        elif "/pools/" in path and method == "PATCH":
+            next(p for p in self.pools if p["id"] == path.rsplit("/", 1)[1]).update(body)
+        elif path.endswith("/load_balancers") and method == "POST":
+            self.lbs.append(dict(body, id="lb-new"))
+        elif "/load_balancers/" in path and method == "PATCH":
+            next(x for x in self.lbs if x["id"] == path.rsplit("/", 1)[1]).update(body)
+        return {"result": {}}
+
+
+HA_EXISTING = {"id": "p-ha-old", "name": "neonbee-app-fallback", "monitor": "mon-ha",
+               "origins": [{"address": HA}]}
+
+
+class LoadBalancerTest(unittest.TestCase):
+    def test_given_no_aws_pools_when_setting_up_then_monitor_and_both_pools_are_created(self):
+        cf = FakeLB(pools=[HA_EXISTING])
+        res = cc.lb_pools([cf], "neonbee.app", dry_run=False)
+        pools = {p["name"]: p for p in res["pools"]}
+        self.assertEqual(sorted(pools[cc.AWS_POOL]["origins"]), sorted(cc.POOL_EIPS))
+        self.assertEqual(pools[cc.AWS_POOL]["monitor"], "mon-aws")
+        self.assertEqual(pools[cc.HA_POOL]["origins"], [HA])
+        self.assertEqual(pools[cc.HA_POOL]["monitor"], "mon-ha")  # HA keeps the monitor it already uses
+        mon = next(b for m, p, b in cf.calls if p.endswith("/monitors"))
+        self.assertEqual((mon["path"], mon["expected_codes"], mon["interval"]), ("/__lb_health", "200", 60))
+        self.assertNotIn("PATCH", [m for m, p, _ in cf.calls if "p-ha-old" in p])
+
+    def test_given_pools_already_right_when_setting_up_again_then_nothing_is_written(self):
+        cf = FakeLB(pools=[HA_EXISTING])
+        cc.lb_pools([cf], "neonbee.app", dry_run=False)
+        cf.calls.clear()
+        res = cc.lb_pools([cf], "neonbee.app", dry_run=False)
+        self.assertEqual(res["plan"], [])
+        self.assertEqual([m for m, _, _ in cf.calls], [])
+
+    def test_given_existing_lb_when_switching_then_default_is_aws_and_fallback_is_ha_with_prior_saved(self):
+        cf = FakeLB(pools=[HA_EXISTING])
+        cc.lb_pools([cf], "neonbee.app", dry_run=False)
+        cf.lbs.append({"id": "lb1", "name": "api.neonbee.app", "default_pools": ["p-ha-old"],
+                       "fallback_pool": "p-ha-old"})
+        res = cc.lb_change([cf], "api.neonbee.app", ALLOWED, revert=False, dry_run=False)
+        self.assertEqual(res["prior"]["default_pools"], ["p-ha-old"])
+        self.assertEqual(cf.lbs[0]["default_pools"], ["pool-" + cc.AWS_POOL])
+        self.assertEqual(cf.lbs[0]["fallback_pool"], "pool-" + cc.HA_POOL)
+        res = cc.lb_change([cf], "api.neonbee.app", ALLOWED, revert=True, dry_run=False)
+        self.assertEqual(cf.lbs[0]["default_pools"], ["pool-" + cc.HA_POOL])
+
+    def test_given_host_without_lb_when_switching_then_lb_is_created_and_dns_untouched(self):
+        cf = FakeLB(pools=[HA_EXISTING])
+        cc.lb_pools([cf], "neonbee.app", dry_run=False)
+        cc.lb_change([cf], "help.neonbee.app", ALLOWED, revert=False, dry_run=False)
+        self.assertEqual(cf.lbs[0]["name"], "help.neonbee.app")
+        self.assertFalse(any("dns_records" in p for _, p, _ in cf.calls))
+
+    def test_given_missing_pools_or_excluded_host_when_switching_then_it_refuses(self):
+        with self.assertRaises(cc.CutoverError):
+            cc.lb_change([FakeLB()], "api.neonbee.app", ALLOWED, revert=False, dry_run=True)
+        with self.assertRaises(cc.CutoverError):
+            cc.lb_change([FakeLB()], "tools.neonbee.app", ALLOWED, revert=False, dry_run=True)
+
+    def test_given_dry_run_when_switching_then_nothing_is_written(self):
+        cf = FakeLB(pools=[HA_EXISTING])
+        cc.lb_pools([cf], "neonbee.app", dry_run=False)
+        cf.calls.clear()
+        cc.lb_change([cf], "api.neonbee.app", ALLOWED, revert=False, dry_run=True)
+        self.assertEqual([m for m, _, _ in cf.calls], [])
+
+
 if __name__ == "__main__":
     unittest.main()
