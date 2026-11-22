@@ -535,7 +535,7 @@ jobs:
     name: Notify Teams
     needs: [rollback]
     if: always()
-    runs-on: [self-hosted, runner-vm]
+    runs-on: [self-hosted, nb-route]
     steps:
       - name: Post result to Teams
         env:
