@@ -534,5 +534,116 @@ class OptionDWorkflowTest(unittest.TestCase):
         self.assertIn("PRIOR_B64: ${{ inputs.prior_b64 }}", WF)
 
 
+NODE_A, NODE_B = EIPS
+SWAPPED = [{"name": "ha", "address": HA, "weight": 0.01, "enabled": True, "port": 443},
+           {"name": "aws-origin", "address": AWSH, "weight": 0.99, "enabled": True}]
+
+
+class PoolAwsNodesTest(unittest.TestCase):
+    """Phase 2: HA out of neonbee-ha-failover; both slots = AWS node EIPs 0.5/0.5."""
+
+    def test_given_option_d_pool_when_moving_to_aws_nodes_then_slots_are_both_node_eips_at_half_weight(self):
+        cf = FakeD(pools=[ha_pool(origins=[dict(o) for o in SWAPPED], monitor="mon-1"), ha_pool(name="castle-rock")],
+                   monitors=[dict(MON)])
+        res = cc.pool_aws_nodes([cf], "neonbee.app", EIPS, dry_run=False)
+        o = res["after"]["origins"]
+        self.assertEqual([(x["name"], x["address"], x["weight"], x["enabled"]) for x in o],
+                         [("aws-node-a", NODE_A, 0.5, True), ("aws-node-b", NODE_B, 0.5, True)])
+        self.assertEqual(res["after"]["monitor"], "mon-1")
+        self.assertNotIn(HA, [x["address"] for x in o])
+        self.assertTrue(all("header" not in x for x in o))
+        self.assertEqual(res["prior"]["origins"][1]["address"], AWSH)
+        self.assertEqual([p for _, p, _ in cf.calls if "castle" in p], [])
+
+    def test_given_dry_run_when_moving_to_aws_nodes_then_nothing_is_written(self):
+        cf = FakeD(pools=[ha_pool(origins=[dict(o) for o in SWAPPED])], monitors=[dict(MON)])
+        res = cc.pool_aws_nodes([cf], "neonbee.app", EIPS, dry_run=True)
+        self.assertEqual((res["plan"], cf.calls), ("update", []))
+        self.assertEqual(res["target"]["origins"][0]["address"], NODE_A)
+
+    def test_given_already_on_nodes_when_moving_again_then_it_is_a_no_op(self):
+        cf = FakeD(pools=[ha_pool(origins=[dict(o) for o in SWAPPED])], monitors=[dict(MON)])
+        cc.pool_aws_nodes([cf], "neonbee.app", EIPS, dry_run=False)
+        cf.calls.clear()
+        self.assertEqual(cc.pool_aws_nodes([cf], "neonbee.app", EIPS, dry_run=False)["plan"], "no-op")
+        self.assertEqual([m for m, _, _ in cf.calls], [])
+
+    def test_given_castle_rock_wrong_eips_foreign_origin_or_no_monitor_then_it_refuses(self):
+        with self.assertRaises(cc.CutoverError):
+            cc.plan_pool_aws_nodes(ha_pool(name="castle-rock"), "mon-1")
+        with self.assertRaises(cc.CutoverError):
+            cc.plan_pool_aws_nodes(ha_pool(origins=SWAPPED), "mon-1", ("13.126.56.13", NODE_B))
+        with self.assertRaises(cc.CutoverError):
+            cc.plan_pool_aws_nodes(ha_pool(origins=[{"address": "1.2.3.4"}]), "mon-1")
+        with self.assertRaises(cc.CutoverError):
+            cc.plan_pool_aws_nodes(ha_pool(origins=SWAPPED), None)
+
+    def test_given_aws_nodes_result_when_restoring_then_option_d_layout_comes_back(self):
+        import base64
+        cf = FakeD(pools=[ha_pool(origins=[dict(o) for o in SWAPPED], monitor="mon-1")], monitors=[dict(MON)])
+        prior = cc.pool_aws_nodes([cf], "neonbee.app", EIPS, dry_run=False)["prior"]
+        res = cc.pool_restore([cf], "neonbee.app", base64.b64encode(json.dumps(prior).encode()).decode(), dry_run=False)
+        self.assertEqual([x["address"] for x in res["after"]["origins"]], [HA, AWSH])
+
+    def test_given_workflow_when_read_then_new_actions_are_dispatchable(self):
+        for a in ("pool-aws-nodes", "dns-only-delete"):
+            self.assertIn(a, WF)
+
+
+class FakeDD(FakeD):
+    def __init__(self, pools=(), monitors=(), records=()):
+        super().__init__(pools=pools, monitors=monitors, records=records)
+
+    def list(self, path, params=None):
+        if path.endswith("/dns_records"):
+            name = (params or {}).get("name")
+            return [dict(r) for r in self.records if not name or r["name"] == name]
+        return super().list(path, params)
+
+    def call(self, method, path, params=None, body=None):
+        if method == "DELETE" and "/dns_records/" in path:
+            self.calls.append((method, path, body))
+            self.records = [r for r in self.records if r["id"] != path.rsplit("/", 1)[1]]
+            return {"result": {}}
+        return super().call(method, path, params, body)
+
+
+class DnsOnlyDeleteTest(unittest.TestCase):
+    def recs(self):
+        return [rec("d1", NODE_A, name=AWSH, proxied=False, comment=cc.ADDED),
+                rec("d2", NODE_B, name=AWSH, proxied=False, comment=cc.ADDED),
+                rec("k1", HA, name="api.neonbee.app")]
+
+    def nodes_pool(self):
+        return ha_pool(origins=[{"name": "aws-node-a", "address": NODE_A}, {"name": "aws-node-b", "address": NODE_B}])
+
+    def test_given_pool_off_aws_origin_when_deleting_then_only_its_tool_added_records_go(self):
+        cf = FakeDD(pools=[self.nodes_pool()], monitors=[dict(MON)], records=self.recs())
+        res = cc.dns_only_delete([cf], AWSH, dry_run=False)
+        self.assertEqual(sorted(p.rsplit("/", 1)[1] for m, p, _ in cf.calls if m == "DELETE"), ["d1", "d2"])
+        self.assertEqual(res["after"], [])
+        self.assertEqual([r["id"] for r in cf.records], ["k1"])
+
+    def test_given_pool_still_uses_aws_origin_when_deleting_then_it_refuses_without_writing(self):
+        cf = FakeDD(pools=[ha_pool(origins=[dict(o) for o in SWAPPED])], monitors=[dict(MON)], records=self.recs())
+        with self.assertRaises(cc.CutoverError):
+            cc.dns_only_delete([cf], AWSH, dry_run=False)
+        self.assertEqual([m for m, _, _ in cf.calls if m == "DELETE"], [])
+
+    def test_given_other_host_or_foreign_record_when_deleting_then_it_refuses(self):
+        with self.assertRaises(cc.CutoverError):
+            cc.plan_dns_only_delete([], "api.neonbee.app", self.nodes_pool())
+        with self.assertRaises(cc.CutoverError):
+            cc.plan_dns_only_delete([rec("x", NODE_A, name=AWSH, proxied=False)], AWSH, self.nodes_pool())
+        with self.assertRaises(cc.CutoverError):
+            cc.plan_dns_only_delete([rec("x", NODE_A, name=AWSH, proxied=True, comment=cc.ADDED)], AWSH, self.nodes_pool())
+
+    def test_given_dry_run_when_deleting_then_nothing_is_written(self):
+        cf = FakeDD(pools=[self.nodes_pool()], monitors=[dict(MON)], records=self.recs())
+        res = cc.dns_only_delete([cf], AWSH, dry_run=True)
+        self.assertEqual(len(res["plan"]), 2)
+        self.assertEqual([m for m, _, _ in cf.calls], [])
+
+
 if __name__ == "__main__":
     unittest.main()
