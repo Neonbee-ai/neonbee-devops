@@ -448,7 +448,8 @@ POOL_ALLOWLIST = frozenset({HA_FAILOVER_POOL})
 OLD_ORIGIN_IP = "68.183.86.248"
 AWS_ORIGIN_HOST = "aws-origin.neonbee.app"
 AWS_ORIGIN_RE = re.compile(r"^aws-origin\.(neonbee\.app|neonbee\.store)$")
-POOL_ORIGIN_ADDRS = frozenset({HA_IP, OLD_ORIGIN_IP, AWS_ORIGIN_HOST})
+POOL_ORIGIN_ADDRS = frozenset({HA_IP, OLD_ORIGIN_IP, AWS_ORIGIN_HOST, *DEFAULT_EIPS})
+AWS_NODE_NAMES = ("aws-node-a", "aws-node-b")
 
 
 def guard_pool(name):
@@ -586,6 +587,73 @@ def pool_origin_swap(clients, zone_name, dry_run):
     return res
 
 
+def plan_pool_aws_nodes(pool, monitor_id, eips=DEFAULT_EIPS):
+    """Pure: phase 2 target for neonbee-ha-failover = the two AWS node EIPs at 0.5/0.5 (HA out), or None.
+    Slot order kept: HA slot -> eips[0], second slot -> eips[1]."""
+    guard_pool(pool.get("name"))
+    if not monitor_id:
+        raise CutoverError(f"monitor {AWS_MONITOR} does not exist - run monitor-ensure first")
+    if tuple(eips) != DEFAULT_EIPS:
+        raise CutoverError(f"--eips must be exactly {','.join(DEFAULT_EIPS)} (the nb-serving node EIPs)")
+    cur = pool.get("origins") or []
+    _check_origins(cur)
+    want = {"origins": [{"name": n, "address": ip, "weight": 0.5, "enabled": True}
+                        for n, ip in zip(AWS_NODE_NAMES, eips)], "monitor": monitor_id}
+    norm = lambda os_: [(o.get("name"), o.get("address"), o.get("weight"), o.get("enabled"), o.get("header")) for o in os_]
+    if norm(cur) == norm(want["origins"]) and pool.get("monitor") == monitor_id:
+        return None
+    return want
+
+
+def pool_aws_nodes(clients, zone_name, eips, dry_run):
+    cf, z, acct = _acct_for(clients, zone_name)
+    pool = _find_pool(cf, acct)
+    mon = _find_monitor(cf, acct)
+    want = plan_pool_aws_nodes(pool, (mon or {}).get("id"), eips)
+    res = {"action": "pool-aws-nodes", "account": acct, "pool": pool["name"], "dry_run": dry_run,
+           "time": _now(), "prior": pool, "plan": "no-op" if want is None else "update"}
+    if want is None:
+        res["after"] = pool
+        return res
+    res["target"] = want
+    if dry_run:
+        return res
+    cf.call("PATCH", f"/accounts/{acct}/load_balancers/pools/{pool['id']}", body=want)
+    res["after"] = _find_pool(cf, acct)
+    return res
+
+
+def plan_dns_only_delete(records, host, pool):
+    """Pure: delete ops for the tool-added DNS-only A records on aws-origin.*, only once the pool no longer uses it."""
+    if not AWS_ORIGIN_RE.match(host or ""):
+        raise CutoverError(f"{host}: only aws-origin.neonbee.app|neonbee.store may be deleted")
+    guard_pool(pool.get("name"))
+    if any(o.get("address") == host for o in pool.get("origins") or []):
+        raise CutoverError(f"{host}: still an origin of {pool.get('name')} - refusing")
+    mine = [r for r in records if r.get("name") == host]
+    for r in mine:
+        if r.get("type") != "A" or r.get("proxied") or r.get("comment") != ADDED:
+            raise CutoverError(f"{host}: record {r.get('type')} {r.get('content')} is not a tool-added DNS-only A - refusing")
+    return [("delete", r, None) for r in mine]
+
+
+def dns_only_delete(clients, host, dry_run):
+    cf, z = zone_for(host, zones_by_token(clients))
+    lcf, _, acct = _acct_for(clients, "neonbee.app")
+    pool = _find_pool(lcf, acct)
+    prior = _host_records(cf, z["id"], host)
+    ops = plan_dns_only_delete(prior, host, pool)
+    res = {"action": "dns-only-delete", "host": host, "zone": z["name"], "dry_run": dry_run, "time": _now(),
+           "prior": prior, "plan": [(o, r.get("content")) for o, r, _ in ops]}
+    if dry_run or not ops:
+        res["after"] = prior
+        return res
+    for _, r, _ in ops:
+        cf.call("DELETE", f"/zones/{z['id']}/dns_records/{r['id']}")
+    res["after"] = _host_records(cf, z["id"], host)
+    return res
+
+
 def pool_restore(clients, zone_name, prior_b64, dry_run):
     import base64
     try:
@@ -664,7 +732,8 @@ def main(argv=None):
     p.add_argument("action", choices=["inventory", "origin-cert", "dns-switch", "dns-revert",
                                        "lb-inventory", "lb-pools", "lb-switch", "lb-revert", "verify",
                                        "dns-only-upsert", "monitor-ensure", "pool-origin-swap",
-                                       "pool-restore", "pool-health", "monitor-delete"])
+                                       "pool-restore", "pool-health", "monitor-delete",
+                                       "pool-aws-nodes", "dns-only-delete"])
     p.add_argument("--host", default="")
     p.add_argument("--eips", default=",".join(DEFAULT_EIPS))
     p.add_argument("--csr-b64", default=os.environ.get("CSR_B64", ""))
@@ -712,6 +781,10 @@ def main(argv=None):
             res = monitor_ensure(clients, "neonbee.app", not a.apply)
         elif a.action == "pool-origin-swap":
             res = pool_origin_swap(clients, "neonbee.app", not a.apply)
+        elif a.action == "pool-aws-nodes":
+            res = pool_aws_nodes(clients, "neonbee.app", eips, not a.apply)
+        elif a.action == "dns-only-delete":
+            res = dns_only_delete(clients, a.host, not a.apply)
         elif a.action == "pool-restore":
             res = pool_restore(clients, "neonbee.app", a.prior_b64, not a.apply)
         elif a.action == "pool-health":

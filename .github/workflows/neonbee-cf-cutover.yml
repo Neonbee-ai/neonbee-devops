@@ -12,7 +12,7 @@ on:
       action:
         description: 'inventory | origin-cert | dns-switch | dns-revert | lb-inventory | lb-pools | lb-switch | lb-revert | verify | dns-only-upsert | monitor-ensure | pool-origin-swap | pool-restore | pool-health | monitor-delete'
         type: choice
-        options: [inventory, origin-cert, dns-switch, dns-revert, lb-inventory, lb-pools, lb-switch, lb-revert, verify, dns-only-upsert, monitor-ensure, pool-origin-swap, pool-restore, pool-health, monitor-delete]
+        options: [inventory, origin-cert, dns-switch, dns-revert, lb-inventory, lb-pools, lb-switch, lb-revert, verify, dns-only-upsert, monitor-ensure, pool-origin-swap, pool-restore, pool-health, monitor-delete, pool-aws-nodes, dns-only-delete]
         default: inventory
       hostname:
         description: 'Host for dns-switch/dns-revert (e.g. sso.neonbee.app); zone for origin-cert (neonbee.app)'
