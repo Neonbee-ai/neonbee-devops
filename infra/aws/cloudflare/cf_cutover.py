@@ -7,6 +7,14 @@ Actions (run by .github/workflows/neonbee-cf-cutover.yml, tokens come from GH se
                      (the private key never leaves the operator's machine; output = public cert)
   dns-switch <host>  HA A record -> the two AWS EIPs (proxied, two A records)
   dns-revert <host>  back to the HA IP
+  lb-inventory | lb-pools | lb-switch | lb-revert   Cloudflare Load Balancer path (new pools nb-aws-prod/nb-ha-fallback)
+  Option D (reuse the existing pool neonbee-ha-failover; the account origin limit is 4, so no new pools):
+  dns-only-upsert    --host aws-origin.<zone> --eips a,b : DNS-only (grey cloud) A records -> AWS EIPs
+  monitor-ensure     create/patch the nb-aws-lb-health monitor (Host dashboard.neonbee.app)
+  pool-origin-swap   neonbee-ha-failover origins -> HA 0.01 + hostname aws-origin.neonbee.app 0.99, monitor nb-aws-lb-health
+  pool-restore       PATCH neonbee-ha-failover back from a pool-origin-swap result (--prior-b64 / PRIOR_B64)
+  pool-health        read-only per-origin health of neonbee-ha-failover
+  monitor-delete     delete nb-aws-lb-health only when no pool references it
 
 Safety rules (enforced here, covered by tests/test_cf_cutover.py):
   * only hostnames served by the AWS nb-nginx-sites bundle (server_name in infra/aws/nginx/sites)
@@ -16,6 +24,9 @@ Safety rules (enforced here, covered by tests/test_cf_cutover.py):
     records this tool added
   * refuses anything unexpected (CNAME, AAAA, DNS-only record, unknown IPs) instead of guessing
   * dry_run (default) prints the plan and writes nothing
+  * option D: the pool allowlist is exactly {neonbee-ha-failover} (any other pool, e.g. castle-rock, is a
+    CutoverError before any write); DNS deletes only ever hit records carrying the ADDED marker; the monitor
+    is deleted only when it is nb-aws-lb-health and no pool references it; writes return prior + after
 """
 import argparse
 import glob
@@ -307,7 +318,7 @@ def origin_cert(clients, zone, csr_pem, dry_run):
 AWS_POOL, HA_POOL, AWS_MONITOR = "nb-aws-prod", "nb-ha-fallback", "nb-aws-lb-health"
 POOL_EIPS = ("3.110.17.10", "13.233.75.233", "13.126.56.13", "13.234.180.150")
 MONITOR_BODY = {"type": "https", "method": "GET", "path": "/__lb_health", "expected_codes": "200",
-                "header": {"Host": ["api.neonbee.app"]}, "interval": 60, "retries": 2, "timeout": 5,
+                "header": {"Host": ["dashboard.neonbee.app"]}, "interval": 60, "retries": 2, "timeout": 5,
                 "follow_redirects": False, "allow_insecure": True, "description": AWS_MONITOR}
 
 
@@ -364,7 +375,7 @@ def plan_pools(pools, monitors, eips=POOL_EIPS):
     return ops
 
 
-def lb_pools(clients, zone_name, dry_run, eips=POOL_EIPS):
+def lb_pools(clients, zone_name, dry_run, eips=POOL_EIPS):  # eips: --eips from the CLI
     zones = zones_by_token(clients)
     if zone_name not in zones:
         raise CutoverError(f"{zone_name}: no visible zone")
@@ -431,13 +442,231 @@ def lb_change(clients, host, allowed, revert, dry_run):
     return res
 
 
+# ---------------------------------------------------------------- Option D: reuse neonbee-ha-failover
+HA_FAILOVER_POOL = "neonbee-ha-failover"
+POOL_ALLOWLIST = frozenset({HA_FAILOVER_POOL})
+OLD_ORIGIN_IP = "68.183.86.248"
+AWS_ORIGIN_HOST = "aws-origin.neonbee.app"
+AWS_ORIGIN_RE = re.compile(r"^aws-origin\.(neonbee\.app|neonbee\.store)$")
+POOL_ORIGIN_ADDRS = frozenset({HA_IP, OLD_ORIGIN_IP, AWS_ORIGIN_HOST})
+
+
+def guard_pool(name):
+    if name not in POOL_ALLOWLIST:
+        raise CutoverError(f"{name}: pool not in the allowlist {sorted(POOL_ALLOWLIST)} - never touched")
+    return name
+
+
+def _now():
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _acct_for(clients, zone_name):
+    zones = zones_by_token(clients)
+    if zone_name not in zones:
+        raise CutoverError(f"{zone_name}: no visible zone")
+    cf, z = zones[zone_name]
+    return cf, z, _account(z)
+
+
+def _find_pool(cf, acct, name=HA_FAILOVER_POOL):
+    """The allowlisted pool, found by name. Other pools are listed by the API but never read or written."""
+    guard_pool(name)
+    pool = next((p for p in cf.list(f"/accounts/{acct}/load_balancers/pools") if p.get("name") == name), None)
+    if not pool:
+        raise CutoverError(f"{name}: pool not found")
+    return pool
+
+
+def _find_monitor(cf, acct):
+    return next((m for m in cf.list(f"/accounts/{acct}/load_balancers/monitors")
+                 if m.get("description") == AWS_MONITOR), None)
+
+
+def plan_dns_only(records, host, eips):
+    """Pure: ops to hold exactly one DNS-only ttl-60 A record per EIP on host. Refuses foreign records."""
+    if not AWS_ORIGIN_RE.match(host or ""):
+        raise CutoverError(f"{host}: only aws-origin.neonbee.app|neonbee.store may be managed")
+    if not eips:
+        raise CutoverError("no EIPs given")
+    mine = [r for r in records if r.get("name") == host]
+    for r in mine:
+        if r.get("type") != "A":
+            raise CutoverError(f"{host}: unexpected {r.get('type')} record - refusing")
+        if r.get("comment") != ADDED:
+            raise CutoverError(f"{host}: A record {r.get('content')} was not added by this tool - refusing")
+    ops = []
+    for ip in eips:
+        cur = next((r for r in mine if r.get("content") == ip), None)
+        body = {"type": "A", "name": host, "content": ip, "proxied": False, "ttl": 60, "comment": ADDED}
+        if not cur:
+            ops.append(("create", None, body))
+        elif cur.get("proxied") or cur.get("ttl") != 60:
+            ops.append(("update", cur, {"proxied": False, "ttl": 60}))
+    return ops
+
+
+def dns_only_upsert(clients, host, eips, dry_run):
+    cf, z = zone_for(host, zones_by_token(clients))
+    prior = _host_records(cf, z["id"], host)
+    ops = plan_dns_only(prior, host, eips)
+    res = {"action": "dns-only-upsert", "host": host, "zone": z["name"], "dry_run": dry_run, "time": _now(),
+           "prior": prior, "plan": [(o, b.get("content") or r.get("content")) for o, r, b in ops]}
+    if dry_run or not ops:
+        res["after"] = prior
+        return res
+    for op, r, body in ops:
+        if op == "create":
+            cf.call("POST", f"/zones/{z['id']}/dns_records", body=body)
+        else:
+            cf.call("PATCH", f"/zones/{z['id']}/dns_records/{r['id']}", body=body)
+    res["after"] = _host_records(cf, z["id"], host)
+    return res
+
+
+def monitor_ensure(clients, zone_name, dry_run):
+    cf, z, acct = _acct_for(clients, zone_name)
+    cur = _find_monitor(cf, acct)
+    res = {"action": "monitor-ensure", "account": acct, "dry_run": dry_run, "time": _now(), "prior": cur}
+    if cur and all(cur.get(k) == v for k, v in MONITOR_BODY.items()):
+        res.update(plan="no-op", after=cur)
+        return res
+    res["plan"] = "update" if cur else "create"
+    if dry_run:
+        return res
+    if cur:
+        cf.call("PATCH", f"/accounts/{acct}/load_balancers/monitors/{cur['id']}", body=dict(MONITOR_BODY))
+    else:
+        cf.call("POST", f"/accounts/{acct}/load_balancers/monitors", body=dict(MONITOR_BODY))
+    res["after"] = _find_monitor(cf, acct)
+    return res
+
+
+def _check_origins(origins, allowed=POOL_ORIGIN_ADDRS):
+    bad = sorted({o.get("address") for o in origins or []} - set(allowed))
+    if bad:
+        raise CutoverError(f"unexpected origins {bad} - refusing")
+
+
+def plan_pool_swap(pool, monitor_id):
+    """Pure: target {origins, monitor} for neonbee-ha-failover, or None when already there."""
+    guard_pool(pool.get("name"))
+    if not monitor_id:
+        raise CutoverError(f"monitor {AWS_MONITOR} does not exist - run monitor-ensure first")
+    cur = pool.get("origins") or []
+    _check_origins(cur)
+    ha = next((o for o in cur if o.get("address") == HA_IP), {})
+    ha_origin = dict(ha, name=ha.get("name") or "ha-84-247-131-148", address=HA_IP, weight=0.01, enabled=True)
+    # No per-origin Host header: the pool is shared by the api/cdn/dashboard/sso LBs.
+    aws_origin = {"name": "aws-origin", "address": AWS_ORIGIN_HOST, "weight": 0.99, "enabled": True}
+    want = {"origins": [ha_origin, aws_origin], "monitor": monitor_id}
+    norm = lambda os_: [(o.get("name"), o.get("address"), o.get("weight"), o.get("enabled"), o.get("header")) for o in os_]
+    if norm(cur) == norm(want["origins"]) and pool.get("monitor") == monitor_id:
+        return None
+    return want
+
+
+def pool_origin_swap(clients, zone_name, dry_run):
+    cf, z, acct = _acct_for(clients, zone_name)
+    pool = _find_pool(cf, acct)
+    mon = _find_monitor(cf, acct)
+    want = plan_pool_swap(pool, (mon or {}).get("id"))
+    res = {"action": "pool-origin-swap", "account": acct, "pool": pool["name"], "dry_run": dry_run,
+           "time": _now(), "prior": pool, "plan": "no-op" if want is None else "update"}
+    if want is None:
+        res["after"] = pool
+        return res
+    res["target"] = want
+    if dry_run:
+        return res
+    cf.call("PATCH", f"/accounts/{acct}/load_balancers/pools/{pool['id']}", body=want)
+    res["after"] = _find_pool(cf, acct)
+    return res
+
+
+def pool_restore(clients, zone_name, prior_b64, dry_run):
+    import base64
+    try:
+        prior = json.loads(base64.b64decode(prior_b64).decode())
+    except (ValueError, TypeError) as e:
+        raise CutoverError(f"prior_b64 is not base64 JSON: {e}")
+    if not isinstance(prior, dict) or prior.get("name") != HA_FAILOVER_POOL:
+        raise CutoverError(f"prior pool must be {HA_FAILOVER_POOL}")
+    guard_pool(prior["name"])
+    _check_origins(prior.get("origins"))
+    if not prior.get("origins"):
+        raise CutoverError("prior pool has no origins - refusing")
+    cf, z, acct = _acct_for(clients, zone_name)
+    cur = _find_pool(cf, acct)
+    if prior.get("id") and prior["id"] != cur["id"]:
+        raise CutoverError("prior pool id does not match the current pool")
+    want = {"origins": prior["origins"], "monitor": prior.get("monitor")}
+    res = {"action": "pool-restore", "account": acct, "pool": cur["name"], "dry_run": dry_run,
+           "time": _now(), "prior": cur, "target": want}
+    if cur.get("origins") == want["origins"] and cur.get("monitor") == want["monitor"]:
+        res.update(plan="no-op", after=cur)
+        return res
+    res["plan"] = "update"
+    if dry_run:
+        return res
+    cf.call("PATCH", f"/accounts/{acct}/load_balancers/pools/{cur['id']}", body=want)
+    res["after"] = _find_pool(cf, acct)
+    return res
+
+
+def summarize_health(result):
+    """Pure: per-origin {healthy, failure_reason} from a pool health result (any POP healthy = healthy)."""
+    out = {}
+    for pop in ((result or {}).get("pop_health") or {}).values():
+        for o in pop.get("origins") or []:
+            for addr, st in o.items():
+                row = out.setdefault(addr, {"healthy": False, "failure_reason": None, "pops": 0, "pops_healthy": 0})
+                row["pops"] += 1
+                if st.get("healthy"):
+                    row["healthy"] = True
+                    row["pops_healthy"] += 1
+                elif st.get("failure_reason"):
+                    row["failure_reason"] = st["failure_reason"]
+    return out
+
+
+def pool_health(clients, zone_name):
+    cf, z, acct = _acct_for(clients, zone_name)
+    pool = _find_pool(cf, acct)
+    out = cf.call("GET", f"/accounts/{acct}/load_balancers/pools/{pool['id']}/health")
+    return {"action": "pool-health", "account": acct, "pool": pool["name"], "time": _now(),
+            "healthy": (out.get("result") or {}).get("healthy"),
+            "origins": summarize_health(out.get("result"))}
+
+
+def monitor_delete(clients, zone_name, dry_run):
+    cf, z, acct = _acct_for(clients, zone_name)
+    mon = _find_monitor(cf, acct)
+    res = {"action": "monitor-delete", "account": acct, "dry_run": dry_run, "time": _now(), "prior": mon}
+    if not mon:
+        res.update(plan="no-op", after=None)
+        return res
+    users = [p.get("monitor") for p in cf.list(f"/accounts/{acct}/load_balancers/pools")]
+    if mon["id"] in users:
+        raise CutoverError(f"monitor {AWS_MONITOR} is still referenced by a pool - not deleted")
+    res["plan"] = "delete"
+    if dry_run:
+        return res
+    cf.call("DELETE", f"/accounts/{acct}/load_balancers/monitors/{mon['id']}")
+    res["after"] = _find_monitor(cf, acct)
+    return res
+
+
 def main(argv=None):
     p = argparse.ArgumentParser()
     p.add_argument("action", choices=["inventory", "origin-cert", "dns-switch", "dns-revert",
-                                       "lb-inventory", "lb-pools", "lb-switch", "lb-revert", "verify"])
+                                       "lb-inventory", "lb-pools", "lb-switch", "lb-revert", "verify",
+                                       "dns-only-upsert", "monitor-ensure", "pool-origin-swap",
+                                       "pool-restore", "pool-health", "monitor-delete"])
     p.add_argument("--host", default="")
     p.add_argument("--eips", default=",".join(DEFAULT_EIPS))
     p.add_argument("--csr-b64", default=os.environ.get("CSR_B64", ""))
+    p.add_argument("--prior-b64", default=os.environ.get("PRIOR_B64", ""))
     p.add_argument("--out", default="cf-out")
     p.add_argument("--apply", action="store_true", help="write changes (default: dry run)")
     a = p.parse_args(argv)
@@ -474,7 +703,19 @@ def main(argv=None):
         elif a.action == "lb-inventory":
             res = lb_inventory(clients)
         elif a.action == "lb-pools":
-            res = lb_pools(clients, a.host or "neonbee.app", not a.apply)
+            res = lb_pools(clients, a.host or "neonbee.app", not a.apply, eips)
+        elif a.action == "dns-only-upsert":
+            res = dns_only_upsert(clients, a.host, eips, not a.apply)
+        elif a.action == "monitor-ensure":
+            res = monitor_ensure(clients, "neonbee.app", not a.apply)
+        elif a.action == "pool-origin-swap":
+            res = pool_origin_swap(clients, "neonbee.app", not a.apply)
+        elif a.action == "pool-restore":
+            res = pool_restore(clients, "neonbee.app", a.prior_b64, not a.apply)
+        elif a.action == "pool-health":
+            res = pool_health(clients, "neonbee.app")
+        elif a.action == "monitor-delete":
+            res = monitor_delete(clients, "neonbee.app", not a.apply)
         elif a.action in ("lb-switch", "lb-revert"):
             res = lb_change(clients, a.host, allowed, a.action == "lb-revert", not a.apply)
         else:

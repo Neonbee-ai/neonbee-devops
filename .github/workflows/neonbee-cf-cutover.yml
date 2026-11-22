@@ -1,6 +1,8 @@
 # Cloudflare side of the HA -> AWS prod cut-over, one hostname at a time.
 # Script + safety rules: infra/aws/cloudflare/cf_cutover.py (tests: tests/test_cf_cutover.py).
 # Tokens come from the org secrets and are only passed as env, never echoed.
+# Option D actions (dns-only-upsert, monitor-ensure, pool-*, monitor-delete) only touch pool neonbee-ha-failover,
+# aws-origin.<zone> records and the nb-aws-lb-health monitor.
 # Output (inventory JSON, before/after record state, signed origin cert = public) is uploaded as an artifact.
 name: Cloudflare cut-over (HA -> AWS)
 
@@ -8,9 +10,9 @@ on:
   workflow_dispatch:
     inputs:
       action:
-        description: 'inventory | origin-cert | dns-switch | dns-revert | lb-inventory | lb-pools | lb-switch | lb-revert | verify'
+        description: 'inventory | origin-cert | dns-switch | dns-revert | lb-inventory | lb-pools | lb-switch | lb-revert | verify | dns-only-upsert | monitor-ensure | pool-origin-swap | pool-restore | pool-health | monitor-delete'
         type: choice
-        options: [inventory, origin-cert, dns-switch, dns-revert, lb-inventory, lb-pools, lb-switch, lb-revert, verify]
+        options: [inventory, origin-cert, dns-switch, dns-revert, lb-inventory, lb-pools, lb-switch, lb-revert, verify, dns-only-upsert, monitor-ensure, pool-origin-swap, pool-restore, pool-health, monitor-delete]
         default: inventory
       hostname:
         description: 'Host for dns-switch/dns-revert (e.g. sso.neonbee.app); zone for origin-cert (neonbee.app)'
@@ -22,6 +24,10 @@ on:
         default: true
       csr_b64:
         description: 'origin-cert only: base64 of a PEM CSR made locally (never a private key)'
+        type: string
+        default: ''
+      prior_b64:
+        description: 'pool-restore only: base64 of the prior pool JSON from a pool-origin-swap result'
         type: string
         default: ''
       eips:
@@ -52,6 +58,7 @@ jobs:
           DRY_RUN: ${{ inputs.dry_run }}
           CSR_B64: ${{ inputs.csr_b64 }}
           EIPS: ${{ inputs.eips }}
+          PRIOR_B64: ${{ inputs.prior_b64 }}
         run: |
           set -euo pipefail
           APPLY=""; [ "$DRY_RUN" = "false" ] && APPLY="--apply"
