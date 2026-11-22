@@ -434,17 +434,31 @@ def lb_change(clients, host, allowed, revert, dry_run):
 def main(argv=None):
     p = argparse.ArgumentParser()
     p.add_argument("action", choices=["inventory", "origin-cert", "dns-switch", "dns-revert",
-                                       "lb-inventory", "lb-pools", "lb-switch", "lb-revert"])
+                                       "lb-inventory", "lb-pools", "lb-switch", "lb-revert", "verify"])
     p.add_argument("--host", default="")
     p.add_argument("--eips", default=",".join(DEFAULT_EIPS))
     p.add_argument("--csr-b64", default=os.environ.get("CSR_B64", ""))
     p.add_argument("--out", default="cf-out")
     p.add_argument("--apply", action="store_true", help="write changes (default: dry run)")
     a = p.parse_args(argv)
-    clients = [CF(os.environ[n], n) for n in ("CF_SAAS_API_TOKEN", "CF_PREVIEW_API_TOKEN") if os.environ.get(n)]
-    if not clients:
+    clients = [CF(os.environ[n], n) for n in ("CF_LB_API_TOKEN", "CF_SAAS_API_TOKEN", "CF_PREVIEW_API_TOKEN") if os.environ.get(n)]
+    if not clients and a.action != "verify":
         print("no Cloudflare token in env", file=sys.stderr)
         return 2
+    if a.action == "verify":  # status only, never the token
+        res = {}
+        for n in ("CF_LB_API_TOKEN", "CF_SAAS_API_TOKEN", "CF_PREVIEW_API_TOKEN"):
+            v = os.environ.get(n, "")
+            if not v:
+                res[n] = "empty"
+                continue
+            try:
+                r = CF(v, n).call("GET", "/user/tokens/verify")["result"]
+                res[n] = {"status": r.get("status"), "expires_on": r.get("expires_on")}
+            except CutoverError as e:
+                res[n] = "invalid: " + str(e).split("): ", 1)[-1]
+        print(json.dumps(res))
+        return 0
     eips = tuple(x.strip() for x in a.eips.split(",") if x.strip())
     allowed = bundle_hosts()
     os.makedirs(a.out, exist_ok=True)
