@@ -207,12 +207,17 @@ def apex_conf(cat):
         "    # everything else -> SSO login\n    location / {\n        return 301 https://sso.neonbee.app$request_uri;\n    }\n}\n"])
 
 
+# Apex (wildcard does not match it) + the CF-for-SaaS fallback origin, named explicitly so the
+# cf-cutover allow-list (server_name scan) can switch them. Phase 3, 2026-11-22.
+STORE_EXTRA = " neonbee.store customers-fallback.neonbee.store"
+
+
 def store_conf(cat):
     web, api = cat["storefront-web-prod"]["port"], cat["storefront-api-prod"]["port"]
     return "".join([HEADER,
-        "server {\n    listen 80; listen [::]:80;\n    server_name *.neonbee.store;\n%s"
-        "    location / { return 301 https://$host$request_uri; }\n}\n" % LB,
-        tls_server_head("*.neonbee.store", STORE_CERT, logname="neonbee-store"),
+        "server {\n    listen 80; listen [::]:80;\n    server_name *.neonbee.store%s;\n%s"
+        "    location / { return 301 https://$host$request_uri; }\n}\n" % (STORE_EXTRA, LB),
+        tls_server_head("*.neonbee.store", STORE_CERT, logname="neonbee-store", extra_names=STORE_EXTRA),
         "    location /nginx-health {\n        return 200 'ok';\n        add_header Content-Type text/plain;\n    }\n\n"
         "    # Same-origin API: https://<store>.neonbee.store/v1/storefront/... -> storefront API\n"
         "    location /v1/ {\n        proxy_pass http://127.0.0.1:%d;\n        proxy_http_version 1.1;\n"

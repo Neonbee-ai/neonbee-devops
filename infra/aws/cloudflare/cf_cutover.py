@@ -47,6 +47,10 @@ WAS = "cf-cutover: was "
 SKIP_ZONES = ("moonhive.in", "skyoffice360.com")
 DENY = (re.compile(r"(^|\.)(dev|pr)-"), re.compile(r"(^|\.)dev\."), re.compile(r"skyoffice360\.com$"),
         re.compile(r"moonhive\.in$"), re.compile(r"^tools\.neonbee\.app$"), re.compile(r"preview"))
+# Internal Tools VM target (phase 3): the website apex, Pulse and Free Tools leave HA for the ITVM,
+# never AWS. Only these hosts, only with --eips exactly this IP; revert still goes back to HA.
+ITVM_IP = "167.114.98.177"
+ITVM_HOSTS = frozenset({"neonbee.ai", "pulse.neonbee.app", "tools.neonbee.app"})
 SITES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "nginx", "sites")
 
 
@@ -64,8 +68,14 @@ def bundle_hosts(sites_dir=SITES):
     return hosts
 
 
-def check_host(host, allowed):
+def check_host(host, allowed, eips=None):
     host = host.strip().lower().rstrip(".")
+    if eips is not None and ITVM_IP in eips:
+        if tuple(eips) != (ITVM_IP,):
+            raise CutoverError(f"{ITVM_IP} must be the only target (never mixed with AWS EIPs)")
+        if host not in ITVM_HOSTS:
+            raise CutoverError(f"{host}: not an Internal Tools VM host {sorted(ITVM_HOSTS)}")
+        return host
     for rx in DENY:
         if rx.search(host):
             raise CutoverError(f"{host}: Dev/preview/excluded host - never touched")
@@ -278,7 +288,7 @@ def describe(ops):
 
 
 def dns_change(clients, host, eips, allowed, revert, dry_run):
-    host = check_host(host, allowed)
+    host = check_host(host, allowed, eips)
     cf, z = zone_for(host, zones_by_token(clients))
     before = _host_records(cf, z["id"], host)
     ops = (plan_revert if revert else plan_switch)(before, eips)
