@@ -15,6 +15,9 @@ Actions (run by .github/workflows/neonbee-cf-cutover.yml, tokens come from GH se
   pool-restore       PATCH neonbee-ha-failover back from a pool-origin-swap result (--prior-b64 / PRIOR_B64)
   pool-health        read-only per-origin health of neonbee-ha-failover
   monitor-delete     delete nb-aws-lb-health only when no pool references it
+  zone-audit <zone>  read-only: proxied A/AAAA/CNAME, LB hostnames + pool origins, SSL mode, config rules
+  ssl-mode <zone> --ssl-mode full|strict   zone allowlist {neonbee.app, neonbee.store}; result holds prior
+  ssl-keep-full <zone> --hosts a,b   upsert ONE http_config_settings rule (cf-cutover:ssl-full) ssl=full
 
 Safety rules (enforced here, covered by tests/test_cf_cutover.py):
   * only hostnames served by the AWS nb-nginx-sites bundle (server_name in infra/aws/nginx/sites)
@@ -738,17 +741,158 @@ def monitor_delete(clients, zone_name, dry_run):
     return res
 
 
+# ---- SSL mode (Full -> Full (strict)) with per-host Full exceptions -------------------------------
+SSL_ZONES = frozenset({"neonbee.app", "neonbee.store"})
+SSL_MODES = ("full", "strict")
+SSL_FULL_MARK = "cf-cutover:ssl-full"
+CFG_PHASE = "http_config_settings"
+HOST_RE = re.compile(r"^(\*\.)?([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$")
+
+
+def guard_ssl_zone(zone_name):
+    if zone_name not in SSL_ZONES:
+        raise CutoverError(f"{zone_name}: zone not in the SSL allowlist {sorted(SSL_ZONES)} - never touched")
+    return zone_name
+
+
+def _ssl_zone(clients, zone_name):
+    guard_ssl_zone(zone_name)
+    zones = zones_by_token(clients)
+    if zone_name not in zones:
+        raise CutoverError(f"{zone_name}: no visible zone")
+    return zones[zone_name]
+
+
+def _cfg_entrypoint(cf, zone_id):
+    """The zone's http_config_settings entrypoint ruleset, or None when the zone has none yet."""
+    try:
+        return cf.call("GET", f"/zones/{zone_id}/rulesets/phases/{CFG_PHASE}/entrypoint")["result"]
+    except CutoverError as e:
+        if re.search(r"\b10003\b|not found|could not find", str(e), re.I):
+            return None
+        raise
+
+
+def zone_audit(clients, zone_name):
+    """Read-only: proxied A/AAAA/CNAME records, LB hostnames + pool origins, SSL mode, config rules."""
+    cf, z = _ssl_zone(clients, zone_name)
+    zid = z["id"]
+    out = {"zone": zone_name, "zone_id": zid, "token": cf.label,
+           "ssl": cf.call("GET", f"/zones/{zid}/settings/ssl")["result"]["value"]}
+    recs = cf.list(f"/zones/{zid}/dns_records")
+    out["proxied_records"] = sorted(({"name": r["name"], "type": r["type"], "content": r["content"]}
+                                     for r in recs if r.get("proxied") and r.get("type") in ("A", "AAAA", "CNAME")),
+                                    key=lambda x: (x["name"], x["type"], x["content"]))
+    try:
+        lbs = cf.list(f"/zones/{zid}/load_balancers")
+    except CutoverError as e:
+        lbs, out["load_balancers"] = [], f"unreadable ({e})"
+    if lbs:
+        pools = {}
+        try:
+            pools = {p["id"]: p for p in cf.list(f"/accounts/{_account(z)}/load_balancers/pools")}
+        except CutoverError as e:
+            out["pools_error"] = str(e)
+        rows = []
+        for lb in lbs:
+            ids = list(dict.fromkeys(list(lb.get("default_pools") or []) + [lb.get("fallback_pool")]))
+            rows.append({"hostname": lb.get("name"), "proxied": lb.get("proxied"), "pools": [
+                {"id": i, "name": (pools.get(i) or {}).get("name"),
+                 "origins": [{"name": o.get("name"), "address": o.get("address"), "enabled": o.get("enabled"),
+                              "host_header": ((o.get("header") or {}).get("Host"))}
+                             for o in (pools.get(i) or {}).get("origins") or []]} for i in ids if i]})
+        out["load_balancers"] = rows
+    elif "load_balancers" not in out:
+        out["load_balancers"] = []
+    rs = _cfg_entrypoint(cf, zid)
+    out["config_rules"] = None if rs is None else {"id": rs.get("id"), "rules": rs.get("rules") or []}
+    return out
+
+
+def ssl_mode(clients, zone_name, mode, dry_run):
+    """Set the zone SSL mode to full|strict. Result carries the prior value (revert = the other mode)."""
+    if mode not in SSL_MODES:
+        raise CutoverError(f"ssl_mode {mode!r}: only {list(SSL_MODES)}")
+    cf, z = _ssl_zone(clients, zone_name)
+    path = f"/zones/{z['id']}/settings/ssl"
+    prior = cf.call("GET", path)["result"]["value"]
+    res = {"zone": zone_name, "prior": prior, "target": mode, "dry_run": dry_run, "at": _now(),
+           "changed": prior != mode}
+    if dry_run or prior == mode:
+        res["after"] = prior
+        return res
+    cf.call("PATCH", path, body={"value": mode})
+    res["after"] = cf.call("GET", path)["result"]["value"]
+    return res
+
+
+def parse_hosts(raw, zone_name):
+    hosts = sorted({h.strip().lower() for h in (raw or "").split(",") if h.strip()})
+    if not hosts:
+        raise CutoverError("ssl-keep-full needs --hosts a,b (explicit host list)")
+    for h in hosts:
+        if not HOST_RE.match(h) or "*" in h:
+            raise CutoverError(f"{h}: not a plain hostname")
+        if not (h == zone_name or h.endswith("." + zone_name)):
+            raise CutoverError(f"{h}: not in zone {zone_name}")
+    return hosts
+
+
+def ssl_full_rule(hosts):
+    return {"action": "set_config", "action_parameters": {"ssl": "full"},
+            "expression": "(http.host in {" + " ".join(f'"{h}"' for h in hosts) + "})",
+            "description": SSL_FULL_MARK, "enabled": True}
+
+
+def ssl_keep_full(clients, zone_name, raw_hosts, dry_run):
+    """Upsert ONE config rule (description SSL_FULL_MARK) that keeps the listed hosts on SSL Full.
+    Never removes or edits any other rule of the ruleset."""
+    hosts = parse_hosts(raw_hosts, zone_name)
+    cf, z = _ssl_zone(clients, zone_name)
+    zid, rule = z["id"], ssl_full_rule(hosts)
+    prior = _cfg_entrypoint(cf, zid)
+    mine = [r for r in (prior or {}).get("rules") or [] if r.get("description") == SSL_FULL_MARK]
+    if len(mine) > 1:
+        raise CutoverError(f"{len(mine)} rules carry {SSL_FULL_MARK} - fix by hand, refusing to guess")
+    if prior is None:
+        op = {"op": "create-entrypoint", "path": f"/zones/{zid}/rulesets/phases/{CFG_PHASE}/entrypoint"}
+    elif mine:
+        op = {"op": "patch-rule", "path": f"/zones/{zid}/rulesets/{prior['id']}/rules/{mine[0]['id']}"}
+    else:
+        op = {"op": "add-rule", "path": f"/zones/{zid}/rulesets/{prior['id']}/rules"}
+    res = {"zone": zone_name, "hosts": hosts, "rule": rule, "plan": op["op"], "prior_ruleset": prior,
+           "dry_run": dry_run, "at": _now()}
+    if dry_run:
+        return res
+    if op["op"] == "create-entrypoint":
+        cf.call("PUT", op["path"], body={"rules": [rule]})
+    elif op["op"] == "patch-rule":
+        cf.call("PATCH", op["path"], body=rule)
+    else:
+        cf.call("POST", op["path"], body=rule)
+    after = _cfg_entrypoint(cf, zid) or {}
+    before_ids = {r.get("id") for r in (prior or {}).get("rules") or []}
+    after_ids = {r.get("id") for r in after.get("rules") or []}
+    if not before_ids <= after_ids:
+        raise CutoverError(f"rules disappeared after write: {sorted(before_ids - after_ids)}")
+    res["after_ruleset"] = after
+    return res
+
+
 def main(argv=None):
     p = argparse.ArgumentParser()
     p.add_argument("action", choices=["inventory", "origin-cert", "dns-switch", "dns-revert",
                                        "lb-inventory", "lb-pools", "lb-switch", "lb-revert", "verify",
                                        "dns-only-upsert", "monitor-ensure", "pool-origin-swap",
                                        "pool-restore", "pool-health", "monitor-delete",
-                                       "pool-aws-nodes", "dns-only-delete"])
+                                       "pool-aws-nodes", "dns-only-delete",
+                                       "zone-audit", "ssl-mode", "ssl-keep-full"])
     p.add_argument("--host", default="")
     p.add_argument("--eips", default=",".join(DEFAULT_EIPS))
     p.add_argument("--csr-b64", default=os.environ.get("CSR_B64", ""))
     p.add_argument("--prior-b64", default=os.environ.get("PRIOR_B64", ""))
+    p.add_argument("--ssl-mode", default="")
+    p.add_argument("--hosts", default="")
     p.add_argument("--out", default="cf-out")
     p.add_argument("--apply", action="store_true", help="write changes (default: dry run)")
     a = p.parse_args(argv)
@@ -798,6 +942,12 @@ def main(argv=None):
             res = dns_only_delete(clients, a.host, not a.apply)
         elif a.action == "pool-restore":
             res = pool_restore(clients, "neonbee.app", a.prior_b64, not a.apply)
+        elif a.action == "zone-audit":
+            res = zone_audit(clients, a.host)
+        elif a.action == "ssl-mode":
+            res = ssl_mode(clients, a.host, a.ssl_mode, not a.apply)
+        elif a.action == "ssl-keep-full":
+            res = ssl_keep_full(clients, a.host, a.hosts, not a.apply)
         elif a.action == "pool-health":
             res = pool_health(clients, "neonbee.app")
         elif a.action == "monitor-delete":
