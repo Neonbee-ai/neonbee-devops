@@ -8,9 +8,9 @@ on:
   workflow_dispatch:
     inputs:
       action:
-        description: 'inventory | origin-cert | dns-switch | dns-revert'
+        description: 'inventory | origin-cert | dns-switch | dns-revert | lb-inventory | lb-pools | lb-switch | lb-revert'
         type: choice
-        options: [inventory, origin-cert, dns-switch, dns-revert]
+        options: [inventory, origin-cert, dns-switch, dns-revert, lb-inventory, lb-pools, lb-switch, lb-revert]
         default: inventory
       hostname:
         description: 'Host for dns-switch/dns-revert (e.g. sso.neonbee.app); zone for origin-cert (neonbee.app)'
