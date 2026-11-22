@@ -12,7 +12,7 @@ on:
       action:
         description: 'inventory | origin-cert | dns-switch | dns-revert | lb-inventory | lb-pools | lb-switch | lb-revert | verify | dns-only-upsert | monitor-ensure | pool-origin-swap | pool-restore | pool-health | monitor-delete'
         type: choice
-        options: [inventory, origin-cert, dns-switch, dns-revert, lb-inventory, lb-pools, lb-switch, lb-revert, verify, dns-only-upsert, monitor-ensure, pool-origin-swap, pool-restore, pool-health, monitor-delete, pool-aws-nodes, dns-only-delete]
+        options: [inventory, origin-cert, dns-switch, dns-revert, lb-inventory, lb-pools, lb-switch, lb-revert, verify, dns-only-upsert, monitor-ensure, pool-origin-swap, pool-restore, pool-health, monitor-delete, pool-aws-nodes, dns-only-delete, zone-audit, ssl-mode, ssl-keep-full]
         default: inventory
       hostname:
         description: 'Host for dns-switch/dns-revert (e.g. sso.neonbee.app); zone for origin-cert (neonbee.app)'
@@ -28,6 +28,15 @@ on:
         default: ''
       prior_b64:
         description: 'pool-restore only: base64 of the prior pool JSON from a pool-origin-swap result'
+        type: string
+        default: ''
+      ssl_mode:
+        description: 'ssl-mode only: full | strict (hostname = zone)'
+        type: choice
+        options: [strict, full]
+        default: full
+      hosts:
+        description: 'ssl-keep-full only: comma-separated hosts kept on SSL Full (hostname = zone)'
         type: string
         default: ''
       eips:
@@ -59,10 +68,12 @@ jobs:
           CSR_B64: ${{ inputs.csr_b64 }}
           EIPS: ${{ inputs.eips }}
           PRIOR_B64: ${{ inputs.prior_b64 }}
+          SSL_MODE: ${{ inputs.ssl_mode }}
+          HOSTS: ${{ inputs.hosts }}
         run: |
           set -euo pipefail
           APPLY=""; [ "$DRY_RUN" = "false" ] && APPLY="--apply"
-          python3 -I infra/aws/cloudflare/cf_cutover.py "$ACTION" --host "$HOST" --eips "$EIPS" --out cf-out $APPLY
+          python3 -I infra/aws/cloudflare/cf_cutover.py "$ACTION" --host "$HOST" --eips "$EIPS" --ssl-mode "$SSL_MODE" --hosts "$HOSTS" --out cf-out $APPLY
       - name: Upload result
         if: always()
         uses: actions/upload-artifact@v4

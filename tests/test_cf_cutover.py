@@ -688,3 +688,160 @@ class StoreSitesTest(unittest.TestCase):
         hosts = cc.bundle_hosts()
         self.assertIn("neonbee.store", hosts)
         self.assertIn("customers-fallback.neonbee.store", hosts)
+
+
+class FakeSSL:
+    """In-memory zone for SSL mode + http_config_settings entrypoint ruleset."""
+
+    def __init__(self, zone="neonbee.store", ssl="full", rules=None, records=(), lbs=(), pools=()):
+        self.label, self.calls, self.ssl = "CF_LB_API_TOKEN", [], ssl
+        self.zones = [{"id": "z1", "name": zone, "status": "active", "account": {"id": "acct"}}]
+        self.rs = None if rules is None else {"id": "rs1", "rules": [dict(r) for r in rules]}
+        self.records, self.lbs, self.pools, self.n = list(records), list(lbs), list(pools), 0
+
+    def list(self, path, params=None):
+        if path == "/zones":
+            return self.zones
+        if path.endswith("/dns_records"):
+            return [dict(r) for r in self.records]
+        if path.endswith("/load_balancers"):
+            return self.lbs
+        if path.endswith("/load_balancers/pools"):
+            return self.pools
+        raise AssertionError(path)
+
+    def call(self, method, path, params=None, body=None):
+        self.calls.append((method, path, body))
+        if path.endswith("/settings/ssl"):
+            if method == "PATCH":
+                self.ssl = body["value"]
+            return {"result": {"value": self.ssl}}
+        if path.endswith("/phases/http_config_settings/entrypoint"):
+            if method == "GET":
+                if self.rs is None:
+                    raise cc.CutoverError("GET x failed (t): 10003: could not find entrypoint ruleset")
+                return {"result": json.loads(json.dumps(self.rs))}
+            self.rs = {"id": "rs-new", "rules": [dict(r, id="r-new") for r in body["rules"]]}
+            return {"result": self.rs}
+        if "/rulesets/" in path and method == "POST":
+            self.n += 1
+            self.rs["rules"].append(dict(body, id=f"r{self.n}"))
+            return {"result": self.rs}
+        if "/rulesets/" in path and method == "PATCH":
+            rid = path.rsplit("/", 1)[1]
+            r = next(r for r in self.rs["rules"] if r["id"] == rid)
+            r.clear(), r.update(dict(body, id=rid))
+            return {"result": self.rs}
+        raise AssertionError((method, path))
+
+    def writes(self):
+        return [c for c in self.calls if c[0] != "GET"]
+
+
+OTHER = {"id": "keep1", "action": "set_config", "action_parameters": {"rocket_loader": False},
+         "expression": "true", "description": "someone else"}
+
+
+class SslModeTest(unittest.TestCase):
+    def test_given_dry_run_when_setting_strict_then_prior_is_reported_and_nothing_is_written(self):
+        cf = FakeSSL()
+        res = cc.ssl_mode([cf], "neonbee.store", "strict", True)
+        self.assertEqual((res["prior"], res["after"], res["changed"]), ("full", "full", True))
+        self.assertEqual(cf.writes(), [])
+
+    def test_given_apply_when_setting_strict_then_zone_is_strict_and_prior_full_is_kept(self):
+        cf = FakeSSL()
+        res = cc.ssl_mode([cf], "neonbee.store", "strict", False)
+        self.assertEqual((res["prior"], res["after"]), ("full", "strict"))
+        self.assertEqual(cf.writes(), [("PATCH", "/zones/z1/settings/ssl", {"value": "strict"})])
+
+    def test_given_zone_already_in_target_mode_when_applying_then_nothing_is_written(self):
+        cf = FakeSSL(ssl="strict")
+        self.assertFalse(cc.ssl_mode([cf], "neonbee.store", "strict", False)["changed"])
+        self.assertEqual(cf.writes(), [])
+
+    def test_given_zone_outside_allowlist_or_bad_mode_when_setting_then_it_refuses(self):
+        for zone, mode in (("neonbee.ai", "strict"), ("moonhive.in", "full"), ("neonbee.store", "flexible")):
+            cf = FakeSSL(zone=zone)
+            with self.assertRaises(cc.CutoverError):
+                cc.ssl_mode([cf], zone, mode, False)
+            self.assertEqual(cf.writes(), [])
+
+
+class SslKeepFullTest(unittest.TestCase):
+    def test_given_no_entrypoint_when_applying_then_it_is_created_with_one_marked_rule(self):
+        cf = FakeSSL(zone="neonbee.app")
+        res = cc.ssl_keep_full([cf], "neonbee.app", "pulse.neonbee.app,command.neonbee.app", False)
+        self.assertIsNone(res["prior_ruleset"])
+        (m, path, body), = cf.writes()
+        self.assertEqual((m, path), ("PUT", "/zones/z1/rulesets/phases/http_config_settings/entrypoint"))
+        rule = body["rules"][0]
+        self.assertEqual((rule["action"], rule["action_parameters"], rule["description"]),
+                         ("set_config", {"ssl": "full"}, cc.SSL_FULL_MARK))
+        self.assertEqual(rule["expression"], '(http.host in {"command.neonbee.app" "pulse.neonbee.app"})')
+
+    def test_given_other_rules_when_applying_then_rule_is_added_and_others_are_kept(self):
+        cf = FakeSSL(zone="neonbee.app", rules=[OTHER])
+        res = cc.ssl_keep_full([cf], "neonbee.app", "pulse.neonbee.app", False)
+        self.assertEqual([c[0] for c in cf.writes()], ["POST"])
+        self.assertEqual([r["id"] for r in res["after_ruleset"]["rules"]], ["keep1", "r1"])
+        self.assertEqual(res["prior_ruleset"]["rules"][0]["id"], "keep1")
+
+    def test_given_existing_marked_rule_when_applying_then_only_it_is_patched(self):
+        mine = dict(cc.ssl_full_rule(["pulse.neonbee.app"]), id="mine")
+        cf = FakeSSL(zone="neonbee.app", rules=[OTHER, mine])
+        res = cc.ssl_keep_full([cf], "neonbee.app", "pulse.neonbee.app,mobility.neonbee.app", False)
+        (m, path, _), = cf.writes()
+        self.assertEqual((m, path), ("PATCH", "/zones/z1/rulesets/rs1/rules/mine"))
+        self.assertEqual(len(res["after_ruleset"]["rules"]), 2)
+        self.assertIn("mobility.neonbee.app", res["after_ruleset"]["rules"][1]["expression"])
+
+    def test_given_dry_run_when_planning_then_nothing_is_written(self):
+        cf = FakeSSL(zone="neonbee.app", rules=[OTHER])
+        self.assertEqual(cc.ssl_keep_full([cf], "neonbee.app", "pulse.neonbee.app", True)["plan"], "add-rule")
+        self.assertEqual(cf.writes(), [])
+
+    def test_given_bad_hosts_or_zone_when_planning_then_it_refuses_without_writing(self):
+        for zone, hosts in (("neonbee.app", ""), ("neonbee.app", "x.neonbee.store"), ("neonbee.app", "*.neonbee.app"),
+                            ("neonbee.ai", "neonbee.ai"), ("neonbee.app", "a b.neonbee.app")):
+            cf = FakeSSL(zone=zone)
+            with self.assertRaises(cc.CutoverError):
+                cc.ssl_keep_full([cf], zone, hosts, False)
+            self.assertEqual(cf.writes(), [])
+
+    def test_given_two_marked_rules_when_applying_then_it_refuses(self):
+        mine = dict(cc.ssl_full_rule(["pulse.neonbee.app"]), id="m1")
+        cf = FakeSSL(zone="neonbee.app", rules=[mine, dict(mine, id="m2")])
+        with self.assertRaises(cc.CutoverError):
+            cc.ssl_keep_full([cf], "neonbee.app", "pulse.neonbee.app", False)
+        self.assertEqual(cf.writes(), [])
+
+
+class ZoneAuditTest(unittest.TestCase):
+    def test_given_zone_when_auditing_then_proxied_records_lb_origins_ssl_and_rules_are_listed(self):
+        recs = [rec("1", "3.110.17.10", name="a.neonbee.app"), rec("2", "x.example", name="b.neonbee.app", typ="CNAME"),
+                rec("3", "1.2.3.4", name="grey.neonbee.app", proxied=False),
+                rec("4", "v=spf1", name="neonbee.app", typ="TXT")]
+        lbs = [{"name": "dashboard.neonbee.app", "proxied": True, "default_pools": ["p1"], "fallback_pool": "p1"}]
+        pools = [{"id": "p1", "name": "neonbee-ha-failover", "origins": [{"name": "n1", "address": "3.110.17.10",
+                                                                          "enabled": True}]},
+                 {"id": "p2", "name": "castle-rock", "origins": [{"name": "x", "address": "9.9.9.9"}]}]
+        cf = FakeSSL(zone="neonbee.app", rules=[OTHER], records=recs, lbs=lbs, pools=pools)
+        out = cc.zone_audit([cf], "neonbee.app")
+        self.assertEqual([r["name"] for r in out["proxied_records"]], ["a.neonbee.app", "b.neonbee.app"])
+        self.assertEqual(out["ssl"], "full")
+        (lb,) = out["load_balancers"]
+        self.assertEqual([p["name"] for p in lb["pools"]], ["neonbee-ha-failover"])
+        self.assertEqual(lb["pools"][0]["origins"][0]["address"], "3.110.17.10")
+        self.assertEqual(out["config_rules"]["rules"][0]["id"], "keep1")
+        self.assertEqual(cf.writes(), [])
+
+    def test_given_no_entrypoint_when_auditing_then_config_rules_is_none(self):
+        self.assertIsNone(cc.zone_audit([FakeSSL()], "neonbee.store")["config_rules"])
+
+
+class SslWorkflowTest(unittest.TestCase):
+    def test_given_workflow_when_read_then_ssl_actions_and_inputs_are_wired(self):
+        for s in ("zone-audit", "ssl-mode", "ssl-keep-full", "ssl_mode:", "hosts:", '--ssl-mode "$SSL_MODE"',
+                  '--hosts "$HOSTS"'):
+            self.assertIn(s, WF)
