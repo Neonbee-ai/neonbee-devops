@@ -74,7 +74,8 @@ activate() {  # switch `current` to $1 (absolute release dir) and (re)start
     fi
     # Optional bundle hook (nb-nginx-sites: origin TLS certs) runs before the config test.
     if [ -x "$target/ensure-tls.sh" ]; then "$target/ensure-tls.sh" || return 1; fi
-    nginx -t -q && systemctl reload nginx
+    # A node that booted before the sites existed has nginx failed/inactive: reload cannot start it.
+    nginx -t -q && { systemctl reload nginx 2>/dev/null || { systemctl reset-failed nginx 2>/dev/null; systemctl restart nginx; }; }
     return
   fi
   nb_render_env "$SVC" "$target"
