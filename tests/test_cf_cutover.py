@@ -840,6 +840,21 @@ class ZoneAuditTest(unittest.TestCase):
         self.assertIsNone(cc.zone_audit([FakeSSL()], "neonbee.store")["config_rules"])
 
 
+class ZoneAuditNoRulesPermTest(unittest.TestCase):
+    def test_given_token_without_config_rules_read_when_auditing_then_rules_are_reported_unreadable(self):
+        cf = FakeSSL(rules=[])
+        orig = cf.call
+
+        def call(method, path, params=None, body=None):
+            if "/rulesets/" in path:
+                raise cc.CutoverError("GET x failed (t): 10000: Authentication error")
+            return orig(method, path, params, body)
+        cf.call = call
+        out = cc.zone_audit([cf], "neonbee.store")
+        self.assertTrue(out["config_rules"].startswith("unreadable"))
+        self.assertEqual(out["ssl"], "full")
+
+
 class SslWorkflowTest(unittest.TestCase):
     def test_given_workflow_when_read_then_ssl_actions_and_inputs_are_wired(self):
         for s in ("zone-audit", "ssl-mode", "ssl-keep-full", "ssl_mode:", "hosts:", '--ssl-mode "$SSL_MODE"',

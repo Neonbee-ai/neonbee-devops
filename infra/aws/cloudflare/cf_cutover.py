@@ -804,8 +804,11 @@ def zone_audit(clients, zone_name):
         out["load_balancers"] = rows
     elif "load_balancers" not in out:
         out["load_balancers"] = []
-    rs = _cfg_entrypoint(cf, zid)
-    out["config_rules"] = None if rs is None else {"id": rs.get("id"), "rules": rs.get("rules") or []}
+    try:
+        rs = _cfg_entrypoint(cf, zid)
+        out["config_rules"] = None if rs is None else {"id": rs.get("id"), "rules": rs.get("rules") or []}
+    except CutoverError as e:  # token without Config Rules read: report, keep the read-only audit going
+        out["config_rules"] = f"unreadable ({e})"
     return out
 
 
