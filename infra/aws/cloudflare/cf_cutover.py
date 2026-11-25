@@ -911,8 +911,7 @@ def cache_rule_body():
                                   "edge_ttl": {"mode": "bypass_by_default"},
                                   "browser_ttl": {"mode": "respect_origin"},
                                   "serve_stale": {"disable_stale_while_updating": False},
-                                  "origin_cache_control": True,
-                                  "cache_deception_armor": True},
+                                  "origin_cache_control": True},
             "expression": CACHE_EXPRESSION, "description": CACHE_MARK, "enabled": True}
 
 
