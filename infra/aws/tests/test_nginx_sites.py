@@ -93,8 +93,19 @@ class NginxSitesTest(unittest.TestCase):
     def test_given_asset_cache_map_when_generated_then_immutable_only_on_success_and_errors_no_store(self):
         http = FILES["00-nb-http.conf"]
         self.assertIn("map $status $nb_asset_cache_control {", http)
-        self.assertIn('~^[23]  "public, max-age=31536000, immutable";', http)
+        for code in ("200", "206", "304"):
+            self.assertIn(f'    {code}     "public, max-age=31536000, immutable";', http)
         self.assertIn('default "no-store";', http)
+
+    def test_given_asset_cache_map_when_status_is_redirect_or_error_then_not_immutable(self):
+        http = FILES["00-nb-http.conf"]
+        block = http[http.index("map $status $nb_asset_cache_control {"):]
+        block = block[:block.index("}") + 1]
+        self.assertNotIn("~", block)  # no regex classes (e.g. ~^[23] would pin 301/302)
+        keys = [ln.split()[0] for ln in block.splitlines()[1:-1] if ln.strip()]
+        self.assertEqual(sorted(keys), ["200", "206", "304", "default"])
+        for code in ("301", "302", "307", "308", "404", "500"):
+            self.assertNotIn(f"    {code} ", block)
 
     def test_given_any_site_when_generated_then_no_literal_immutable_header_or_duplicate_expires_on_mfe_hosts(self):
         for f in ("cdn.neonbee.app.conf", "dashboard.neonbee.app.conf", "sso.neonbee.app.conf"):

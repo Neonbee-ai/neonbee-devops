@@ -56,13 +56,15 @@ PROXY_HDRS = (
 )
 ASSET_EXT = r"js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot"
 # Cache policy (MFE load perf + stale-deploy safety, 2026-11-25):
-#  - hashed assets: ONE header, 1y immutable, but only on 2xx/3xx. The status map sends
-#    no-store on 404/5xx so a chunk requested before its rsync lands is never pinned
+#  - hashed assets: ONE header, 1y immutable, but only on 200/206/304. The status map sends
+#    no-store on 3xx redirects/404/5xx so a chunk requested before its rsync lands is never pinned
 #    (browser or Cloudflare) as an immutable 404.
 #  - manifests (remoteEntry.js, index.html, sw.js, web manifests): no-cache = always
 #    revalidate; nginx's ETag/Last-Modified turn repeat loads into 304s (no-store did not).
 ASSET_CC_MAP = ('map $status $nb_asset_cache_control {\n'
-                '    ~^[23]  "public, max-age=31536000, immutable";\n'
+                '    200     "public, max-age=31536000, immutable";\n'
+                '    206     "public, max-age=31536000, immutable";\n'
+                '    304     "public, max-age=31536000, immutable";\n'
                 '    default "no-store";\n}\n')
 IMMUTABLE = "        add_header Cache-Control $nb_asset_cache_control always;\n"
 REVALIDATE = '        add_header Cache-Control "no-cache" always;\n'
