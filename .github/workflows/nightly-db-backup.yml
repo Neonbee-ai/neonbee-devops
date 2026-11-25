@@ -1,0 +1,230 @@
+name: Nightly prod DB backup (off-Supabase)
+
+# Nightly logical backup of the prod Supabase Postgres DB to our own S3 bucket
+# (infra/db-backup-bucket.yml). Runbook: SO360 V.2 documents/devops/db-backup.md.
+#
+# No DB password is stored anywhere: the Supabase CLI mints short-lived login-role
+# credentials from SUPABASE_BACKUP_ACCESS_TOKEN (`supabase db dump --dry-run` only
+# prints them; the real `db dump` needs Docker, so pg_dump runs directly).
+# The temp role must `SET ROLE postgres` to read every schema (--role=postgres).
+#
+# Secrets (repo or org level):
+#   SUPABASE_BACKUP_ACCESS_TOKEN  Supabase personal access token (dedicated, rotatable)
+#   PROD_SUPABASE_REF             prod project ref
+#   NOTIFY_WEBHOOK_URL            Teams webhook (already used by the other workflows)
+# Variables:
+#   NB_DB_BACKUP_BUCKET           bucket name (stack output BucketName)
+#   NB_DB_BACKUP_ROLE_ARN         OIDC role ARN (stack output BackupRoleArn) - preferred
+#   NB_AWS_REGION                 optional, defaults to ap-south-1
+# Fallback when NB_DB_BACKUP_ROLE_ARN is unset (IAM user from the same stack):
+#   AWS_BACKUP_ACCESS_KEY_ID / AWS_BACKUP_SECRET_ACCESS_KEY
+#
+# Runner: pinned to the Mac Minis ([self-hosted, runner-vm]) so it never
+# lands on an ephemeral burst VM. Tools come from Homebrew (pg_dump must be >= 17).
+
+on:
+  schedule:
+    - cron: '30 20 * * *'   # 20:30 UTC = 02:00 IST
+  workflow_dispatch:
+
+concurrency:
+  group: nightly-db-backup
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write   # OIDC -> AWS role
+
+env:
+  AWS_REGION: ${{ vars.NB_AWS_REGION || 'ap-south-1' }}
+  AWS_DEFAULT_REGION: ${{ vars.NB_AWS_REGION || 'ap-south-1' }}
+  BUCKET: ${{ vars.NB_DB_BACKUP_BUCKET }}
+
+jobs:
+  backup:
+    name: Dump prod DB to S3
+    runs-on: [self-hosted, runner-vm]
+    timeout-minutes: 120
+    steps:
+      - name: Preflight (inputs present)
+        env:
+          SB_TOKEN: ${{ secrets.SUPABASE_BACKUP_ACCESS_TOKEN }}
+          SB_REF: ${{ secrets.PROD_SUPABASE_REF }}
+        run: |
+          set -euo pipefail
+          miss=""
+          [ -n "$SB_TOKEN" ] || miss="$miss SUPABASE_BACKUP_ACCESS_TOKEN"
+          [ -n "$SB_REF" ]   || miss="$miss PROD_SUPABASE_REF"
+          [ -n "$BUCKET" ]   || miss="$miss vars.NB_DB_BACKUP_BUCKET"
+          if [ -n "$miss" ]; then echo "::error::missing:$miss"; exit 1; fi
+
+      - name: Ensure tools (supabase CLI, pg_dump >= 17, aws CLI)
+        run: |
+          set -euo pipefail
+          export HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1
+          command -v supabase >/dev/null 2>&1 || brew install supabase/tap/supabase
+          PGBIN=""
+          for v in 18 17; do
+            if [ -x "$(brew --prefix)/opt/postgresql@$v/bin/pg_dump" ]; then PGBIN="$(brew --prefix)/opt/postgresql@$v/bin"; break; fi
+          done
+          if [ -z "$PGBIN" ]; then brew install postgresql@17; PGBIN="$(brew --prefix)/opt/postgresql@17/bin"; fi
+          echo "$PGBIN" >> "$GITHUB_PATH"
+          # aws CLI: Homebrew python on the Minis cannot load pyexpat, so use the
+          # system-python venv (~/awscli-venv) when present, else build one in RUNNER_TEMP.
+          if [ -x "$HOME/awscli-venv/bin/aws" ]; then
+            echo "$HOME/awscli-venv/bin" >> "$GITHUB_PATH"
+          elif ! command -v aws >/dev/null 2>&1; then
+            /usr/bin/python3 -m venv "$RUNNER_TEMP/awscli-venv"
+            "$RUNNER_TEMP/awscli-venv/bin/pip" install -q awscli
+            echo "$RUNNER_TEMP/awscli-venv/bin" >> "$GITHUB_PATH"
+          fi
+
+      - name: Tool versions
+        run: |
+          set -euo pipefail
+          supabase --version
+          pg_dump --version
+          aws --version
+          major=$(pg_dump --version | sed -E 's/[^0-9]*([0-9]+).*/\1/')
+          [ "$major" -ge 17 ] || { echo "::error::pg_dump $major < 17"; exit 1; }
+
+      - name: AWS credentials (OIDC role)
+        if: ${{ vars.NB_DB_BACKUP_ROLE_ARN != '' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.NB_DB_BACKUP_ROLE_ARN }}
+          role-session-name: nb-db-backup-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: AWS credentials (access key fallback)
+        if: ${{ vars.NB_DB_BACKUP_ROLE_ARN == '' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_BACKUP_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_BACKUP_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Dump, verify, manifest, upload
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_BACKUP_ACCESS_TOKEN }}
+          SB_REF: ${{ secrets.PROD_SUPABASE_REF }}
+        run: |
+          set -euo pipefail
+          umask 077
+          WORK="$RUNNER_TEMP/nb-db-backup-${GITHUB_RUN_ID}"
+          rm -rf "$WORK"; mkdir -p "$WORK/proj"
+          echo "WORK=$WORK" >> "$GITHUB_ENV"
+          cd "$WORK/proj"
+
+          # 1. Short-lived credentials from the Supabase CLI (never echoed).
+          supabase init --force >/dev/null
+          echo "" | supabase link --project-ref "$SB_REF" >/dev/null 2>&1 \
+            || { echo "::error::supabase link failed (token expired/revoked?)"; exit 1; }
+          supabase db dump --linked --dry-run 2>/dev/null \
+            | grep -E '^export PG(HOST|PORT|USER|PASSWORD|DATABASE)="' > "$WORK/pgenv.sh" || true
+          [ "$(grep -c '^export PG' "$WORK/pgenv.sh")" -eq 5 ] \
+            || { echo "::error::could not read temp PG credentials from supabase db dump --dry-run"; exit 1; }
+          # shellcheck disable=SC1091
+          . "$WORK/pgenv.sh"
+          echo "::add-mask::$PGPASSWORD"
+          echo "::add-mask::$PGUSER"
+          rm -f "$WORK/pgenv.sh"
+          export PGSSLMODE=require PGCONNECT_TIMEOUT=30
+
+          DAY=$(date -u +%F); Y=$(date -u +%Y); M=$(date -u +%m); D=$(date -u +%d)
+          BASE="prod-${DAY}"
+          DUMP="$WORK/$BASE.dump"; MAN="$WORK/$BASE.manifest.json"; SUM="$WORK/$BASE.sha256"
+
+          # 2. Dump (custom format, compressed; pgbouncer schema is Supabase-managed).
+          pg_dump --role=postgres -Fc -Z 6 -N pgbouncer -f "$DUMP"
+          SIZE=$(wc -c < "$DUMP" | tr -d ' ')
+          echo "dump size: $SIZE bytes"
+
+          # 3. Sanity: TOC lists objects and includes auth.users + public.tenants.
+          pg_restore --list "$DUMP" > "$WORK/toc.txt"
+          OBJS=$(grep -cv '^;' "$WORK/toc.txt" || true)
+          echo "toc entries: $OBJS"
+          [ "$OBJS" -gt 0 ] || { echo "::error::empty dump TOC"; exit 1; }
+          grep -qE 'TABLE DATA auth users ' "$WORK/toc.txt"     || { echo "::error::auth.users data missing from dump"; exit 1; }
+          grep -qE 'TABLE DATA public tenants ' "$WORK/toc.txt" || { echo "::error::public.tenants data missing from dump"; exit 1; }
+
+          # 4. Row-count manifest of key tables (live counts at dump time).
+          COUNTS=$(psql -X -q -v ON_ERROR_STOP=1 -At <<'SQL'
+          SET ROLE postgres;
+          SELECT json_object_agg(t, n) FROM (
+            SELECT t, (xpath('/row/c/text()', query_to_xml(format('select count(*) as c from %s', t), false, true, '')))[1]::text::bigint AS n
+            FROM unnest(ARRAY['public.tenants','public.organizations','auth.users',
+                              'public.invoices','public.journal_entries',
+                              'accounting.invoices','accounting.journal_entries']) AS t
+            WHERE to_regclass(t) IS NOT NULL
+          ) s;
+          SQL
+          )
+          SHA=$(shasum -a 256 "$DUMP" | awk '{print $1}')
+          printf '%s  %s\n' "$SHA" "$BASE.dump" > "$SUM"
+          cat > "$MAN" <<JSON
+          {"project_ref_suffix":"${SB_REF: -4}","created_utc":"$(date -u +%FT%TZ)","dump":"$BASE.dump","bytes":$SIZE,"sha256":"$SHA","toc_entries":$OBJS,"pg_dump":"$(pg_dump --version | tr -d '"')","row_counts":$COUNTS,"run":"${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"}
+          JSON
+          python3 -c "import json,sys; json.load(open(sys.argv[1]))" "$MAN"
+          echo "row counts: $COUNTS"
+
+          # 5. Upload (SSE-S3; checksum header is required for Object Lock buckets).
+          up() { aws s3 cp "$1" "s3://$BUCKET/$2" --only-show-errors --sse AES256 --checksum-algorithm SHA256; }
+          prefix="daily/$Y/$M/$D"
+          up "$DUMP" "$prefix/$BASE.dump"; up "$MAN" "$prefix/$BASE.manifest.json"; up "$SUM" "$prefix/$BASE.sha256"
+          if [ "$D" = "01" ]; then
+            up "$DUMP" "monthly/$Y/$M/$BASE.dump"; up "$MAN" "monthly/$Y/$M/$BASE.manifest.json"; up "$SUM" "monthly/$Y/$M/$BASE.sha256"
+          fi
+          # Verify the object landed with the expected size.
+          RSIZE=$(aws s3api head-object --bucket "$BUCKET" --key "daily/$Y/$M/$D/$BASE.dump" --query ContentLength --output text)
+          [ "$RSIZE" = "$SIZE" ] || { echo "::error::uploaded size $RSIZE != local $SIZE"; exit 1; }
+          echo "### DB backup $DAY" >> "$GITHUB_STEP_SUMMARY"
+          echo "s3://$BUCKET/daily/$Y/$M/$D/$BASE.dump - $SIZE bytes, $OBJS TOC entries, sha256 \`$SHA\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Delete local files
+        if: always()
+        run: |
+          [ -n "${WORK:-}" ] && rm -rf "$WORK" || true
+          rm -rf "$RUNNER_TEMP"/nb-db-backup-* 2>/dev/null || true
+
+      - name: Teams alert on failure
+        if: failure()
+        env:
+          HOOK: ${{ secrets.NOTIFY_WEBHOOK_URL }}
+        run: |
+          if [ -z "$HOOK" ]; then echo "NOTIFY_WEBHOOK_URL not set - skipping"; exit 0; fi
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          curl -sf -H 'Content-Type: application/json' --data @- "$HOOK" <<JSON || echo "Teams notify failed (non-fatal)"
+          {
+            "type": "message",
+            "attachments": [{
+              "contentType": "application/vnd.microsoft.card.adaptive",
+              "content": {
+                "type": "AdaptiveCard",
+                "version": "1.4",
+                "body": [
+                  { "type": "TextBlock", "size": "Large", "weight": "Bolder", "color": "Attention", "text": "Nightly prod DB backup FAILED", "wrap": true },
+                  { "type": "TextBlock", "text": "No off-Supabase backup was written for $(date -u +%F). Fix before the next run.", "wrap": true }
+                ],
+                "actions": [{ "type": "Action.OpenUrl", "title": "View run", "url": "${RUN_URL}" }]
+              }
+            }]
+          }
+          JSON
+
+  # ── Weekly restore test (Sunday) - STUB, disabled ──────────────────────────
+  # LATER: on Sundays (cron '30 22 * * 0' or a check of `date -u +%u` == 7):
+  #   1. aws s3 ls s3://$BUCKET/daily/ --recursive | sort | tail -1  -> latest dump
+  #   2. aws s3 cp it + its .sha256; shasum -a 256 -c
+  #   3. pg_restore --list > toc.txt; assert counts like the backup job
+  #   4. restore into the Supabase `develop` branch DB (never prod):
+  #        pg_restore --no-owner --no-privileges --role=postgres -n public -n accounting ... -d "$DEVELOP_DB_URL"
+  #      then compare row counts with the manifest JSON.
+  #   Needs: a develop-branch connection secret and GetObject (already in the role).
+  restore-test:
+    name: Weekly restore test (disabled stub)
+    if: ${{ false }}
+    runs-on: [self-hosted, runner-vm]
+    timeout-minutes: 120
+    steps:
+      - run: echo "restore test not implemented yet - see comments above"
