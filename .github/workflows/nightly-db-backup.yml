@@ -69,6 +69,12 @@ jobs:
           case "$ARCH" in x86_64|amd64) DEB=amd64; AWSA=x86_64 ;; arm64|aarch64) DEB=arm64; AWSA=aarch64 ;; *) echo "::error::unsupported arch $ARCH"; exit 1 ;; esac
           SUDO=""; if [ "$(id -u)" = 0 ]; then SUDO=" "; elif sudo -n true 2>/dev/null; then SUDO="sudo -n"; fi
           pgmajor() { "$1" --version 2>/dev/null | sed -E 's/[^0-9]*([0-9]+).*/\1/'; }
+          # Runner services often start without Homebrew on PATH (Minis): load its shellenv if installed.
+          if ! command -v brew >/dev/null 2>&1; then
+            for b in /opt/homebrew/bin/brew /usr/local/bin/brew /home/linuxbrew/.linuxbrew/bin/brew; do
+              [ -x "$b" ] && { eval "$("$b" shellenv)"; dirname "$b" >> "$GITHUB_PATH"; break; }
+            done
+          fi
 
           # pg_dump >= 17: PATH -> Homebrew -> PGDG apt (sudo) -> PGDG debs unpacked into RUNNER_TEMP (no sudo).
           PGBIN=""
@@ -104,7 +110,7 @@ jobs:
               echo "LD_LIBRARY_PATH=$LIBDIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
             fi
           fi
-          [ -n "$PGBIN" ] && [ -x "$PGBIN/pg_dump" ] || { echo "::error::could not provide pg_dump >= 17"; exit 1; }
+          [ -n "$PGBIN" ] && [ -x "$PGBIN/pg_dump" ] || { echo "::error::could not provide pg_dump >= 17 (os=$OS, brew=$(command -v brew || echo none), sudo=${SUDO:-none})"; exit 1; }
           echo "$PGBIN" >> "$GITHUB_PATH"
 
           # aws CLI: existing -> ~/awscli-venv (Minis: brew python lacks pyexpat) -> official v2 zip (Linux) -> venv.
