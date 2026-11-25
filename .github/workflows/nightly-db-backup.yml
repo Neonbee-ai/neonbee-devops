@@ -19,8 +19,10 @@ name: Nightly prod DB backup (off-Supabase)
 # Fallback when NB_DB_BACKUP_ROLE_ARN is unset (IAM user from the same stack):
 #   AWS_BACKUP_ACCESS_KEY_ID / AWS_BACKUP_SECRET_ACCESS_KEY
 #
-# Runner: pinned to the Mac Minis ([self-hosted, runner-vm]) so it never
-# lands on an ephemeral burst VM. Tools come from Homebrew (pg_dump must be >= 17).
+# Runner: [self-hosted, runner-vm] (runner pool contract; Minis are QA-only). The tool
+# step is portable: Homebrew if present, else PGDG postgresql-client-17 (apt with sudo,
+# or debs unpacked into RUNNER_TEMP), aws CLI v2 zip and the supabase release tarball.
+# pg_dump must be >= 17. No Docker.
 
 on:
   schedule:
@@ -61,22 +63,72 @@ jobs:
       - name: Ensure tools (supabase CLI, pg_dump >= 17, aws CLI)
         run: |
           set -euo pipefail
-          export HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1
-          command -v supabase >/dev/null 2>&1 || brew install supabase/tap/supabase
+          T="$RUNNER_TEMP/nb-db-tools"; mkdir -p "$T/bin"
+          echo "$T/bin" >> "$GITHUB_PATH"
+          OS=$(uname -s); ARCH=$(uname -m)
+          case "$ARCH" in x86_64|amd64) DEB=amd64; AWSA=x86_64 ;; arm64|aarch64) DEB=arm64; AWSA=aarch64 ;; *) echo "::error::unsupported arch $ARCH"; exit 1 ;; esac
+          SUDO=""; if [ "$(id -u)" = 0 ]; then SUDO=" "; elif sudo -n true 2>/dev/null; then SUDO="sudo -n"; fi
+          pgmajor() { "$1" --version 2>/dev/null | sed -E 's/[^0-9]*([0-9]+).*/\1/'; }
+
+          # pg_dump >= 17: PATH -> Homebrew -> PGDG apt (sudo) -> PGDG debs unpacked into RUNNER_TEMP (no sudo).
           PGBIN=""
-          for v in 18 17; do
-            if [ -x "$(brew --prefix)/opt/postgresql@$v/bin/pg_dump" ]; then PGBIN="$(brew --prefix)/opt/postgresql@$v/bin"; break; fi
-          done
-          if [ -z "$PGBIN" ]; then brew install postgresql@17; PGBIN="$(brew --prefix)/opt/postgresql@17/bin"; fi
+          for d in /usr/lib/postgresql/18/bin /usr/lib/postgresql/17/bin; do [ -x "$d/pg_dump" ] && { PGBIN="$d"; break; }; done
+          if [ -z "$PGBIN" ] && command -v pg_dump >/dev/null 2>&1 && [ "$(pgmajor pg_dump)" -ge 17 ]; then PGBIN="$(dirname "$(command -v pg_dump)")"; fi
+          if [ -z "$PGBIN" ] && command -v brew >/dev/null 2>&1; then
+            export HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1
+            for v in 18 17; do [ -x "$(brew --prefix)/opt/postgresql@$v/bin/pg_dump" ] && { PGBIN="$(brew --prefix)/opt/postgresql@$v/bin"; break; }; done
+            if [ -z "$PGBIN" ]; then brew install postgresql@17; PGBIN="$(brew --prefix)/opt/postgresql@17/bin"; fi
+          fi
+          if [ -z "$PGBIN" ] && [ "$OS" = Linux ]; then
+            CODENAME=$(. /etc/os-release && echo "${VERSION_CODENAME:-}")
+            [ -n "$CODENAME" ] || { echo "::error::cannot detect distro codename"; exit 1; }
+            if [ -n "$SUDO" ]; then
+              $SUDO install -d /usr/share/postgresql-common/pgdg
+              curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | $SUDO tee /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc >/dev/null
+              echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt ${CODENAME}-pgdg main" | $SUDO tee /etc/apt/sources.list.d/pgdg.list >/dev/null
+              $SUDO apt-get update -q -o Dir::Etc::sourcelist=/etc/apt/sources.list.d/pgdg.list -o Dir::Etc::sourceparts=- -o APT::Get::List-Cleanup=0
+              $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y -q postgresql-client-17
+              PGBIN=/usr/lib/postgresql/17/bin
+            else
+              # No sudo: unpack postgresql-client-17 + libpq5 debs from the PGDG pool.
+              REPO=https://apt.postgresql.org/pub/repos/apt
+              curl -fsSL "$REPO/dists/${CODENAME}-pgdg/main/binary-${DEB}/Packages.gz" | gunzip > "$T/Packages"
+              for p in postgresql-client-17 libpq5; do
+                f=$(awk -v p="$p" '$1=="Package:"{n=$2} $1=="Filename:" && n==p {print $2}' "$T/Packages" | tail -1)
+                [ -n "$f" ] || { echo "::error::$p not found in PGDG $CODENAME"; exit 1; }
+                curl -fsSL "$REPO/$f" -o "$T/$p.deb"
+                dpkg-deb -x "$T/$p.deb" "$T/pg"
+              done
+              PGBIN="$T/pg/usr/lib/postgresql/17/bin"
+              LIBDIR=$(dirname "$(find "$T/pg" -name 'libpq.so.5' | head -1)")
+              echo "LD_LIBRARY_PATH=$LIBDIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+            fi
+          fi
+          [ -n "$PGBIN" ] && [ -x "$PGBIN/pg_dump" ] || { echo "::error::could not provide pg_dump >= 17"; exit 1; }
           echo "$PGBIN" >> "$GITHUB_PATH"
-          # aws CLI: Homebrew python on the Minis cannot load pyexpat, so use the
-          # system-python venv (~/awscli-venv) when present, else build one in RUNNER_TEMP.
+
+          # aws CLI: existing -> ~/awscli-venv (Minis: brew python lacks pyexpat) -> official v2 zip (Linux) -> venv.
           if [ -x "$HOME/awscli-venv/bin/aws" ]; then
             echo "$HOME/awscli-venv/bin" >> "$GITHUB_PATH"
           elif ! command -v aws >/dev/null 2>&1; then
-            /usr/bin/python3 -m venv "$RUNNER_TEMP/awscli-venv"
-            "$RUNNER_TEMP/awscli-venv/bin/pip" install -q awscli
-            echo "$RUNNER_TEMP/awscli-venv/bin" >> "$GITHUB_PATH"
+            if [ "$OS" = Linux ]; then
+              curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-${AWSA}.zip" -o "$T/awscliv2.zip"
+              (cd "$T" && unzip -q awscliv2.zip && ./aws/install -i "$T/aws-cli" -b "$T/bin")
+            else
+              /usr/bin/python3 -m venv "$T/awscli-venv"
+              "$T/awscli-venv/bin/pip" install -q awscli
+              echo "$T/awscli-venv/bin" >> "$GITHUB_PATH"
+            fi
+          fi
+
+          # supabase CLI (mints the temp DB login): existing -> brew -> GitHub release tarball.
+          if ! command -v supabase >/dev/null 2>&1; then
+            if command -v brew >/dev/null 2>&1; then
+              HOMEBREW_NO_AUTO_UPDATE=1 brew install supabase/tap/supabase
+            else
+              SOS=$(echo "$OS" | tr '[:upper:]' '[:lower:]')
+              curl -fsSL "https://github.com/supabase/cli/releases/latest/download/supabase_${SOS}_${DEB}.tar.gz" | tar -xz -C "$T/bin" supabase
+            fi
           fi
 
       - name: Tool versions
@@ -160,7 +212,7 @@ jobs:
           ) s;
           SQL
           )
-          SHA=$(shasum -a 256 "$DUMP" | awk '{print $1}')
+          SHA=$( (command -v sha256sum >/dev/null && sha256sum "$DUMP" || shasum -a 256 "$DUMP") | awk '{print $1}')
           printf '%s  %s\n' "$SHA" "$BASE.dump" > "$SUM"
           cat > "$MAN" <<JSON
           {"project_ref_suffix":"${SB_REF: -4}","created_utc":"$(date -u +%FT%TZ)","dump":"$BASE.dump","bytes":$SIZE,"sha256":"$SHA","toc_entries":$OBJS,"pg_dump":"$(pg_dump --version | tr -d '"')","row_counts":$COUNTS,"run":"${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"}
