@@ -23,11 +23,22 @@ name: Nightly prod DB backup (off-Supabase)
 # step is portable: Homebrew if present, else PGDG postgresql-client-17 (apt with sudo,
 # or debs unpacked into RUNNER_TEMP), aws CLI v2 zip and the supabase release tarball.
 # pg_dump must be >= 17. No Docker.
+#
+# Primary path is now AWS (no runner): EventBridge Scheduler -> ECS Fargate task nb-db-backup
+# (infra/db-backup-bucket.yml + infra/db-backup-task/). This workflow is a manual fallback,
+# and mode=sync-secret copies SUPABASE_BACKUP_ACCESS_TOKEN/PROD_SUPABASE_REF into Secrets
+# Manager nb-prod-db-backup/supabase for the Fargate task (values never printed).
 
 on:
   schedule:
     - cron: '30 20 * * *'   # 20:30 UTC = 02:00 IST
   workflow_dispatch:
+    inputs:
+      mode:
+        description: backup = dump via this runner (fallback); sync-secret = copy Supabase secrets to AWS Secrets Manager
+        type: choice
+        options: [backup, sync-secret]
+        default: backup
 
 concurrency:
   group: nightly-db-backup
@@ -43,8 +54,34 @@ env:
   BUCKET: ${{ vars.NB_DB_BACKUP_BUCKET }}
 
 jobs:
+  sync-secret:
+    name: Sync Supabase secret to AWS Secrets Manager
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'sync-secret' }}
+    runs-on: [self-hosted, runner-vm]
+    timeout-minutes: 10
+    steps:
+      - name: AWS credentials (OIDC role)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.NB_DB_BACKUP_ROLE_ARN }}
+          role-session-name: nb-db-secret-sync-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: Put secret value (never printed)
+        env:
+          SB_TOKEN: ${{ secrets.SUPABASE_BACKUP_ACCESS_TOKEN }}
+          SB_REF: ${{ secrets.PROD_SUPABASE_REF }}
+        run: |
+          set -euo pipefail
+          [ -n "$SB_TOKEN" ] && [ -n "$SB_REF" ] || { echo "::error::secrets missing"; exit 1; }
+          F="$RUNNER_TEMP/sb-secret.json"; umask 077
+          python3 -c 'import json,os,sys; json.dump({"access_token":os.environ["SB_TOKEN"],"project_ref":os.environ["SB_REF"]}, open(sys.argv[1],"w"))' "$F"
+          aws secretsmanager put-secret-value --secret-id nb-prod-db-backup/supabase \
+            --secret-string "file://$F" --query VersionId --output text
+          rm -f "$F"
+
   backup:
     name: Dump prod DB to S3
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.mode != 'sync-secret' }}
     runs-on: [self-hosted, runner-vm]
     timeout-minutes: 120
     steps:
