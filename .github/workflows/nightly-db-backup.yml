@@ -19,7 +19,7 @@ name: Nightly prod DB backup (off-Supabase)
 # Fallback when NB_DB_BACKUP_ROLE_ARN is unset (IAM user from the same stack):
 #   AWS_BACKUP_ACCESS_KEY_ID / AWS_BACKUP_SECRET_ACCESS_KEY
 #
-# Runner: pinned to the Mac Minis ([self-hosted, macOS, runner-vm]) so it never
+# Runner: pinned to the Mac Minis ([self-hosted, runner-vm]) so it never
 # lands on an ephemeral burst VM. Tools come from Homebrew (pg_dump must be >= 17).
 
 on:
@@ -43,7 +43,7 @@ env:
 jobs:
   backup:
     name: Dump prod DB to S3
-    runs-on: [self-hosted, macOS, runner-vm]
+    runs-on: [self-hosted, runner-vm]
     timeout-minutes: 120
     steps:
       - name: Preflight (inputs present)
@@ -224,7 +224,7 @@ jobs:
   restore-test:
     name: Weekly restore test (disabled stub)
     if: ${{ false }}
-    runs-on: [self-hosted, macOS, runner-vm]
+    runs-on: [self-hosted, runner-vm]
     timeout-minutes: 120
     steps:
       - run: echo "restore test not implemented yet - see comments above"
