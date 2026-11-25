@@ -873,7 +873,7 @@ class CacheRuleTest(unittest.TestCase):
         self.assertEqual(cf.writes(), [])
 
     def test_given_expression_when_read_then_dashboard_api_preview_and_personal_requests_are_excluded(self):
-        for s in ('"/api/"', '"/_next/"', "sf_customer_token=", "sf_preview", "_rsc=", '"rsc" in http.request.headers.names',
+        for s in ('"/api/"', '"/_next/"', "sf_customer_token=", "sf_preview", "_rsc=", 'any(http.request.headers.names[*] == "rsc")',
                   'starts_with(http.host, "dev-")', 'starts_with(http.host, "pr-")', 'http.host ne "neonbee.store"'):
             self.assertIn(s, cc.CACHE_EXPRESSION)
 
