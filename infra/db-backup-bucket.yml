@@ -1,0 +1,169 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  Neonbee prod - off-Supabase nightly DB backup bucket (versioned, Object Lock
+  GOVERNANCE 90 d, private, SSE-S3) plus a least-privilege writer: a GitHub OIDC
+  role for neonbee-devops@main and an optional IAM user (access-key fallback).
+  Deploy with infra/deploy-db-backup-bucket.sh. Workflow: .github/workflows/nightly-db-backup.yml.
+
+Parameters:
+  BucketName:
+    Type: String
+    Default: neonbee-prod-db-backups
+    Description: Globally unique. Object Lock can only be enabled at creation.
+  GitHubOrg:
+    Type: String
+    Default: Neonbee-ai
+  GitHubRepo:
+    Type: String
+    Default: neonbee-devops
+  OidcProviderArn:
+    Type: String
+    Default: ''
+    Description: >-
+      ARN of the existing token.actions.githubusercontent.com provider (created by
+      templates/07-github-oidc.yaml). Empty = arn:aws:iam::<account>:oidc-provider/token.actions.githubusercontent.com
+  CreateAccessKeyUser:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: true = also create IAM user nb-db-backup (create its access key by hand; never via CFN).
+  RetentionDays:
+    Type: Number
+    Default: 90
+
+Conditions:
+  MakeUser: !Equals [!Ref CreateAccessKeyUser, 'true']
+  DefaultProvider: !Equals [!Ref OidcProviderArn, '']
+
+Resources:
+  BackupBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Ref BucketName
+      ObjectLockEnabled: true
+      ObjectLockConfiguration:
+        ObjectLockEnabled: Enabled
+        Rule:
+          DefaultRetention:
+            Mode: GOVERNANCE
+            Days: !Ref RetentionDays
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+            BucketKeyEnabled: true
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      LifecycleConfiguration:
+        Rules:
+          - Id: daily-glacier-ir-30d-expire-90d
+            Status: Enabled
+            Prefix: daily/
+            Transitions:
+              - StorageClass: GLACIER_IR
+                TransitionInDays: 30
+            ExpirationInDays: 90
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 1
+          - Id: monthly-expire-365d
+            Status: Enabled
+            Prefix: monthly/
+            ExpirationInDays: 365
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 1
+          - Id: cleanup-delete-markers-and-uploads
+            Status: Enabled
+            ExpiredObjectDeleteMarker: true
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 2
+      Tags:
+        - { Key: Project, Value: neonbee }
+        - { Key: Purpose, Value: prod-db-backup }
+
+  BackupBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref BackupBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt BackupBucket.Arn
+              - !Sub '${BackupBucket.Arn}/*'
+            Condition:
+              Bool: { 'aws:SecureTransport': 'false' }
+
+  # Only Put/Get/List on this bucket. No Delete*, no BypassGovernanceRetention,
+  # no PutObjectRetention: the writer can never shorten or remove a backup.
+  BackupWriterPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: nb-db-backup-writer
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: ListBucket
+            Effect: Allow
+            Action: s3:ListBucket
+            Resource: !GetAtt BackupBucket.Arn
+          - Sid: PutGetObjects
+            Effect: Allow
+            Action: [s3:PutObject, s3:GetObject]
+            Resource: !Sub '${BackupBucket.Arn}/*'
+
+  BackupRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: nb-gh-db-backup
+      MaxSessionDuration: 10800
+      ManagedPolicyArns: [!Ref BackupWriterPolicy]
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action: sts:AssumeRoleWithWebIdentity
+            Principal:
+              Federated: !If
+                - DefaultProvider
+                - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com'
+                - !Ref OidcProviderArn
+            Condition:
+              StringEquals:
+                'token.actions.githubusercontent.com:aud': sts.amazonaws.com
+              StringLike:
+                # this one repo, main only (schedule + dispatch run from main)
+                'token.actions.githubusercontent.com:sub':
+                  - !Sub 'repo:${GitHubOrg}/${GitHubRepo}:ref:refs/heads/main'
+                  - !Sub 'repo:${GitHubOrg}@*/${GitHubRepo}@*:ref:refs/heads/main'
+
+  BackupUser:
+    Type: AWS::IAM::User
+    Condition: MakeUser
+    Properties:
+      UserName: nb-db-backup
+      ManagedPolicyArns: [!Ref BackupWriterPolicy]
+
+Outputs:
+  BucketName:
+    Value: !Ref BackupBucket
+  BucketArn:
+    Value: !GetAtt BackupBucket.Arn
+  BackupRoleArn:
+    Value: !GetAtt BackupRole.Arn
+  BackupUserName:
+    Condition: MakeUser
+    Value: !Ref BackupUser
