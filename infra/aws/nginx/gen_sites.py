@@ -55,6 +55,19 @@ PROXY_HDRS = (
     "        proxy_read_timeout 300s;\n"
 )
 ASSET_EXT = r"js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot"
+# Cache policy (MFE load perf + stale-deploy safety, 2026-11-25):
+#  - hashed assets: ONE header, 1y immutable, but only on 2xx/3xx. The status map sends
+#    no-store on 404/5xx so a chunk requested before its rsync lands is never pinned
+#    (browser or Cloudflare) as an immutable 404.
+#  - manifests (remoteEntry.js, index.html, sw.js, web manifests): no-cache = always
+#    revalidate; nginx's ETag/Last-Modified turn repeat loads into 304s (no-store did not).
+ASSET_CC_MAP = ('map $status $nb_asset_cache_control {\n'
+                '    ~^[23]  "public, max-age=31536000, immutable";\n'
+                '    default "no-store";\n}\n')
+IMMUTABLE = "        add_header Cache-Control $nb_asset_cache_control always;\n"
+REVALIDATE = '        add_header Cache-Control "no-cache" always;\n'
+SPA_MANIFESTS = r"index\.html|sw\.js|registerSW\.js|manifest\.json|manifest\.webmanifest"
+
 CORS = ('    add_header Access-Control-Allow-Origin "*" always;\n'
         '    add_header Access-Control-Allow-Methods "GET, OPTIONS" always;\n'
         '    add_header Access-Control-Allow-Headers "Origin, Content-Type, Accept" always;\n')
@@ -87,6 +100,7 @@ def http_conf(cat):
     out = [HEADER, "# http-context: Cloudflare real client IP + api gateway upstreams.\n"]
     out += ["set_real_ip_from %s;\n" % r for r in CF_RANGES]
     out.append("real_ip_header CF-Connecting-IP;\n\n")
+    out.append(ASSET_CC_MAP + "\n")
     for mod, svc, _ in GATEWAY:
         if svc in cat:
             out.append("upstream nb_%s { server 127.0.0.1:%d; keepalive 32; }\n" % (svc.replace("-", "_"), cat[svc]["port"]))
@@ -117,10 +131,12 @@ def spa_conf(host, svc, extra_names=""):
     return "".join([HEADER, redirect80(host, extra_names), tls_server_head(host, CF_CERT, extra_names=extra_names),
         "    root %s;\n    index index.html;\n\n" % dist(svc),
         "    location / {\n        try_files $uri $uri/ /index.html;\n    }\n\n",
-        '    # remoteEntry.js - never cache (Module Federation host must always get the latest)\n'
-        '    location ~* /assets/remoteEntry\\.js$ {\n        add_header Cache-Control "no-cache, no-store, must-revalidate" always;\n    }\n\n',
+        "    # un-hashed manifests - always revalidate (index.html is also the SPA fallback target)\n"
+        "    location ~* ^/(?:%s)$ {\n%s    }\n\n" % (SPA_MANIFESTS, REVALIDATE),
+        '    # remoteEntry.js - never stale (Module Federation host must always get the latest)\n'
+        '    location ~* /assets/remoteEntry\\.js$ {\n%s    }\n\n' % REVALIDATE,
         "    location ~* \\.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot|mjs)$ {\n"
-        '        expires 1y;\n        add_header Cache-Control "public, immutable" always;\n    }\n}\n'])
+        "%s    }\n}\n" % IMMUTABLE])
 
 
 def cdn_prefixes(cat):
@@ -138,19 +154,21 @@ def cdn_conf(cat):
     out = [HEADER, redirect80("cdn.neonbee.app"), tls_server_head("cdn.neonbee.app", CF_CERT), CORS, "\n"]
     out.append("    # remoteEntry.js - never cache (listed first: regex locations match in order)\n")
     for p, svc in pref:
-        out.append('    location ~* ^/%s/assets/remoteEntry\\.js$ {\n        alias %s/assets/remoteEntry.js;\n'
-                   '        add_header Cache-Control "no-cache, no-store, must-revalidate" always;\n'
-                   '        add_header Access-Control-Allow-Origin "*" always;\n    }\n' % (p, dist(svc)))
+        out.append('    location ~* ^/%s/assets/remoteEntry\\.js$ {\n        alias %s/assets/remoteEntry.js;\n%s'
+                   '        add_header Access-Control-Allow-Origin "*" always;\n    }\n' % (p, dist(svc), REVALIDATE))
     out.append("\n    # .mjs workers need a JS MIME type\n")
     for p, svc in pref:
         out.append('    location ~* ^/%s/(.+\\.mjs)$ {\n        alias %s/$1;\n        default_type application/javascript;\n'
-                   '        expires 1y;\n        add_header Cache-Control "public, immutable" always;\n'
-                   '        add_header Access-Control-Allow-Origin "*" always;\n    }\n' % (p, dist(svc)))
+                   '%s        add_header Access-Control-Allow-Origin "*" always;\n    }\n' % (p, dist(svc), IMMUTABLE))
+    out.append("\n    # remote stylesheet: the federation runtime requests <base>/<file>.css (no assets/\n"
+               "    # segment); builds without the css-root-copy plugin keep it under assets/ only.\n")
+    for p, svc in pref:
+        out.append('    location ~* ^/%s/([^/]+\\.css)$ {\n        root %s;\n        try_files /$1 /assets/$1 =404;\n%s'
+                   '        add_header Access-Control-Allow-Origin "*" always;\n    }\n' % (p, dist(svc), IMMUTABLE))
     out.append("\n    # hashed static assets - long cache, immutable\n")
     for p, svc in pref:
-        out.append('    location ~* ^/%s/(.+\\.(?:%s))$ {\n        alias %s/$1;\n        expires 1y;\n'
-                   '        add_header Cache-Control "public, immutable" always;\n'
-                   '        add_header Access-Control-Allow-Origin "*" always;\n    }\n' % (p, ASSET_EXT, dist(svc)))
+        out.append('    location ~* ^/%s/(.+\\.(?:%s))$ {\n        alias %s/$1;\n%s'
+                   '        add_header Access-Control-Allow-Origin "*" always;\n    }\n' % (p, ASSET_EXT, dist(svc), IMMUTABLE))
     out.append("\n")
     for p, svc in pref:
         out.append("    location /%s/ {\n        alias %s/;\n        try_files $uri $uri/ /%s/index.html;\n    }\n" % (p, dist(svc), p))
