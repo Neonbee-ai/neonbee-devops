@@ -18,6 +18,9 @@ Actions (run by .github/workflows/neonbee-cf-cutover.yml, tokens come from GH se
   zone-audit <zone>  read-only: proxied A/AAAA/CNAME, LB hostnames + pool origins, SSL mode, config rules
   ssl-mode <zone> --ssl-mode full|strict   zone allowlist {neonbee.app, neonbee.store}; result holds prior
   ssl-keep-full <zone> --hosts a,b   upsert ONE http_config_settings rule (cf-cutover:ssl-full) ssl=full
+  cache-rule <zone>  upsert ONE http_request_cache_settings rule (nb:storefront-edge-cache): storefront HTML
+                     respects the origin Cache-Control (zone allowlist {neonbee.store})
+  cache-rule-revert <zone>  delete only that rule (other rules never touched)
 
 Safety rules (enforced here, covered by tests/test_cf_cutover.py):
   * only hostnames served by the AWS nb-nginx-sites bundle (server_name in infra/aws/nginx/sites)
@@ -763,10 +766,10 @@ def _ssl_zone(clients, zone_name):
     return zones[zone_name]
 
 
-def _cfg_entrypoint(cf, zone_id):
-    """The zone's http_config_settings entrypoint ruleset, or None when the zone has none yet."""
+def _cfg_entrypoint(cf, zone_id, phase=CFG_PHASE):
+    """The zone's entrypoint ruleset of a phase (default http_config_settings), or None when it has none yet."""
     try:
-        return cf.call("GET", f"/zones/{zone_id}/rulesets/phases/{CFG_PHASE}/entrypoint")["result"]
+        return cf.call("GET", f"/zones/{zone_id}/rulesets/phases/{phase}/entrypoint")["result"]
     except CutoverError as e:
         if re.search(r"\b10003\b|not found|could not find", str(e), re.I):
             return None
@@ -882,6 +885,104 @@ def ssl_keep_full(clients, zone_name, raw_hosts, dry_run):
     return res
 
 
+CACHE_ZONES = frozenset({"neonbee.store"})
+CACHE_PHASE = "http_request_cache_settings"
+CACHE_MARK = "nb:storefront-edge-cache"
+# Origin decides: only responses the storefront stamps `public, s-maxage` are stored; private/no-store and
+# anything without Cache-Control bypass. Host stays in the default cache key (never customised here).
+CACHE_EXPRESSION = (
+    '(http.request.method in {"GET" "HEAD"}'
+    ' and not starts_with(http.request.uri.path, "/api/")'
+    ' and not starts_with(http.request.uri.path, "/_next/")'
+    ' and not http.cookie contains "sf_customer_token="'
+    ' and not http.cookie contains "sf_preview"'
+    ' and not http.request.uri.query contains "preview="'
+    ' and not http.request.uri.query contains "_rsc="'
+    ' and not "rsc" in http.request.headers.names'
+    ' and not starts_with(http.host, "dev-")'
+    ' and not starts_with(http.host, "pr-")'
+    ' and http.host ne "neonbee.store"'
+    ' and http.host ne "www.neonbee.store")')
+
+
+def cache_rule_body():
+    return {"action": "set_cache_settings",
+            "action_parameters": {"cache": True,
+                                  "edge_ttl": {"mode": "bypass_by_default"},
+                                  "browser_ttl": {"mode": "respect_origin"},
+                                  "serve_stale": {"disable_stale_while_updating": False},
+                                  "origin_cache_control": True,
+                                  "cache_deception_armor": True},
+            "expression": CACHE_EXPRESSION, "description": CACHE_MARK, "enabled": True}
+
+
+def _cache_zone(clients, zone_name):
+    if zone_name not in CACHE_ZONES:
+        raise CutoverError(f"{zone_name}: zone not in the cache-rule allowlist {sorted(CACHE_ZONES)} - never touched")
+    zones = zones_by_token(clients)
+    if zone_name not in zones:
+        raise CutoverError(f"{zone_name}: no visible zone")
+    return zones[zone_name]
+
+
+def _marked(ruleset):
+    mine = [r for r in (ruleset or {}).get("rules") or [] if r.get("description") == CACHE_MARK]
+    if len(mine) > 1:
+        raise CutoverError(f"{len(mine)} rules carry {CACHE_MARK} - fix by hand, refusing to guess")
+    return mine
+
+
+def _kept(before, after):
+    lost = {r.get("id") for r in (before or {}).get("rules") or []} - {r.get("id") for r in (after or {}).get("rules") or []}
+    return lost
+
+
+def cache_rule(clients, zone_name, dry_run):
+    """Upsert ONE cache rule (description CACHE_MARK). Never removes or edits any other rule."""
+    cf, z = _cache_zone(clients, zone_name)
+    zid, rule = z["id"], cache_rule_body()
+    prior = _cfg_entrypoint(cf, zid, CACHE_PHASE)
+    mine = _marked(prior)
+    if prior is None:
+        op = {"op": "create-entrypoint", "path": f"/zones/{zid}/rulesets/phases/{CACHE_PHASE}/entrypoint"}
+    elif mine:
+        op = {"op": "patch-rule", "path": f"/zones/{zid}/rulesets/{prior['id']}/rules/{mine[0]['id']}"}
+    else:
+        op = {"op": "add-rule", "path": f"/zones/{zid}/rulesets/{prior['id']}/rules"}
+    res = {"zone": zone_name, "rule": rule, "plan": op["op"], "prior_ruleset": prior, "dry_run": dry_run, "at": _now()}
+    if dry_run:
+        return res
+    if op["op"] == "create-entrypoint":
+        cf.call("PUT", op["path"], body={"rules": [rule]})
+    elif op["op"] == "patch-rule":
+        cf.call("PATCH", op["path"], body=rule)
+    else:
+        cf.call("POST", op["path"], body=rule)
+    after = _cfg_entrypoint(cf, zid, CACHE_PHASE) or {}
+    if _kept(prior, after):
+        raise CutoverError(f"rules disappeared after write: {sorted(_kept(prior, after))}")
+    res["after_ruleset"] = after
+    return res
+
+
+def cache_rule_revert(clients, zone_name, dry_run):
+    """Delete only the CACHE_MARK rule. No marked rule -> nothing to do."""
+    cf, z = _cache_zone(clients, zone_name)
+    zid = z["id"]
+    prior = _cfg_entrypoint(cf, zid, CACHE_PHASE)
+    mine = _marked(prior)
+    res = {"zone": zone_name, "plan": "delete-rule" if mine else "noop", "prior_ruleset": prior,
+           "dry_run": dry_run, "at": _now()}
+    if dry_run or not mine:
+        return res
+    cf.call("DELETE", f"/zones/{zid}/rulesets/{prior['id']}/rules/{mine[0]['id']}")
+    after = _cfg_entrypoint(cf, zid, CACHE_PHASE) or {}
+    if _kept({"rules": [r for r in prior["rules"] if r is not mine[0]]}, after):
+        raise CutoverError("an unrelated rule disappeared after the delete")
+    res["after_ruleset"] = after
+    return res
+
+
 def main(argv=None):
     p = argparse.ArgumentParser()
     p.add_argument("action", choices=["inventory", "origin-cert", "dns-switch", "dns-revert",
@@ -889,7 +990,8 @@ def main(argv=None):
                                        "dns-only-upsert", "monitor-ensure", "pool-origin-swap",
                                        "pool-restore", "pool-health", "monitor-delete",
                                        "pool-aws-nodes", "dns-only-delete",
-                                       "zone-audit", "ssl-mode", "ssl-keep-full"])
+                                       "zone-audit", "ssl-mode", "ssl-keep-full",
+                                       "cache-rule", "cache-rule-revert"])
     p.add_argument("--host", default="")
     p.add_argument("--eips", default=",".join(DEFAULT_EIPS))
     p.add_argument("--csr-b64", default=os.environ.get("CSR_B64", ""))
@@ -951,6 +1053,10 @@ def main(argv=None):
             res = ssl_mode(clients, a.host, a.ssl_mode, not a.apply)
         elif a.action == "ssl-keep-full":
             res = ssl_keep_full(clients, a.host, a.hosts, not a.apply)
+        elif a.action == "cache-rule":
+            res = cache_rule(clients, a.host, not a.apply)
+        elif a.action == "cache-rule-revert":
+            res = cache_rule_revert(clients, a.host, not a.apply)
         elif a.action == "pool-health":
             res = pool_health(clients, "neonbee.app")
         elif a.action == "monitor-delete":

@@ -693,6 +693,8 @@ class StoreSitesTest(unittest.TestCase):
 class FakeSSL:
     """In-memory zone for SSL mode + http_config_settings entrypoint ruleset."""
 
+    phase = "http_config_settings"
+
     def __init__(self, zone="neonbee.store", ssl="full", rules=None, records=(), lbs=(), pools=()):
         self.label, self.calls, self.ssl = "CF_LB_API_TOKEN", [], ssl
         self.zones = [{"id": "z1", "name": zone, "status": "active", "account": {"id": "acct"}}]
@@ -716,7 +718,7 @@ class FakeSSL:
             if method == "PATCH":
                 self.ssl = body["value"]
             return {"result": {"value": self.ssl}}
-        if path.endswith("/phases/http_config_settings/entrypoint"):
+        if path.endswith(f"/phases/{self.phase}/entrypoint"):
             if method == "GET":
                 if self.rs is None:
                     raise cc.CutoverError("GET x failed (t): 10003: could not find entrypoint ruleset")
@@ -727,6 +729,10 @@ class FakeSSL:
             self.n += 1
             self.rs["rules"].append(dict(body, id=f"r{self.n}"))
             return {"result": self.rs}
+        if "/rulesets/" in path and method == "DELETE":
+            rid = path.rsplit("/", 1)[1]
+            self.rs["rules"] = [r for r in self.rs["rules"] if r["id"] != rid]
+            return {"result": {"id": rid}}
         if "/rulesets/" in path and method == "PATCH":
             rid = path.rsplit("/", 1)[1]
             r = next(r for r in self.rs["rules"] if r["id"] == rid)
@@ -815,6 +821,90 @@ class SslKeepFullTest(unittest.TestCase):
         with self.assertRaises(cc.CutoverError):
             cc.ssl_keep_full([cf], "neonbee.app", "pulse.neonbee.app", False)
         self.assertEqual(cf.writes(), [])
+
+
+class FakeCache(FakeSSL):
+    phase = "http_request_cache_settings"
+
+
+MARKED = dict(cc.cache_rule_body(), id="mine")
+
+
+class CacheRuleTest(unittest.TestCase):
+    def test_given_no_entrypoint_when_applying_then_one_marked_cache_rule_is_created(self):
+        cf = FakeCache()
+        cc.cache_rule([cf], "neonbee.store", False)
+        (m, path, body), = cf.writes()
+        self.assertEqual((m, path), ("PUT", "/zones/z1/rulesets/phases/http_request_cache_settings/entrypoint"))
+        rule = body["rules"][0]
+        self.assertEqual((rule["action"], rule["description"]), ("set_cache_settings", "nb:storefront-edge-cache"))
+        self.assertEqual(rule["action_parameters"]["edge_ttl"], {"mode": "bypass_by_default"})
+        self.assertEqual(rule["action_parameters"]["browser_ttl"], {"mode": "respect_origin"})
+        self.assertNotIn("cache_key", rule["action_parameters"])
+
+    def test_given_other_rules_when_applying_then_rule_is_added_and_others_are_kept(self):
+        cf = FakeCache(rules=[OTHER])
+        res = cc.cache_rule([cf], "neonbee.store", False)
+        self.assertEqual([c[0] for c in cf.writes()], ["POST"])
+        self.assertEqual([r["id"] for r in res["after_ruleset"]["rules"]], ["keep1", "r1"])
+
+    def test_given_existing_marked_rule_when_applying_then_only_it_is_patched(self):
+        cf = FakeCache(rules=[OTHER, MARKED])
+        cc.cache_rule([cf], "neonbee.store", False)
+        (m, path, _), = cf.writes()
+        self.assertEqual((m, path), ("PATCH", "/zones/z1/rulesets/rs1/rules/mine"))
+
+    def test_given_dry_run_when_planning_then_nothing_is_written(self):
+        cf = FakeCache(rules=[OTHER])
+        self.assertEqual(cc.cache_rule([cf], "neonbee.store", True)["plan"], "add-rule")
+        self.assertEqual(cf.writes(), [])
+
+    def test_given_zone_outside_allowlist_when_applying_then_it_refuses_without_writing(self):
+        for zone in ("neonbee.app", "neonbee.ai", "moonhive.in"):
+            cf = FakeCache(zone=zone)
+            with self.assertRaises(cc.CutoverError):
+                cc.cache_rule([cf], zone, False)
+            self.assertEqual(cf.writes(), [])
+
+    def test_given_two_marked_rules_when_applying_then_it_refuses(self):
+        cf = FakeCache(rules=[MARKED, dict(MARKED, id="m2")])
+        with self.assertRaises(cc.CutoverError):
+            cc.cache_rule([cf], "neonbee.store", False)
+        self.assertEqual(cf.writes(), [])
+
+    def test_given_expression_when_read_then_dashboard_api_preview_and_personal_requests_are_excluded(self):
+        for s in ('"/api/"', '"/_next/"', "sf_customer_token=", "sf_preview", "_rsc=", '"rsc" in http.request.headers.names',
+                  'starts_with(http.host, "dev-")', 'starts_with(http.host, "pr-")', 'http.host ne "neonbee.store"'):
+            self.assertIn(s, cc.CACHE_EXPRESSION)
+
+
+class CacheRuleRevertTest(unittest.TestCase):
+    def test_given_marked_rule_when_reverting_then_only_it_is_deleted(self):
+        cf = FakeCache(rules=[OTHER, MARKED])
+        res = cc.cache_rule_revert([cf], "neonbee.store", False)
+        self.assertEqual(cf.writes(), [("DELETE", "/zones/z1/rulesets/rs1/rules/mine", None)])
+        self.assertEqual([r["id"] for r in res["after_ruleset"]["rules"]], ["keep1"])
+
+    def test_given_dry_run_when_reverting_then_nothing_is_written(self):
+        cf = FakeCache(rules=[MARKED])
+        self.assertEqual(cc.cache_rule_revert([cf], "neonbee.store", True)["plan"], "delete-rule")
+        self.assertEqual(cf.writes(), [])
+
+    def test_given_no_marked_rule_or_no_entrypoint_when_reverting_then_it_is_a_noop(self):
+        for rules in (None, [OTHER]):
+            cf = FakeCache(rules=rules)
+            self.assertEqual(cc.cache_rule_revert([cf], "neonbee.store", False)["plan"], "noop")
+            self.assertEqual(cf.writes(), [])
+
+    def test_given_zone_outside_allowlist_when_reverting_then_it_refuses(self):
+        with self.assertRaises(cc.CutoverError):
+            cc.cache_rule_revert([FakeCache(zone="neonbee.app")], "neonbee.app", False)
+
+
+class CacheWorkflowTest(unittest.TestCase):
+    def test_given_workflow_when_read_then_cache_actions_are_wired(self):
+        for s in ("cache-rule", "cache-rule-revert"):
+            self.assertIn(s, WF)
 
 
 class ZoneAuditTest(unittest.TestCase):
