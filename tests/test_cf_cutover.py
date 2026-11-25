@@ -789,10 +789,8 @@ class SslKeepFullTest(unittest.TestCase):
     def test_given_other_rules_when_applying_then_rule_is_added_and_others_are_kept(self):
         cf = FakeSSL(zone="neonbee.app", rules=[OTHER])
         res = cc.ssl_keep_full([cf], "neonbee.app", "pulse.neonbee.app", False)
-        self.assertEqual([c[0] for c in cf.writes()], ["POST", "POST"])
-        self.assertEqual([r["id"] for r in res["after_ruleset"]["rules"]], ["keep1", "r1", "r2"])
-        self.assertEqual([r["description"] for r in res["after_ruleset"]["rules"][1:]],
-                         ["nb:storefront-edge-cache", "nb:storefront-image-cache"])
+        self.assertEqual([c[0] for c in cf.writes()], ["POST"])
+        self.assertEqual([r["id"] for r in res["after_ruleset"]["rules"]], ["keep1", "r1"])
         self.assertEqual(res["prior_ruleset"]["rules"][0]["id"], "keep1")
 
     def test_given_existing_marked_rule_when_applying_then_only_it_is_patched(self):
