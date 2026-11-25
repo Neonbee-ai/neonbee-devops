@@ -828,14 +828,16 @@ class FakeCache(FakeSSL):
 
 
 MARKED = dict(cc.cache_rule_body(), id="mine")
+IMG_MARKED = dict(cc.image_cache_rule_body(), id="img")
 
 
 class CacheRuleTest(unittest.TestCase):
     def test_given_no_entrypoint_when_applying_then_one_marked_cache_rule_is_created(self):
         cf = FakeCache()
         cc.cache_rule([cf], "neonbee.store", False)
-        (m, path, body), = cf.writes()
+        (m, path, body), (m2, _, body2) = cf.writes()
         self.assertEqual((m, path), ("PUT", "/zones/z1/rulesets/phases/http_request_cache_settings/entrypoint"))
+        self.assertEqual((m2, body2["description"]), ("POST", "nb:storefront-image-cache"))
         rule = body["rules"][0]
         self.assertEqual((rule["action"], rule["description"]), ("set_cache_settings", "nb:storefront-edge-cache"))
         self.assertEqual(rule["action_parameters"]["edge_ttl"], {"mode": "bypass_by_default"})
@@ -845,18 +847,49 @@ class CacheRuleTest(unittest.TestCase):
     def test_given_other_rules_when_applying_then_rule_is_added_and_others_are_kept(self):
         cf = FakeCache(rules=[OTHER])
         res = cc.cache_rule([cf], "neonbee.store", False)
-        self.assertEqual([c[0] for c in cf.writes()], ["POST"])
-        self.assertEqual([r["id"] for r in res["after_ruleset"]["rules"]], ["keep1", "r1"])
+        self.assertEqual([c[0] for c in cf.writes()], ["POST", "POST"])
+        self.assertEqual([r["id"] for r in res["after_ruleset"]["rules"]], ["keep1", "r1", "r2"])
+        self.assertEqual([r["description"] for r in res["after_ruleset"]["rules"][1:]],
+                         ["nb:storefront-edge-cache", "nb:storefront-image-cache"])
 
-    def test_given_existing_marked_rule_when_applying_then_only_it_is_patched(self):
+    def test_given_existing_marked_rule_when_applying_then_it_is_patched_and_the_image_rule_added(self):
         cf = FakeCache(rules=[OTHER, MARKED])
         cc.cache_rule([cf], "neonbee.store", False)
-        (m, path, _), = cf.writes()
+        (m, path, _), (m2, _, body2) = cf.writes()
         self.assertEqual((m, path), ("PATCH", "/zones/z1/rulesets/rs1/rules/mine"))
+        self.assertEqual((m2, body2["description"]), ("POST", "nb:storefront-image-cache"))
+
+    def test_given_both_rules_exist_when_applying_then_both_are_patched_and_nothing_is_added(self):
+        cf = FakeCache(rules=[OTHER, MARKED, IMG_MARKED])
+        cc.cache_rule([cf], "neonbee.store", False)
+        self.assertEqual([(m, p) for m, p, _ in cf.writes()],
+                         [("PATCH", "/zones/z1/rulesets/rs1/rules/mine"), ("PATCH", "/zones/z1/rulesets/rs1/rules/img")])
+
+    def test_given_two_image_rules_when_applying_then_it_refuses_before_writing_anything(self):
+        cf = FakeCache(rules=[MARKED, IMG_MARKED, dict(IMG_MARKED, id="img2")])
+        with self.assertRaises(cc.CutoverError):
+            cc.cache_rule([cf], "neonbee.store", False)
+        self.assertEqual(cf.writes(), [])
+
+    def test_given_image_rule_when_read_then_it_caches_next_image_and_static_for_30_days_on_store_hosts_only(self):
+        body = cc.image_cache_rule_body()
+        self.assertEqual(body["description"], "nb:storefront-image-cache")
+        self.assertEqual(body["action_parameters"]["edge_ttl"], {"mode": "override_origin", "default": 2592000})
+        self.assertEqual(body["action_parameters"]["browser_ttl"], {"mode": "respect_origin"})
+        self.assertNotIn("cache_key", body["action_parameters"])
+        for s in ('"/_next/image"', '"/_next/static/"', 'starts_with(http.host, "dev-")', 'starts_with(http.host, "pr-")',
+                  'http.host ne "neonbee.store"', 'http.host ne "www.neonbee.store"', '{"GET" "HEAD"}'):
+            self.assertIn(s, cc.IMAGE_CACHE_EXPRESSION)
+        self.assertNotIn("headers", cc.IMAGE_CACHE_EXPRESSION)  # one format (webp): no Accept variation
+
+    def test_given_page_rule_when_read_then_it_is_unchanged_and_still_excludes_next(self):
+        self.assertEqual(cc.cache_rule_body()["action_parameters"]["edge_ttl"], {"mode": "bypass_by_default"})
+        self.assertIn('not starts_with(http.request.uri.path, "/_next/")', cc.CACHE_EXPRESSION)
 
     def test_given_dry_run_when_planning_then_nothing_is_written(self):
         cf = FakeCache(rules=[OTHER])
-        self.assertEqual(cc.cache_rule([cf], "neonbee.store", True)["plan"], "add-rule")
+        res = cc.cache_rule([cf], "neonbee.store", True)
+        self.assertEqual((res["plan"], res["image_plan"]), ("add-rule", "add-rule"))
         self.assertEqual(cf.writes(), [])
 
     def test_given_zone_outside_allowlist_when_applying_then_it_refuses_without_writing(self):
@@ -883,6 +916,14 @@ class CacheRuleRevertTest(unittest.TestCase):
         cf = FakeCache(rules=[OTHER, MARKED])
         res = cc.cache_rule_revert([cf], "neonbee.store", False)
         self.assertEqual(cf.writes(), [("DELETE", "/zones/z1/rulesets/rs1/rules/mine", None)])
+        self.assertEqual([r["id"] for r in res["after_ruleset"]["rules"]], ["keep1"])
+
+    def test_given_both_marked_rules_when_reverting_then_both_and_only_both_are_deleted(self):
+        cf = FakeCache(rules=[OTHER, MARKED, IMG_MARKED])
+        res = cc.cache_rule_revert([cf], "neonbee.store", False)
+        self.assertEqual([(m, p) for m, p, _ in cf.writes()],
+                         [("DELETE", "/zones/z1/rulesets/rs1/rules/mine"), ("DELETE", "/zones/z1/rulesets/rs1/rules/img")])
+        self.assertEqual(res["deleting"], ["nb:storefront-edge-cache", "nb:storefront-image-cache"])
         self.assertEqual([r["id"] for r in res["after_ruleset"]["rules"]], ["keep1"])
 
     def test_given_dry_run_when_reverting_then_nothing_is_written(self):
