@@ -10,12 +10,12 @@ on:
   workflow_dispatch:
     inputs:
       action:
-        description: 'inventory | origin-cert | dns-switch | dns-revert | lb-inventory | lb-pools | lb-switch | lb-revert | verify | dns-only-upsert | monitor-ensure | pool-origin-swap | pool-restore | pool-health | monitor-delete'
+        description: 'inventory | origin-cert | dns-switch | dns-revert | lb-inventory | lb-pools | lb-switch | lb-revert | verify | dns-only-upsert | monitor-ensure | pool-origin-swap | pool-restore | pool-health | monitor-delete | cache-rule | cache-rule-revert'
         type: choice
-        options: [inventory, origin-cert, dns-switch, dns-revert, lb-inventory, lb-pools, lb-switch, lb-revert, verify, dns-only-upsert, monitor-ensure, pool-origin-swap, pool-restore, pool-health, monitor-delete, pool-aws-nodes, dns-only-delete, zone-audit, ssl-mode, ssl-keep-full]
+        options: [inventory, origin-cert, dns-switch, dns-revert, lb-inventory, lb-pools, lb-switch, lb-revert, verify, dns-only-upsert, monitor-ensure, pool-origin-swap, pool-restore, pool-health, monitor-delete, pool-aws-nodes, dns-only-delete, zone-audit, ssl-mode, ssl-keep-full, cache-rule, cache-rule-revert]
         default: inventory
       hostname:
-        description: 'Host for dns-switch/dns-revert (e.g. sso.neonbee.app); zone for origin-cert (neonbee.app)'
+        description: 'Host for dns-switch/dns-revert (e.g. sso.neonbee.app); zone for origin-cert (neonbee.app) and cache-rule/cache-rule-revert (neonbee.store)'
         type: string
         default: ''
       dry_run:
