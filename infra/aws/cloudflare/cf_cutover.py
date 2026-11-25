@@ -898,7 +898,7 @@ CACHE_EXPRESSION = (
     ' and not http.cookie contains "sf_preview"'
     ' and not http.request.uri.query contains "preview="'
     ' and not http.request.uri.query contains "_rsc="'
-    ' and not "rsc" in http.request.headers.names'
+    ' and not any(http.request.headers.names[*] == "rsc")'
     ' and not starts_with(http.host, "dev-")'
     ' and not starts_with(http.host, "pr-")'
     ' and http.host ne "neonbee.store"'
