@@ -83,11 +83,45 @@ class NginxSitesTest(unittest.TestCase):
         re_blocks = re.findall(r"location ~\* \^/[a-z-]+/assets/remoteEntry\\\.js\$ \{[^}]*\}", cdn)
         self.assertEqual(len(re_blocks), len(gen_sites.cdn_prefixes(CAT)))
         for b in re_blocks:
-            self.assertIn("no-cache, no-store, must-revalidate", b)
+            self.assertIn('add_header Cache-Control "no-cache" always;', b)
+            self.assertNotIn("no-store", b)  # no-store defeats ETag/304 revalidation
             self.assertIn('Access-Control-Allow-Origin "*"', b)
-        self.assertIn("public, immutable", cdn)
+        self.assertIn("$nb_asset_cache_control", cdn)
         self.assertIn('add_header Access-Control-Allow-Origin "*" always;', cdn)
-        self.assertLess(cdn.index("remoteEntry"), cdn.index("public, immutable"))  # regex order
+        self.assertLess(cdn.index("remoteEntry"), cdn.index("$nb_asset_cache_control"))  # regex order
+
+    def test_given_asset_cache_map_when_generated_then_immutable_only_on_success_and_errors_no_store(self):
+        http = FILES["00-nb-http.conf"]
+        self.assertIn("map $status $nb_asset_cache_control {", http)
+        self.assertIn('~^[23]  "public, max-age=31536000, immutable";', http)
+        self.assertIn('default "no-store";', http)
+
+    def test_given_any_site_when_generated_then_no_literal_immutable_header_or_duplicate_expires_on_mfe_hosts(self):
+        for f in ("cdn.neonbee.app.conf", "dashboard.neonbee.app.conf", "sso.neonbee.app.conf"):
+            body = FILES[f]
+            self.assertNotIn('"public, immutable"', body, f)  # would also stamp 404s
+            self.assertNotIn("expires 1y;", body, f)  # second Cache-Control header
+
+    def test_given_remote_stylesheet_at_base_root_when_requested_then_falls_back_to_assets_copy(self):
+        cdn = FILES["cdn.neonbee.app.conf"]
+        for p, svc in gen_sites.cdn_prefixes(CAT):
+            block = re.search(r"location ~\* \^/%s/\(\[\^/\]\+\\\.css\)\$ \{[^}]*\}" % re.escape(p), cdn)
+            self.assertIsNotNone(block, p)
+            self.assertIn("root /opt/neonbee/services/%s/current/dist;" % svc, block.group(0))
+            self.assertIn("try_files /$1 /assets/$1 =404;", block.group(0))
+            # must precede the generic alias location, which would 404 the root path
+            self.assertLess(cdn.index(block.group(0)), cdn.index("location ~* ^/%s/(.+\\.(?:" % p))
+
+    def test_given_shell_spa_when_generated_then_unhashed_manifests_revalidate_before_asset_rule(self):
+        for f in ("dashboard.neonbee.app.conf", "sso.neonbee.app.conf"):
+            body = FILES[f]
+            m = re.search(r"location ~\* \^/\(\?:index[^{]*\{[^}]*\}", body)
+            self.assertIsNotNone(m, f)
+            for name in ("index\\.html", "sw\\.js", "manifest\\.json"):
+                self.assertIn(name, m.group(0))
+            self.assertIn('add_header Cache-Control "no-cache" always;', m.group(0))
+            # regex locations match in order: sw.js must not hit the immutable *.js rule
+            self.assertLess(body.index(m.group(0)), body.index("$nb_asset_cache_control"))
 
     def test_given_shell_and_sso_when_generated_then_spa_roots_are_their_dist_and_host_has_no_cdn_paths(self):
         for f, svc in (("dashboard.neonbee.app.conf", "shell-fe"), ("sso.neonbee.app.conf", "sso-fe")):
@@ -103,7 +137,7 @@ class NginxSitesTest(unittest.TestCase):
     def test_given_next_apps_when_generated_then_proxied_to_catalog_ports(self):
         self.assertIn("proxy_pass http://127.0.0.1:%d;" % CAT["partner-portal-prod"]["port"], FILES["partner.neonbee.app.conf"])
         store = FILES["neonbee-store.conf"]
-        self.assertIn("server_name *.neonbee.store;", store)
+        self.assertIn("server_name *.neonbee.store neonbee.store customers-fallback.neonbee.store;", store)
         self.assertIn("proxy_pass http://127.0.0.1:%d;" % CAT["storefront-web-prod"]["port"], store)
         self.assertIn("location /v1/ {\n        proxy_pass http://127.0.0.1:%d;" % CAT["storefront-api-prod"]["port"], store)
 
