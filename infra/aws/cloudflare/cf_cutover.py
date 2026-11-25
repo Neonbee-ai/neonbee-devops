@@ -18,9 +18,9 @@ Actions (run by .github/workflows/neonbee-cf-cutover.yml, tokens come from GH se
   zone-audit <zone>  read-only: proxied A/AAAA/CNAME, LB hostnames + pool origins, SSL mode, config rules
   ssl-mode <zone> --ssl-mode full|strict   zone allowlist {neonbee.app, neonbee.store}; result holds prior
   ssl-keep-full <zone> --hosts a,b   upsert ONE http_config_settings rule (cf-cutover:ssl-full) ssl=full
-  cache-rule <zone>  upsert ONE http_request_cache_settings rule (nb:storefront-edge-cache): storefront HTML
+  cache-rule <zone>  upsert TWO http_request_cache_settings rules (nb:storefront-edge-cache page rule + nb:storefront-image-cache for /_next/image + /_next/static): storefront HTML
                      respects the origin Cache-Control (zone allowlist {neonbee.store})
-  cache-rule-revert <zone>  delete only that rule (other rules never touched)
+  cache-rule-revert <zone>  delete only those two rules (other rules never touched)
 
 Safety rules (enforced here, covered by tests/test_cf_cutover.py):
   * only hostnames served by the AWS nb-nginx-sites bundle (server_name in infra/aws/nginx/sites)
@@ -915,6 +915,31 @@ def cache_rule_body():
             "expression": CACHE_EXPRESSION, "description": CACHE_MARK, "enabled": True}
 
 
+IMAGE_CACHE_MARK = "nb:storefront-image-cache"
+# Optimized product/hero images and hashed build assets. Neither depends on cookies or the shopper; the
+# optimizer serves ONE format (webp) so the default cache key (host + path + full query string) is enough -
+# no Accept variation. Store hosts only: apex/www, dev-* and pr-* stay uncached.
+IMAGE_CACHE_EXPRESSION = (
+    '(http.request.method in {"GET" "HEAD"}'
+    ' and (starts_with(http.request.uri.path, "/_next/image")'
+    ' or starts_with(http.request.uri.path, "/_next/static/"))'
+    ' and not starts_with(http.host, "dev-")'
+    ' and not starts_with(http.host, "pr-")'
+    ' and http.host ne "neonbee.store"'
+    ' and http.host ne "www.neonbee.store")')
+IMAGE_EDGE_TTL = 30 * 24 * 3600
+
+
+def image_cache_rule_body():
+    return {"action": "set_cache_settings",
+            "action_parameters": {"cache": True,
+                                  "edge_ttl": {"mode": "override_origin", "default": IMAGE_EDGE_TTL},
+                                  "browser_ttl": {"mode": "respect_origin"},
+                                  "serve_stale": {"disable_stale_while_updating": False},
+                                  "origin_cache_control": True},
+            "expression": IMAGE_CACHE_EXPRESSION, "description": IMAGE_CACHE_MARK, "enabled": True}
+
+
 def _cache_zone(clients, zone_name):
     if zone_name not in CACHE_ZONES:
         raise CutoverError(f"{zone_name}: zone not in the cache-rule allowlist {sorted(CACHE_ZONES)} - never touched")
@@ -924,10 +949,10 @@ def _cache_zone(clients, zone_name):
     return zones[zone_name]
 
 
-def _marked(ruleset):
-    mine = [r for r in (ruleset or {}).get("rules") or [] if r.get("description") == CACHE_MARK]
+def _marked(ruleset, mark=CACHE_MARK):
+    mine = [r for r in (ruleset or {}).get("rules") or [] if r.get("description") == mark]
     if len(mine) > 1:
-        raise CutoverError(f"{len(mine)} rules carry {CACHE_MARK} - fix by hand, refusing to guess")
+        raise CutoverError(f"{len(mine)} rules carry {mark} - fix by hand, refusing to guess")
     return mine
 
 
@@ -936,21 +961,18 @@ def _kept(before, after):
     return lost
 
 
-def cache_rule(clients, zone_name, dry_run):
-    """Upsert ONE cache rule (description CACHE_MARK). Never removes or edits any other rule."""
-    cf, z = _cache_zone(clients, zone_name)
-    zid, rule = z["id"], cache_rule_body()
+def _upsert_cache_rule(cf, zid, rule, mark, dry_run):
+    """Upsert the rule carrying `mark` (create entrypoint / patch / add). Returns (plan, prior, after)."""
     prior = _cfg_entrypoint(cf, zid, CACHE_PHASE)
-    mine = _marked(prior)
+    mine = _marked(prior, mark)
     if prior is None:
         op = {"op": "create-entrypoint", "path": f"/zones/{zid}/rulesets/phases/{CACHE_PHASE}/entrypoint"}
     elif mine:
         op = {"op": "patch-rule", "path": f"/zones/{zid}/rulesets/{prior['id']}/rules/{mine[0]['id']}"}
     else:
         op = {"op": "add-rule", "path": f"/zones/{zid}/rulesets/{prior['id']}/rules"}
-    res = {"zone": zone_name, "rule": rule, "plan": op["op"], "prior_ruleset": prior, "dry_run": dry_run, "at": _now()}
     if dry_run:
-        return res
+        return op["op"], prior, None
     if op["op"] == "create-entrypoint":
         cf.call("PUT", op["path"], body={"rules": [rule]})
     elif op["op"] == "patch-rule":
@@ -960,23 +982,42 @@ def cache_rule(clients, zone_name, dry_run):
     after = _cfg_entrypoint(cf, zid, CACHE_PHASE) or {}
     if _kept(prior, after):
         raise CutoverError(f"rules disappeared after write: {sorted(_kept(prior, after))}")
-    res["after_ruleset"] = after
+    return op["op"], prior, after
+
+
+def cache_rule(clients, zone_name, dry_run):
+    """Upsert the TWO cache rules (page rule CACHE_MARK, image/static rule IMAGE_CACHE_MARK). Never removes or edits any other rule."""
+    cf, z = _cache_zone(clients, zone_name)
+    zid, rule, img = z["id"], cache_rule_body(), image_cache_rule_body()
+    # validate both marks up front so a duplicate refuses before anything is written
+    first = _cfg_entrypoint(cf, zid, CACHE_PHASE)
+    _marked(first, CACHE_MARK), _marked(first, IMAGE_CACHE_MARK)
+    plan, prior, after = _upsert_cache_rule(cf, zid, rule, CACHE_MARK, dry_run)
+    if dry_run:  # nothing is written, so the 2nd rule's plan is derived from the same snapshot
+        img_plan = "patch-rule" if _marked(first, IMAGE_CACHE_MARK) else "add-rule"
+    else:
+        img_plan, _, after = _upsert_cache_rule(cf, zid, img, IMAGE_CACHE_MARK, dry_run)
+    res = {"zone": zone_name, "rule": rule, "image_rule": img, "plan": plan, "image_plan": img_plan,
+           "prior_ruleset": prior, "dry_run": dry_run, "at": _now()}
+    if not dry_run:
+        res["after_ruleset"] = after
     return res
 
 
 def cache_rule_revert(clients, zone_name, dry_run):
-    """Delete only the CACHE_MARK rule. No marked rule -> nothing to do."""
+    """Delete only the two marked cache rules (CACHE_MARK, IMAGE_CACHE_MARK). None marked -> nothing to do."""
     cf, z = _cache_zone(clients, zone_name)
     zid = z["id"]
     prior = _cfg_entrypoint(cf, zid, CACHE_PHASE)
-    mine = _marked(prior)
-    res = {"zone": zone_name, "plan": "delete-rule" if mine else "noop", "prior_ruleset": prior,
-           "dry_run": dry_run, "at": _now()}
+    mine = _marked(prior, CACHE_MARK) + _marked(prior, IMAGE_CACHE_MARK)
+    res = {"zone": zone_name, "plan": "delete-rule" if mine else "noop", "deleting": [r.get("description") for r in mine],
+           "prior_ruleset": prior, "dry_run": dry_run, "at": _now()}
     if dry_run or not mine:
         return res
-    cf.call("DELETE", f"/zones/{zid}/rulesets/{prior['id']}/rules/{mine[0]['id']}")
+    for r in mine:
+        cf.call("DELETE", f"/zones/{zid}/rulesets/{prior['id']}/rules/{r['id']}")
     after = _cfg_entrypoint(cf, zid, CACHE_PHASE) or {}
-    if _kept({"rules": [r for r in prior["rules"] if r is not mine[0]]}, after):
+    if _kept({"rules": [r for r in prior["rules"] if r not in mine]}, after):
         raise CutoverError("an unrelated rule disappeared after the delete")
     res["after_ruleset"] = after
     return res
