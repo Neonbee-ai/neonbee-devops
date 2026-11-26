@@ -256,6 +256,12 @@ class Webhook(unittest.TestCase):
         self.assertIn('proxied:false', w)
 
 
+class Bypass(unittest.TestCase):
+    def test_given_no_merge_train_then_direct_pushes_raise_no_bypass_alert(self):
+        src = read('runner', 'controller', 'nbci.py')
+        self.assertIn("if not train or (train != {'*'} and p['_repo'] not in train):", src)
+
+
 class Image(unittest.TestCase):
     def test_given_an_old_image_and_no_recent_attempt_then_a_build_is_due(self):
         self.assertTrue(L.image_build_due(8, 7, None, NOW))

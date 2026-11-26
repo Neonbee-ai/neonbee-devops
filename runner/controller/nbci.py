@@ -709,7 +709,10 @@ def tick(gh, gcp, st, mode='scale'):
             continue            # legacy-lane jobs are not ours to alert on
         if now - j['created'] > 900 and k not in st['alerted']:
             st['alerted'][k] = now; alert('job %s / %s queued %d min (labels %s)' % (j['repo'], j['name'], (now - j['created']) // 60, j['labels']))
+    train = set(x.strip() for x in E('TRAIN_REPOS', '').split(',') if x.strip())
     for p in pushes:
+        if not train or (train != {'*'} and p['_repo'] not in train):
+            continue        # no merge train for this repo: a direct push is the normal path, not a bypass
         why = L.bypass(p, set(st['release'].get('train_shas', [])), BOT_LOGINS, ALLOWED_PUSHERS)
         if why:
             day['bypass'] += 1; alert('BYPASS %s: %s (no prevention on the Free plan)' % (p['_repo'], why))
