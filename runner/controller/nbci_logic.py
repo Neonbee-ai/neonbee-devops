@@ -3,6 +3,7 @@ import json, re
 
 DEAD = ('TERMINATED', 'STOPPED', 'SUSPENDED')
 NO_JOB_S = 300          # a VM whose runner has not started a job 5 min after boot is deleted
+NO_JOB_STARTUP_S = 900  # RUNNER_BOOT=startup: provision.sh runs first (apt, Node, runner, Playwright), ~5-8 min
 BAD_RUN = {'failure', 'cancelled', 'timed_out', 'action_required', 'startup_failure', 'stale'}
 
 
@@ -67,7 +68,7 @@ def plan(waiting, pending_by_class, classes):
     return out
 
 
-def vm_verdict(vm, runner, job_done, now):
+def vm_verdict(vm, runner, job_done, now, no_job_s=NO_JOB_S):
     """Why to delete one runner VM, or None. vm: {status, created}; runner: GitHub runner or None;
     job_done: the controller saw workflow_job completed for this VM's runner."""
     if vm['status'] in DEAD:
@@ -76,7 +77,7 @@ def vm_verdict(vm, runner, job_done, now):
         return 'job completed'
     if runner and runner.get('busy'):
         return None
-    if now - vm['created'] >= NO_JOB_S:
+    if now - vm['created'] >= no_job_s:
         return 'no job %ds after boot' % (now - vm['created'])
     return None
 

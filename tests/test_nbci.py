@@ -123,6 +123,12 @@ class Delete(unittest.TestCase):
     def test_a_booting_vm_is_kept(self):
         self.assertIsNone(L.vm_verdict(self.vm(age=60), None, False, NOW))
 
+    def test_startup_boot_gets_a_longer_no_job_grace(self):
+        # given a stock-ubuntu VM still running provision.sh 6 min after creation (no runner yet)
+        # when the verdict uses the startup grace, then it is kept; past the grace it is deleted
+        self.assertIsNone(L.vm_verdict(self.vm(age=360), None, False, NOW, L.NO_JOB_STARTUP_S))
+        self.assertIn('no job', L.vm_verdict(self.vm(age=901), None, False, NOW, L.NO_JOB_STARTUP_S))
+
 
 class Fallback(unittest.TestCase):
     def test_billing_and_quota_fail_at_once(self):

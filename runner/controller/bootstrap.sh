@@ -21,6 +21,8 @@ if [ ! -f /var/lib/nbci/.base ]; then
   id ghr >/dev/null 2>&1 || useradd -m -s /bin/bash ghr
   mkdir -p /var/lib/nbci && touch /var/lib/nbci/.base
 fi
+# route job's Pulse-trailer step calls `gh api` (Ubuntu 24.04 universe package); idempotent for old VMs
+command -v gh >/dev/null 2>&1 || apt-get install -yq gh
 
 # GitHub App installation token (JWT signed by openssl; key only in a 0600 tmpfs file for a moment)
 gh_token() {
@@ -59,6 +61,7 @@ TRAIN_REPOS=$(attr nbci-train-repos || true)
 PULSE_MCP_URL=$(attr nbci-pulse-url || true)
 NB_DAILY_CAP_USD=$(attr nbci-daily-cap || echo 2)
 RUNNER_BOOT=$(attr nbci-runner-boot || echo image)
+HANDS_OFF_LEGACY=$(attr nbci-hands-off-legacy || echo 1)
 ENV
 cat > /etc/systemd/system/nbci.service <<'U'
 [Unit]
@@ -97,7 +100,7 @@ systemctl enable --now caddy nbci
 systemctl reload caddy || true
 systemctl restart nbci
 
-# 2 controller-local runners for nb-route jobs (route/notify: seconds of curl/jq). User ghr cannot
+# 2 controller-local runners for nb-ctl jobs (auto repos only; legacy nb-route runners are never shared) (route/notify: seconds of curl/jq). User ghr cannot
 # reach the metadata server, so job code can never use the controller's service account.
 iptables -C OUTPUT -m owner --uid-owner ghr -d 169.254.169.254 -j REJECT 2>/dev/null ||
   iptables -A OUTPUT -m owner --uid-owner ghr -d 169.254.169.254 -j REJECT
@@ -110,7 +113,7 @@ if [ -n "$TOKEN" ]; then
     chown -R ghr: "$d"; [ "$i" = 1 ] && "$d/bin/installdependencies.sh" >/dev/null 2>&1
     RT=$(curl -sf -X POST -H "Authorization: Bearer $TOKEN" https://api.github.com/orgs/Neonbee-ai/actions/runners/registration-token | jq -r .token)
     sudo -u ghr "$d/config.sh" --unattended --replace --url https://github.com/Neonbee-ai --token "$RT" \
-      --name "nbci-ctl-$i" --labels nb-route --work _work
+      --name "nbci-ctl-$i" --labels nb-ctl --work _work
     (cd "$d" && ./svc.sh install ghr && ./svc.sh start)
   done
 fi

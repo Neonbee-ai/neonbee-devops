@@ -51,7 +51,10 @@ RUNNER_BOOT = E('RUNNER_BOOT', 'image')
 IMAGE_FAMILY, IMAGE_MAX_AGE_D = E('IMAGE_FAMILY', 'nb-ci-runner'), float(E('IMAGE_MAX_AGE_D', '7'))
 REPORT_HOUR = int(E('REPORT_HOUR_UTC', '3'))
 STEM = 'nbci'
-STALE = tuple(E('STALE_RUNNER_PREFIXES', 'nbci-,gcp-burst-,contabo,nb-runner-').split(','))
+# HANDS_OFF_LEGACY=1 (default; canary): the controller only ever touches its own nbci-* VMs/runners. No legacy
+# runner deregistration, no fallback-Mini label changes, no org-variable writes. Set 0 once nb-ci owns the fleet.
+HANDS_OFF = E('HANDS_OFF_LEGACY', '1') == '1'
+STALE = ('nbci-',) if HANDS_OFF else tuple(E('STALE_RUNNER_PREFIXES', 'nbci-,gcp-burst-,contabo,nb-runner-').split(','))
 BOT_LOGINS = set(E('BOT_LOGINS', 'nb-ci[bot]').split(','))
 ALLOWED_PUSHERS = set(filter(None, E('ALLOWED_PUSHERS', '').split(',')))
 DRY = E('DRY_RUN', '1') == '1'
@@ -225,7 +228,7 @@ def org_var(gh, name, value=None):
     if value is None:
         try: return gh('orgs/%s/actions/variables/%s' % (ORG, name), cache=True).get('value', '')
         except RuntimeError: return ''
-    if DRY:
+    if DRY or HANDS_OFF:
         return value
     try: gh('orgs/%s/actions/variables/%s' % (ORG, name), 'PATCH', {'value': value})
     except RuntimeError:
@@ -240,8 +243,8 @@ def set_fallback(gh, runner, on, labels):
     want = L.fallback_target(have, labels, on)
     if have == want:
         return False
-    log('fallback runner', runner['name'], 'ON' if on else 'OFF', want)
-    if not DRY:
+    log('fallback runner', runner['name'], 'ON' if on else 'OFF', want, '(hands off: skipped)' if HANDS_OFF else '')
+    if not DRY and not HANDS_OFF:
         if want: gh('orgs/%s/actions/runners/%s/labels' % (ORG, runner['id']), 'PUT', {'labels': want})
         else: gh('orgs/%s/actions/runners/%s/labels' % (ORG, runner['id']), 'DELETE')
     return True
@@ -368,7 +371,8 @@ def tick(gh, gcp, st, mode='scale'):
         if v['builder']:
             continue
         r = rby.get(v['name'])
-        why = L.vm_verdict(v, r, v['name'] in done, now) if mode != 'drain' else 'drain'
+        why = L.vm_verdict(v, r, v['name'] in done, now, L.NO_JOB_STARTUP_S if RUNNER_BOOT == 'startup' else L.NO_JOB_S) \
+            if mode != 'drain' else 'drain'
         if mode == 'status':
             print('vm   %-34s %-10s %-6s runner=%s delete=%s' % (v['name'], v['status'], v['cls'],
                   r and ('busy' if r['busy'] else r['status']), why))
