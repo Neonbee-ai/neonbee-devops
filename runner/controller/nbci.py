@@ -730,13 +730,18 @@ def tick(gh, gcp, st, mode='scale'):
     if fb.get('runner') and fb['runner'] in rby:
         set_fallback(gh, rby[fb['runner']], st['fallback'], fb['labels'])
     # alerts: long queue, bypass
+    late = []
     for j in jobs:
-        k = 'q%s' % j['id']
         c = L.class_for(j['labels'], classes)
         if not c or c.get('host') == 'controller' and repo_mode(gh, st, j['repo'], ci_mode, now) != 'auto':
-            continue            # legacy-lane jobs are not ours to alert on
-        if now - j['created'] > 900 and k not in st['alerted']:
-            st['alerted'][k] = now; alert('job %s / %s queued %d min (labels %s)' % (j['repo'], j['name'], (now - j['created']) // 60, j['labels']))
+            continue            # jobs no nb-ci class serves are not ours to alert on
+        if now - j['created'] > 900:
+            late.append(j)
+    if late:                    # ONE incident for a backlog, not one comment per job (re-alerts at most hourly)
+        o = max(late, key=lambda j: now - j['created'])
+        notify(st, '%d job(s) queued > 15 min; oldest %d min: %s / %s (labels %s). VMs live %d, wanted %d, free vCPU %d%s' % (
+            len(late), (now - o['created']) // 60, o['repo'], o['name'], o['labels'], len(live), len(want), room,
+            ', spend capped' if spend == 'capped' else (', VM-minutes cap' if not vm_room else '')), key='queue', window_s=3600)
     train = set(x.strip() for x in E('TRAIN_REPOS', '').split(',') if x.strip())
     for p in pushes:
         if not train or (train != {'*'} and p['_repo'] not in train):
