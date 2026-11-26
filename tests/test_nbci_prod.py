@@ -81,7 +81,7 @@ class Caps(unittest.TestCase):
         for c in cfg['classes']:
             if c.get('host') == 'controller':
                 continue
-            self.assertEqual(c['spot'], c['name'] != 'deploy', c['name'])
+            self.assertEqual(c['spot'], c['name'] not in ('deploy', 'legacy-prod'), c['name'])
 
     def test_given_an_aqa_vm_body_then_it_is_spot_with_a_delete_backstop(self):
         b = A.vm_body({'machine': 'e2-standard-2', 'startup_script': 'x', 'service_account': 'sa'}, 'aqa-x', 'z', [], 'nbci', 5400)

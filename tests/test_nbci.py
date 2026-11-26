@@ -35,7 +35,7 @@ class Classes(unittest.TestCase):
         self.assertEqual(L.class_for(['self-hosted', 'nb-auto'], CLS)['vcpu'], 8)
 
     def test_given_a_macos_job_then_no_class_serves_it(self):
-        self.assertIsNone(L.class_for(['self-hosted', 'aqa-coord'], CLS))
+        self.assertIsNone(L.class_for(['self-hosted', 'macOS', 'ARM64'], CLS))
 
     def test_no_spot_class_carries_the_deploy_label(self):
         for c in CLS:
@@ -48,10 +48,7 @@ class Classes(unittest.TestCase):
             for lane in re.findall(r"'(\[\"self-hosted\"[^']*\])'", wf(f)):
                 with self.subTest(f=f, lane=lane):
                     labels = json.loads(lane)
-                    if auto & set(labels):
-                        self.assertIsNotNone(L.class_for(labels, CLS))
-                    else:
-                        self.assertIsNone(L.class_for(labels, CLS))
+                    self.assertIsNotNone(L.class_for(labels, CLS))   # 2026-11-27: every lane, auto or legacy, has a class
 
 
 class Minis(unittest.TestCase):
@@ -358,9 +355,19 @@ class IsolationModes(unittest.TestCase):
 
 
 class IsolationLegacy(unittest.TestCase):
-    def test_no_vm_class_can_serve_a_legacy_lane(self):
-        for lane in (['self-hosted', 'runner-vm'], ['self-hosted', 'nb-route'], ['self-hosted', 'lane-burst'], ['self-hosted', 'nb-pool']):
-            self.assertIsNone(L.class_for(lane, CLS))
+    def test_given_no_mac_mini_then_every_legacy_lane_gets_a_spot_vm(self):
+        for lane in (['self-hosted', 'runner-vm'], ['self-hosted', 'lane-burst'], ['self-hosted', 'nb-pool'],
+                     ['self-hosted', 'contabo', 'browsers'], ['self-hosted', 'aqa-coord']):
+            with self.subTest(lane=lane):
+                c = L.class_for(lane, CLS)
+                self.assertEqual((c['name'], c['spot']), ('legacy', True))
+
+    def test_given_a_legacy_deploy_lane_then_a_standard_vm(self):
+        c = L.class_for(['self-hosted', 'contabo', 'lane-prod'], CLS)
+        self.assertEqual((c['name'], c['spot']), ('legacy-prod', False))
+
+    def test_given_nb_route_then_the_controller_runners_serve_it(self):
+        self.assertEqual(L.class_for(['self-hosted', 'nb-route'], CLS).get('host'), 'controller')
 
     def test_fallback_only_adds_and_removes_its_own_labels(self):
         legacy = ['runner-vm', 'nb-route', 'contabo']

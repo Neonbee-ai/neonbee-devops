@@ -178,7 +178,7 @@ if [ -n "$TOKEN" ]; then
     chown -R ghr: "$d"; [ "$i" = 1 ] && "$d/bin/installdependencies.sh" >/dev/null 2>&1
     RT=$(curl -sf -X POST -H "Authorization: Bearer $TOKEN" https://api.github.com/orgs/Neonbee-ai/actions/runners/registration-token | jq -r .token)
     sudo -u ghr "$d/config.sh" --unattended --replace --url https://github.com/Neonbee-ai --token "$RT" \
-      --name "nbci-ctl-$i" --labels nb-ctl --work _work
+      --name "nbci-ctl-$i" --labels nb-ctl,nb-route --work _work
     (cd "$d" && ./svc.sh install ghr && ./svc.sh start)
   done
 fi
