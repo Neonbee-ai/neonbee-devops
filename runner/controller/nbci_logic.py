@@ -110,11 +110,17 @@ def cap_creates(want, waiting, served, now, window_s=SERVE_WINDOW_S):
     return want[:n], open_ids[:n]
 
 
-def vm_verdict(vm, runner, job_done, now, no_job_s=NO_JOB_S):
+LIFETIME = 'older than max lifetime'
+
+
+def vm_verdict(vm, runner, job_done, now, no_job_s=NO_JOB_S, max_s=None):
     """Why to delete one runner VM, or None. vm: {status, created}; runner: GitHub runner or None;
-    job_done: the controller saw workflow_job completed for this VM's runner."""
+    job_done: the controller saw workflow_job completed for this VM's runner. max_s: hard lifetime
+    (GCE maxRunDuration should already have deleted it; this is the backstop, busy or not)."""
     if vm['status'] in DEAD:
         return 'stopped (%s): disk still bills' % vm['status']
+    if max_s and now - vm['created'] >= max_s:
+        return LIFETIME + ' (%d min)' % ((now - vm['created']) // 60)
     if vm.get('cls') == 'aqa':
         # AQA VMs have no runner: the VM deletes itself at exit; the reaper removes a TERMINATED one (above) and any older than 30 min
         return 'aqa VM older than 30 min' if now - vm['created'] >= 1800 else None
@@ -373,3 +379,66 @@ def churn_verdict(vms, runners, queued_by_class, since, now, window_s=300, cap=8
         if now - t > window_s:
             return 'class %s: %d idle VM(s) beyond its %d queued job(s) for %ds' % (c, over[c], queued_by_class.get(c, 0), now - t)
     return None
+
+
+def aqa_reap_verdict(vm, now, max_s):
+    """Any aqa-* VM (ours or the AQA agent's), except managed-instance-group members (their group owns them):
+    TERMINATED -> delete (a stopped VM's disk bills); older than max_s -> delete. vm: {status, created, mig}."""
+    if vm.get('mig'):
+        return None
+    if vm['status'] in DEAD:
+        return 'stopped (%s)' % vm['status']
+    if now - vm['created'] >= max_s:
+        return 'older than %d min' % (max_s // 60)
+    return None
+
+
+def vm_minutes(vms, dt_s):
+    """VM-minutes consumed since the last pass by live VMs (any class, AQA included)."""
+    return sum(dt_s / 60.0 for v in vms if v['status'] in LIVE)
+
+
+def minutes_gate(used, cap):
+    """True while VMs may still start today (all classes, deploy included); False at/after the cap."""
+    return cap <= 0 or used < cap
+
+
+def alert_key(text):
+    """Dedupe key of one incident: the text with numbers and ids blanked, so 'queued 16 min' and 'queued 17 min'
+    of the same job are one incident only if the caller also passes a job id."""
+    return re.sub(r'[0-9a-f]{7,40}|\d+(\.\d+)?', '#', text.lower())[:120]
+
+
+def redeliver_ids(deliveries, now, seen, max_age_s=86400):
+    """Webhook deliveries to redeliver: failed (status_code not 2xx), not a redelivery itself, younger than
+    max_age_s, one attempt per GUID (seen = GUIDs already retried). deliveries: GitHub /app/hook/deliveries."""
+    ok_guids = {d['guid'] for d in deliveries if 200 <= int(d.get('status_code') or 0) < 300}
+    out = []
+    for d in deliveries:
+        if d.get('redelivery') or d['guid'] in ok_guids or d['guid'] in seen:
+            continue
+        if now - ts(d['delivered_at']) > max_age_s:
+            continue
+        out.append(d['id']); seen.add(d['guid'])
+    return out
+
+
+def dns_plan(resolved, ip):
+    """(webhook url host to use, whether to request a DNS update). resolved: IPs the fixed host resolves to."""
+    return ('fixed', False) if ip in resolved else ('sslip', True)
+
+
+def image_build_due(age_d, max_age_d, last_try, now, retry_s=20 * 3600):
+    """Weekly rebuild: due when the newest image is older than max_age_d and no build was tried in retry_s
+    (a failing build is not retried every hour)."""
+    return age_d > max_age_d and now - (last_try or 0) >= retry_s
+
+
+def aqa_outcome(result, gone_s, grace_s=900):
+    """AQA verdict from <evidence>/result.json once the VM is gone. result: parsed JSON, None (404) or {'_err': ...}.
+    'pass' (exit 0) | 'failed (exit N)' | 'wait' (no result yet, inside grace) | 'ended without a result'."""
+    if isinstance(result, dict) and 'exit' in result:
+        try: code = int(result['exit'])
+        except (TypeError, ValueError): code = -1
+        return 'pass' if code == 0 else 'failed (exit %s)' % result['exit']
+    return 'wait' if gone_s < grace_s else 'ended without a result'

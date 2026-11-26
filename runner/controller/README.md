@@ -17,7 +17,7 @@ at job end / 5 min without a job; stopped VMs and orphan disks swept. route/noti
 
 Config: `ci/runner-labels.json` (classes, prices, minis, fallback, quota), `ci/release-manifest.json`.
 Off switch: org variable `NB_CI_MODE=legacy|auto`. `DRY_RUN=1` (default) logs every action, changes nothing.
-Ops: `nbci.py status` (read-only) · `once` · `drain` · `build-image` · `set-hook`.
+Ops: `nbci.py status` (read-only) · `once` · `drain` · `build-image` · `set-hook` · `redeliver`. Runbook (stop, rollback, alerts, secrets): `RUNBOOK.md`.
 
 GitHub App permissions: org self-hosted runners (write), org variables (write); repo actions, checks,
 metadata (read), contents, pull requests, issues (write). Events: workflow_job, push, pull_request,

@@ -1,13 +1,12 @@
 #!/usr/bin/env bash
 # Dead-man check (root cron every 5 min on the controller VM): heartbeat older than 10 min ->
-# Teams alert + restart ONLY the nbci unit. Independent of the controller process.
+# alert (Pulse "[nbci] alerts" + Teams if set) + restart ONLY the nbci unit. Independent of the controller process.
+# The GCP uptime check on https://<host>/healthz covers the case where this VM itself is down.
 set -u
 HB=/var/lib/nbci/heartbeat; MAX=${NB_HB_MAX_S:-600}
 age=$(( $(date +%s) - $(cat "$HB" 2>/dev/null || echo 0) ))
 [ "$age" -lt "$MAX" ] && exit 0
-P=$(curl -sf -m 5 -H 'Metadata-Flavor: Google' http://metadata.google.internal/computeMetadata/v1/project/project-id)
-TOK=$(curl -sf -m 5 -H 'Metadata-Flavor: Google' http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token | jq -r .access_token)
-HOOK=$(curl -sf -m 10 -H "Authorization: Bearer $TOK" "https://secretmanager.googleapis.com/v1/projects/$P/secrets/nbci-teams-webhook/versions/latest:access" | jq -r .payload.data | base64 -d 2>/dev/null)
-[ -n "$HOOK" ] && curl -fsS -m 10 -H 'Content-Type: application/json' \
-  -d "{\"text\":\"[nb-ci] controller heartbeat ${age}s old: restarting nbci\"}" "$HOOK" >/dev/null
+[ -f /run/nbci-stopped-by-guard ] && exit 0   # the churn guard stopped nbci on purpose: no auto-restart (cleared on reboot or by hand)
+set -a; . /etc/nbci.env; set +a
+python3 /opt/nbci/src/runner/controller/nbci_alert.py "controller heartbeat ${age}s old: restarting nbci" >>/var/log/nbci-watchdog.log 2>&1
 systemctl restart nbci

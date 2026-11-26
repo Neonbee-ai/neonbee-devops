@@ -57,6 +57,12 @@ class GCP:
                 headers={'Authorization': 'Bearer ' + self.token()})[1]
         return base64.b64decode(d['payload']['data']).decode()
 
+    def storage_json(self, bucket, name):
+        """One small JSON object from GCS (raises RuntimeError '... 404 ...' when absent)."""
+        import urllib.parse
+        return req('https://storage.googleapis.com/storage/v1/b/%s/o/%s?alt=media' % (bucket, urllib.parse.quote(name, safe='')),
+                   headers={'Authorization': 'Bearer ' + self.token()}, timeout=20)[1]
+
     def wait_op(self, op, zone=None, timeout=300):
         end = time.time() + timeout
         while time.time() < end:

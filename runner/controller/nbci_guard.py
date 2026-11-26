@@ -7,7 +7,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import nbci_logic as L  # noqa: E402
 import nbci  # noqa: E402
-from nbci_io import GCP, GitHub, log, teams  # noqa: E402
+from nbci_io import GCP, GitHub, log  # noqa: E402
+import nbci_alert  # noqa: E402
 
 WINDOW_S = int(os.environ.get('GUARD_WINDOW_S', os.environ.get('RECONCILE_S', '300')))
 CAP = int(os.environ.get('GUARD_MAX_VMS', '8'))
@@ -40,8 +41,9 @@ def main():
             if why:
                 log('GUARD TRIPPED', why)
                 if not nbci.DRY:
+                    open('/run/nbci-stopped-by-guard', 'w').write(why[:200])   # watchdog.sh must not restart it
                     subprocess.run(['systemctl', 'stop', 'nbci'], check=False)
-                teams('nbci STOPPED by the churn guard: %s' % why, nbci.DRY)
+                nbci_alert.send('nbci STOPPED by the churn guard: %s. Restart: sudo systemctl start nbci (after checking VMs)' % why, gcp, nbci.DRY)
                 since.clear(); time.sleep(600)
         except Exception as e:
             log('guard error', str(e)[:200])

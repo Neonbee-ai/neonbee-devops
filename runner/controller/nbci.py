@@ -59,6 +59,15 @@ STALE = ('nbci-',) if HANDS_OFF else tuple(E('STALE_RUNNER_PREFIXES', 'nbci-,gcp
 BOT_LOGINS = set(E('BOT_LOGINS', 'nb-ci[bot]').split(','))
 ALLOWED_PUSHERS = set(filter(None, E('ALLOWED_PUSHERS', '').split(',')))
 DRY = E('DRY_RUN', '1') == '1'
+HEALTH_MAX_S = int(E('HEALTH_MAX_S', '600'))
+PULSE_URL = E('PULSE_MCP_URL') or 'https://pulse.moonhive.in/mcp'   # an empty value in /etc/nbci.env used to switch Pulse off silently
+# Stable webhook host (DNS-only A record, updated on every boot by the ops/nbci-dns workflow); sslip.io is the fallback
+NBCI_HOST = E('NBCI_HOST', 'nbci.moonhive.in')
+DNS_BRANCH, DNS_REPO = E('NBCI_DNS_BRANCH', 'ops/nbci-dns'), E('NBCI_DNS_REPO', 'neonbee-devops')
+ALERT_TASK = E('NBCI_ALERT_TASK', '71b8be5b')       # Pulse "[nbci] alerts" (Neonbee project): one comment per incident
+DAILY_VM_MIN = float(E('NB_DAILY_VM_MIN', '1500'))   # all nbci + AQA VM-minutes per UTC day; at the cap no VM starts
+AQA_MAX_S = int(E('AQA_MAX_S', '7200'))
+PULSE_SKIP_CHECKS = set(filter(None, E('PULSE_SKIP_CHECKS', 'Gate').split(',')))   # the aggregate Gate job repeats its parts' failure             # any aqa-* VM (ours or the AQA agent's) older than this is reaped
 
 LOCK = threading.Lock()
 EVENTS = {'jobs': {}, 'done_runners': set(), 'dirty_repos': set(), 'last_event': 0, 'waits': [], 'pushes': [], 'failed': [], 'aqa': []}
@@ -73,6 +82,14 @@ class Hook(http.server.BaseHTTPRequestHandler):
 
     def log_message(self, *a):
         pass
+
+    def do_GET(self):
+        """/healthz for the GCP uptime check: 200 while the loop heartbeat is fresh, else 503. No data leaves."""
+        try: age = time.time() - int(open(HEARTBEAT_FILE).read().strip())
+        except (OSError, ValueError): age = 1e9
+        ok = self.path.split('?')[0] == '/healthz' and age < HEALTH_MAX_S
+        self.send_response(200 if ok else 503); self.send_header('Content-Type', 'text/plain'); self.end_headers()
+        self.wfile.write(b'ok\n' if ok else b'stale\n')
 
     def do_POST(self):
         body = self.rfile.read(min(int(self.headers.get('Content-Length', 0)), 5_000_000))
@@ -104,7 +121,12 @@ def on_event(kind, ev):
                     EVENTS['done_runners'].add(rn)
                 if ev['action'] == 'completed' and j.get('conclusion') in ('failure', 'cancelled') and rn.startswith(STEM + '-'):
                     EVENTS['failed'].append({'repo': repo, 'job': j['id'], 'run': j['run_id'], 'attempt': j.get('run_attempt', 1),
-                                             'name': j['name'], 'conclusion': j['conclusion'], 'runner': rn})
+                                             'name': j['name'], 'conclusion': j['conclusion'], 'runner': rn,
+                                             'sha': j.get('head_sha', ''), 'branch': j.get('head_branch') or '',
+                                             'url': j.get('html_url', '')})
+                if ev['action'] == 'completed' and j.get('conclusion') == 'success':
+                    EVENTS['passed'] = (EVENTS.get('passed', []) + [{'repo': repo, 'name': j['name'], 'sha': j.get('head_sha', ''),
+                                                                     'url': j.get('html_url', '')}])[-200:]
         elif kind in ('pull_request', 'check_suite', 'workflow_run', 'check_run'):
             EVENTS['dirty_repos'].add(repo)
             wr = ev.get('workflow_run') or {}
@@ -112,7 +134,7 @@ def on_event(kind, ev):
                 EVENTS['aqa'] = (EVENTS['aqa'] + [{'repo': repo, 'run': {k: wr.get(k) for k in (
                     'id', 'name', 'event', 'conclusion', 'head_branch', 'head_sha', 'workflow_id', 'html_url')}}])[-50:]
         elif kind == 'push':
-            EVENTS['pushes'].append(dict(ev, _repo=repo))
+            EVENTS['pushes'] = (EVENTS['pushes'] + [dict(ev, _repo=repo)])[-200:]
 
 
 # ── GitHub / GCE state ──────────────────────────────────────────────────────────────────────────────
@@ -149,7 +171,8 @@ def our_vms(gcp):
             lab = v.get('labels', {})
             vms.append({'name': v['name'], 'zone': z, 'status': v['status'], 'created': ts(v['creationTimestamp']),
                         'cls': lab.get('nb-class', 'gate'), 'builder': lab.get('nb-role') == 'builder',
-                        'vcpu': int(v['machineType'].rsplit('-', 1)[1])})
+                        'vcpu': int(v['machineType'].rsplit('-', 1)[1]),
+                        'jit': any(i['key'] == 'jit' for i in v.get('metadata', {}).get('items', []))})
     return vms
 
 
@@ -204,7 +227,8 @@ def create_vm(gh, gcp, c, failures, image):
 def delete_vm(gh, gcp, vm, runner, why):
     """Never kills a running job: a busy runner keeps its VM, and the runner is deregistered first
     (GitHub refuses with 422 if it took a job in the meantime)."""
-    if runner and runner.get('busy') and vm['status'] not in L.DEAD and why != 'job completed':
+    hard = why.startswith(L.LIFETIME)
+    if runner and runner.get('busy') and vm['status'] not in L.DEAD and why != 'job completed' and not hard:
         return False
     log('delete', vm['name'], why)
     if DRY:
@@ -212,7 +236,7 @@ def delete_vm(gh, gcp, vm, runner, why):
     if runner and vm['status'] not in L.DEAD and why != 'job completed':
         try: gh('orgs/%s/actions/runners/%s' % (ORG, runner['id']), 'DELETE')
         except RuntimeError as e:
-            if ' 404 ' not in str(e):
+            if ' 404 ' not in str(e) and not hard:
                 log('keep', vm['name'], 'runner took a job'); return False
     gcp.compute('/zones/%s/instances/%s' % (vm['zone'], vm['name']), 'DELETE')
     return True
@@ -265,7 +289,15 @@ def repo_mode(gh, st, repo, org_mode, now):
 
 
 # ── image (family nb-ci-runner), rebuilt weekly ────────────────────────────────────────────────────
-def build_image(gcp):
+def build_image(gcp, on_fail=None):
+    try:
+        _build_image(gcp)
+    except Exception as e:
+        log('image build failed', str(e)[:300])
+        if on_fail: on_fail('weekly image build failed: %s (runner VMs keep the previous image)' % str(e)[:200])
+
+
+def _build_image(gcp):
     """Builder VM from stock ubuntu-2404 runs runner/image/provision.sh and powers off; its disk becomes
     the next image of the family; builder + disk are deleted; only the 2 newest images are kept."""
     name = 'nbci-builder-%s' % time.strftime('%m%d%H%M', time.gmtime()); z = ZONES[0]
@@ -327,18 +359,27 @@ def every(st, key, seconds, now):
     return False
 
 
-def aqa_trigger(gh, gcp, st, now, today, failures):
+def aqa_trigger(gh, gcp, st, now, today, failures, vm_room=True):
     """Deploy -> AQA: ONE Spot VM per successful deploy run (dedupe repo+sha, daily cap), deleted by the
     controller once it powers off. Held (events kept) until ci/aqa.json says contract_ready."""
     cfg = L.load(os.path.join(CFG, 'aqa.json'))
     with LOCK:
-        pending = list(EVENTS['aqa'])
-        if cfg.get('enabled') and cfg.get('contract_ready'):
-            EVENTS['aqa'] = []
-    if not pending or not cfg.get('enabled'):
-        return
-    if not cfg.get('contract_ready'):
-        log('aqa trigger held: contract_ready=false (%d deploy event(s) waiting)' % len(pending)); return
+        pending = st.pop('aqa_pending', []) + [dict(e, seen=e.get('seen', now)) for e in EVENTS['aqa']]   # persisted: survives a restart
+        EVENTS['aqa'] = []
+    later = []
+    try:
+        if not pending or not cfg.get('enabled'):
+            return
+        if not cfg.get('contract_ready') or not vm_room:
+            later = pending
+            log('aqa trigger held: %s (%d deploy event(s) waiting)' % ('VM-minutes cap' if not vm_room else 'contract_ready=false', len(pending)))
+            return
+        _aqa_events(gh, gcp, st, now, today, failures, cfg, pending, later)
+    finally:
+        st['aqa_pending'] = [e for e in later if now - e.get('seen', now) < 7200][-50:]
+
+
+def _aqa_events(gh, gcp, st, now, today, failures, cfg, pending, later):
     ast = st.setdefault('aqa', {})
     for ev in pending:
         repo, run = ev['repo'], ev['run']
@@ -358,6 +399,7 @@ def aqa_trigger(gh, gcp, st, now, today, failures):
         if why_gate:
             log('aqa skip', key, why_gate)
             if why_gate != 'gate pending': A.record(ast, key, today, now)      # a failed gate never gets AQA for this sha
+            else: later.append(ev)                                               # gate still running: retry next pass (2 h max)
             continue
         shas, msgs = [run['head_sha']], []
         try:
@@ -397,24 +439,114 @@ def aqa_trigger(gh, gcp, st, now, today, failures):
                 if k in ('billing', 'quota'): break
         if made:
             A.record(ast, key, today, now)
+            st.setdefault('aqa_runs', {})[name] = {'repo': repo, 'sha': run['head_sha'], 'env': env, 'created': now,
+                                                   'evidence': cfg['evidence_template'].format(env=A.aqa_env(env), sha=run['head_sha'], repo=repo),
+                                                   'tasks': ids}
+        else:
+            notify(st, 'AQA VM create failed for %s@%s (%s)' % (repo, run['head_sha'][:8], ','.join(sorted({k for _, k in failures})) or 'api'),
+                   key='aqacreate' + key)
 
 
 def reap_aqa(gcp):
-    """AQA VMs we did not label (the AQA agent's own aqa-* smoke VMs) are touched only when TERMINATED: a stopped VM's
-    disk still bills. Ours (label nbci, class aqa) are deleted by the verdict when TERMINATED or older than 30 min."""
+    """Every aqa-* VM, ours or the AQA agent's: deleted when TERMINATED (a stopped VM's disk bills) or older than
+    AQA_MAX_S (a hung replay). Managed-instance-group members are left to their group. Returns the names reaped."""
+    out = []
     for z in ZONES:
-        for v in gcp.compute('/zones/%s/instances?filter=name%%3Daqa-*%%20AND%%20status%%3DTERMINATED' % z).get('items', []):
-            if v.get('labels', {}).get(STEM) == '1':
+        for v in gcp.compute('/zones/%s/instances?filter=name%%3Daqa-*' % z).get('items', []):
+            mig = any(i['key'] == 'created-by' for i in v.get('metadata', {}).get('items', []))
+            why = L.aqa_reap_verdict({'status': v['status'], 'created': ts(v['creationTimestamp']), 'mig': mig}, time.time(), AQA_MAX_S)
+            if not why:
                 continue
-            log('reap stopped aqa VM', v['name'])
+            log('reap aqa VM', v['name'], why); out.append((v['name'], why))
             if not DRY:
                 gcp.compute('/zones/%s/instances/%s' % (z, v['name']), 'DELETE')
+    return out
+
+
+def aqa_results(gcp, st, now):
+    """After each AQA VM we started is gone: read <evidence>/result.json ({"exit": N}) written by aqa/vm-startup.sh;
+    exit != 0, or no result 15 min after the VM is gone -> one alert. Checked every 2 min."""
+    runs = st.setdefault('aqa_runs', {})
+    if not runs:
+        return
+    alive = set()
+    for z in ZONES:
+        alive |= {v['name'] for v in gcp.compute('/zones/%s/instances?filter=name%%3Daqa-*' % z).get('items', [])}
+    for name, r in list(runs.items()):
+        if name in alive:
+            continue
+        r.setdefault('gone', now)
+        b, _, path = r['evidence'][5:].partition('/')
+        try:
+            res = gcp.storage_json(b, path + '/result.json')
+        except Exception as e:
+            res = None if ' 404 ' in str(e) else {'_err': str(e)[:80]}
+        what = L.aqa_outcome(res, now - r['gone'])
+        if what == 'wait':
+            continue
+        if what != 'pass':
+            notify(st, 'AQA %s: %s@%s on %s (tasks %s). Evidence: %s/evidence.tgz' % (
+                what, r['repo'], r['sha'][:8], r['env'], ','.join(r.get('tasks') or []) or '-', r['evidence']), key='aqares' + name)
+        log('aqa result', name, what)
+        del runs[name]
+    for name in [n for n, r in runs.items() if now - r['created'] > 6 * 3600]:
+        del runs[name]
+
+
+def pulse_refs(gh, st, repo, sha, branch):
+    """(Pulse task ids, PR number) of a failed job's commit: its open PR's commit trailers + branch + body, else the
+    commit's own trailer. Cached per repo@sha for 6 h."""
+    cache = st.setdefault('pulse_refs', {}); k = '%s@%s' % (repo, sha)
+    hit = cache.get(k)
+    if hit and time.time() - hit[2] < 6 * 3600:
+        return hit[0], hit[1]
+    ids, num = [], 0
+    try:
+        prs = [p for p in gh('repos/%s/%s/commits/%s/pulls' % (ORG, repo, sha)) if p.get('state') == 'open']
+        if prs:
+            num = prs[0]['number']
+            msgs = [c['commit']['message'] for c in gh('repos/%s/%s/pulls/%s/commits?per_page=100' % (ORG, repo, num))]
+            ids = nb_pulse.task_ids(msgs, prs[0]['head']['ref'], prs[0].get('body') or '')
+        else:
+            ids = nb_pulse.task_ids([gh('repos/%s/%s/commits/%s' % (ORG, repo, sha))['commit']['message']], branch)
+    except (RuntimeError, KeyError, TypeError) as e:
+        log('pulse refs', repo, sha[:8], str(e)[:120])
+    cache[k] = (ids, num, time.time())
+    for old in [x for x, v in cache.items() if time.time() - v[2] > 6 * 3600]:
+        del cache[old]
+    return ids, num
+
+
+def scrub_jit(gcp, vm):
+    """Remove the one-time JIT runner config from a VM's metadata once its runner is registered (no credential
+    stays readable in instance metadata)."""
+    if DRY:
+        return
+    i = gcp.compute('/zones/%s/instances/%s' % (vm['zone'], vm['name']))
+    md = i.get('metadata', {})
+    items = [x for x in md.get('items', []) if x['key'] != 'jit']
+    gcp.compute('/zones/%s/instances/%s/setMetadata' % (vm['zone'], vm['name']), 'POST',
+                {'fingerprint': md.get('fingerprint'), 'items': items})
+
+
+def notify(st, text, key=None, window_s=6 * 3600):
+    """One alert per incident: logged, sent to Teams when a webhook is configured, and queued (retried, never
+    blocking) as ONE comment on the Pulse task ALERT_TASK. key (default: the text with numbers/ids blanked)
+    dedupes repeats inside window_s."""
+    now = time.time(); k = 'n:' + (key or L.alert_key(text))
+    if now - st['alerted'].get(k, 0) < window_s:
+        return False
+    st['alerted'][k] = now
+    teams(text, DRY)
+    if ALERT_TASK:
+        st.setdefault('pulse', {}).setdefault('q', []).append(
+            {'op': 'comment', 'task': ALERT_TASK, 'text': '[nbci] %s (%s)' % (text, time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime(now))),
+             'tries': 0, 'next_at': 0, 'born': now})
+    return True
 
 
 def alert_once(st, now, text):
-    k = 'aqa-' + time.strftime('%Y-%m-%d', time.gmtime(now)) + text[:20]
-    if k not in st['alerted']:
-        st['alerted'][k] = now; teams(text, DRY)
+    notify(st, text, key='aqa-' + time.strftime('%Y-%m-%d', time.gmtime(now)) + text[:20], window_s=86400)
 
 
 # ── one reconcile pass ──────────────────────────────────────────────────────────────────────────────
@@ -422,7 +554,7 @@ def tick(gh, gcp, st, mode='scale'):
     now = time.time(); today = time.strftime('%Y-%m-%d', time.gmtime(now))
     cfg = L.load(os.path.join(CFG, 'runner-labels.json')); manifest = L.load(os.path.join(CFG, 'release-manifest.json'))
     classes = cfg['classes']; byname = {c['name']: c for c in classes}; prices = cfg['prices_usd']
-    alert = lambda t: teams(t, DRY)  # noqa: E731
+    alert = lambda t: notify(st, t)  # noqa: E731
     ci_mode = org_var(gh, 'NB_CI_MODE') or 'legacy'        # org default; repo variables override it
     rs = runners(gh); rby = {r['name']: r for r in rs}
     webhook_live = now - EVENTS['last_event'] < 900 and not EVENTS.get('need_full_poll', True)
@@ -437,7 +569,9 @@ def tick(gh, gcp, st, mode='scale'):
         pushes, EVENTS['pushes'] = EVENTS['pushes'], []
         dirty, EVENTS['dirty_repos'] = set(EVENTS['dirty_repos']), set()
         failed, EVENTS['failed'] = EVENTS['failed'], []
+        passed, EVENTS['passed'] = EVENTS.get('passed', []), []
     day = st['day'].setdefault(today, {'usd': 0.0, 'vcpu_h': {}, 'jobs': 0, 'waits': [], 'create_fail': 0, 'fallback': 0, 'bypass': 0})
+    day.setdefault('vm_min', 0.0)
     day['waits'] = (day['waits'] + waits)[-5000:]
     failures, started = [], False
     try:
@@ -446,6 +580,11 @@ def tick(gh, gcp, st, mode='scale'):
         vms, gce_ok = [], False; failures.append(('-', L.classify_gce_error(str(e)))); log('gce list failed', str(e)[:200])
     # spend ledger: real price x time each VM ran since the last pass
     dt_h = min(now - st['last'].get('ledger', now), 600) / 3600.0; st['last']['ledger'] = now
+    day['vm_min'] += L.vm_minutes(vms, dt_h * 3600)
+    vm_room = L.minutes_gate(day['vm_min'], DAILY_VM_MIN)
+    if not vm_room:
+        notify(st, 'daily VM-minutes cap reached: %.0f of %.0f min today; no VM (deploy, gate or AQA) starts until 00:00 UTC. '
+               'Raise NB_DAILY_VM_MIN in /etc/nbci.env to lift it.' % (day['vm_min'], DAILY_VM_MIN), key='vmcap' + today, window_s=86400)
     for v in vms:
         if v['status'] in ('RUNNING', 'STAGING', 'PROVISIONING'):
             c = byname.get(v['cls'], byname['gate'])
@@ -463,10 +602,12 @@ def tick(gh, gcp, st, mode='scale'):
     live = []
     for v in vms:
         if v['builder']:
+            if mode == 'scale' and gce_ok and now - v['created'] > 7200 and not DRY:      # builder backstop (normal build < 40 min)
+                log('delete', v['name'], 'builder ' + L.LIFETIME); _safe(gcp.compute, '/zones/%s/instances/%s' % (v['zone'], v['name']), 'DELETE')
             continue
         r = rby.get(v['name'])
-        why = L.vm_verdict(v, r, v['name'] in done, now, L.NO_JOB_STARTUP_S if RUNNER_BOOT == 'startup' else L.NO_JOB_S) \
-            if mode != 'drain' else 'drain'
+        why = L.vm_verdict(v, r, v['name'] in done, now, L.NO_JOB_STARTUP_S if RUNNER_BOOT == 'startup' else L.NO_JOB_S,
+                           MAX_RUN_S + 900) if mode != 'drain' else 'drain'
         if mode == 'status':
             print('vm   %-34s %-10s %-6s runner=%s delete=%s' % (v['name'], v['status'], v['cls'],
                   r and ('busy' if r['busy'] else r['status']), why))
@@ -475,6 +616,9 @@ def tick(gh, gcp, st, mode='scale'):
             with LOCK: EVENTS['done_runners'].discard(v['name'])
             if why == 'job completed': day['jobs'] += 1
             continue
+        if v.get('jit') and r and gce_ok and mode == 'scale':     # runner registered: the one-time JIT config leaves metadata
+            try: scrub_jit(gcp, v); log('jit scrubbed', v['name'])
+            except Exception as e: log('jit scrub', v['name'], str(e)[:120])
         live.append(v)
     if mode == 'drain':
         return
@@ -503,18 +647,25 @@ def tick(gh, gcp, st, mode='scale'):
             room, image = 0, None; failures.append(('-', L.classify_gce_error(str(e))))
         reserve = cfg['quota']['reserve_deploy_vcpu']
         for c in want:
-            if image and L.may_start(c, spend, room, reserve):
+            if image and vm_room and L.may_start(c, spend, room, reserve):
                 if create_vm(gh, gcp, c, failures, image):
                     started = True; room -= c['vcpu']
                     if serve_ids: served[str(serve_ids.pop(0))] = now
                 else:
                     day['create_fail'] += 1
+                    kinds = ','.join(sorted({k for _, k in failures})) or 'api'
+                    notify(st, 'VM create failed: class %s (%s) in every zone tried; its jobs wait for the next pass or the fallback runner'
+                           % (c['name'], kinds), key='create' + c['name'] + kinds)
             elif spend != 'capped' and room < c['vcpu'] and not any(v['status'] == 'RUNNING' for v in live):
                 failures.append(('-', 'quota'))          # nothing of ours running, yet no room: someone else holds it
     if gce_ok and every(st, 'aqa-reap', 120, now):
-        try: reap_aqa(gcp)
+        try:
+            for name, why in reap_aqa(gcp):
+                if 'older' in why: notify(st, 'AQA VM %s reaped: %s (replay hung or never self-deleted)' % (name, why), key='reap' + name)
         except Exception as e: log('aqa reap', str(e)[:160])
-    try: aqa_trigger(gh, gcp, st, now, today, failures)
+        try: aqa_results(gcp, st, now)
+        except Exception as e: log('aqa results', str(e)[:160])
+    try: aqa_trigger(gh, gcp, st, now, today, failures, vm_room)
     except Exception as e: log('aqa trigger error', str(e)[:200])
     # AutoQA share of the one quota
     if every(st, 'autoqa', 120, now) and gce_ok:
@@ -559,8 +710,8 @@ def tick(gh, gcp, st, mode='scale'):
     log('mode=%s jobs=%d vms=%d want=%d room=%d spend=$%.3f %s fallback=%s%s' % (
         ci_mode, len(jobs), len(live), len(want), room, day['usd'], spend, st['fallback'], ' gcp=' + failing if failing else ''))
     # Pulse queue (failures, fixes, released): drained a few per pass, retried, never blocks CI
-    pq = nb_pulse.PulseQueue(st.setdefault('pulse', {}), nb_pulse.MCP(E('PULSE_MCP_URL', ''), st.get('_pulse_token', '')), log,
-                             DRY or not (E('PULSE_MCP_URL') and st.get('_pulse_token')))
+    pq = nb_pulse.PulseQueue(st.setdefault('pulse', {}), nb_pulse.MCP(PULSE_URL, st.get('_pulse_token', '')), log,
+                             DRY or not (PULSE_URL and st.get('_pulse_token')))
     pq.ingest_spool()
 
     def released(tid, note):
@@ -569,17 +720,30 @@ def tick(gh, gcp, st, mode='scale'):
     # flaky-infra retry for any failed job on an nb-ci runner (push runs too), once per run
     for f in failed:
         try:
-            if repo_mode(gh, st, f['repo'], ci_mode, now) != 'auto' or str(f['run']) in rel_state.setdefault('retried', {}):
+            if repo_mode(gh, st, f['repo'], ci_mode, now) != 'auto':
                 continue
-            kind = L.classify_log(job_log(gh, ORG, f['repo'], f['job']), f['conclusion'],
-                                  runner_gone=f['conclusion'] == 'cancelled' and f['runner'] not in rby)
-            if L.should_retry(kind, f['attempt']):
+            text = job_log(gh, ORG, f['repo'], f['job'])
+            kind = L.classify_log(text, f['conclusion'], runner_gone=f['conclusion'] == 'cancelled' and f['runner'] not in rby)
+            if str(f['run']) not in rel_state.setdefault('retried', {}) and L.should_retry(kind, f['attempt']):
                 log('infra retry', f['repo'], f['name'], f['run'])
                 rel_state['retried'][str(f['run'])] = now
                 if not DRY:
                     gh('repos/%s/%s/actions/runs/%s/rerun-failed-jobs' % (ORG, f['repo'], f['run']), 'POST', {})
+                continue
+            # a real (or repeated) failure -> Pulse: comment + 'fixing' + one bug per task+check, on every task of the PR/commit
+            if f['name'] in PULSE_SKIP_CHECKS or f['conclusion'] != 'failure':
+                continue
+            ids, pr = pulse_refs(gh, st, f['repo'], f.get('sha', ''), f.get('branch', ''))
+            log('pulse failure', f['repo'], f['name'], 'tasks=%s' % ','.join(ids) or '-')
+            for tid in ids:
+                pq.report_failure(tid, f['name'], f['repo'], pr, f.get('url', ''), L.log_excerpt(text), 'Medium')
         except Exception as e:
-            log('retry check', f['repo'], str(e)[:120])
+            log('retry/pulse check', f['repo'], str(e)[:120])
+    for p in passed:          # the same check green again -> bug closed + task 'reverify'
+        for key, bug in list(pq.st['bugs'].items()):
+            tid, chk = key.split('|', 1)
+            if chk == p['name'] and bug.get('open') and bug.get('repo', p['repo']) == p['repo']:
+                pq.report_fixed(tid, chk, p['repo'], 0, p.get('url', ''))
     # merge train: auto repos of TRAIN_REPOS only, on events + a sweep every 10 min within the rate budget
     if E('TRAIN_REPOS'):
         names = [r['name'] for r in gh('orgs/%s/repos?per_page=100' % ORG, cache=True) if not r['archived']] \
@@ -599,8 +763,9 @@ def tick(gh, gcp, st, mode='scale'):
             age_d = (now - ts(gcp.compute('/global/images/family/' + IMAGE_FAMILY)['creationTimestamp'])) / 86400
         except Exception:
             age_d = 999
-        if age_d > IMAGE_MAX_AGE_D:
-            threading.Thread(target=lambda: _safe(build_image, gcp), daemon=True).start()
+        if L.image_build_due(age_d, IMAGE_MAX_AGE_D, st['last'].get('image_build'), now):
+            st['last']['image_build'] = now      # one attempt per 20 h: a failing build alerts, it is not retried hourly
+            threading.Thread(target=lambda: _safe(build_image, gcp, lambda t: notify(st, t, key='image')), daemon=True).start()
     # heartbeat + daily report
     try:
         os.makedirs(os.path.dirname(HEARTBEAT_FILE), exist_ok=True); open(HEARTBEAT_FILE, 'w').write(str(int(now)))
@@ -609,9 +774,13 @@ def tick(gh, gcp, st, mode='scale'):
         try: org_var(gh, 'NB_AUTOSCALER_HEARTBEAT', str(int(now)))
         except RuntimeError: pass
     if every(st, 'hb_teams', 6 * 3600, now):
-        alert('heartbeat: mode=%s, %d VMs, %d jobs queued, today $%.2f' % (ci_mode, len(live), len(jobs), day['usd']))
+        log('heartbeat: mode=%s, %d VMs, %d jobs queued, today $%.2f, %.0f VM-min' % (ci_mode, len(live), len(jobs), day['usd'], day['vm_min']))
     if time.gmtime(now).tm_hour == REPORT_HOUR and every(st, 'report', 20 * 3600, now) and not gh.low():
         report(st, alert, today)
+    if (time.gmtime(now).tm_hour == REPORT_HOUR and every(st, 'redeliver', 20 * 3600, now)) or EVENTS.pop('redeliver_now', False):
+        _safe(redeliver, gh, st)
+    if every(st, 'dns', 60 if st.get('hook_host') != 'fixed' else 3600, now):
+        _safe(set_hook, gh, st)
     st['day'] = {k: v for k, v in st['day'].items() if k >= time.strftime('%Y-%m-%d', time.gmtime(now - 35 * 86400))}
 
 
@@ -633,15 +802,62 @@ def _safe(fn, *a):
     except Exception as e: log('%s failed: %s' % (fn.__name__, str(e)[:300]))
 
 
-def set_hook(gh):
-    """Point the GitHub App webhook at this VM (its ephemeral IP can change on a restart)."""
+def set_hook(gh, st=None):
+    """Point the GitHub App webhook at this VM. Fixed host NBCI_HOST (DNS-only A record) when it resolves to our
+    ephemeral IP; otherwise the sslip.io name of the IP, plus a commit to DNS_BRANCH whose push workflow (on this
+    VM's nb-ctl runner, Cloudflare token stays in GitHub) upserts the A record. Re-checked every minute until fixed."""
+    import socket
+    st = st if st is not None else {}
     ip = meta('instance/network-interfaces/0/access-configs/0/external-ip')
-    url = 'https://%s.sslip.io/gh' % ip.replace('.', '-')
+    try: resolved = {a[4][0] for a in socket.getaddrinfo(NBCI_HOST, 443, socket.AF_INET)}
+    except OSError: resolved = set()
+    kind, update = L.dns_plan(resolved, ip)
+    url = 'https://%s/gh' % (NBCI_HOST if kind == 'fixed' else ip.replace('.', '-') + '.sslip.io')
+    if update and st.get('dns_asked') != ip:
+        _safe(request_dns, gh, ip); st['dns_asked'] = ip
+    if st.get('hook_url') == url:
+        st['hook_host'] = kind; return
     if DRY:
         log('DRY webhook ->', url); return
-    req('https://api.github.com/app/hook/config', 'PATCH', {'url': url, 'content_type': 'json'},
+    req('https://api.github.com/app/hook/config', 'PATCH', {'url': url, 'content_type': 'json', 'insecure_ssl': '0'},
         {'Authorization': 'Bearer ' + gh.jwt(), 'Accept': 'application/vnd.github+json'})
+    st['hook_url'], st['hook_host'] = url, kind
     log('webhook ->', url)
+
+
+def request_dns(gh, ip):
+    """Commit the new IP to DNS_BRANCH (contents API, App token): its push workflow upserts NBCI_HOST -> ip."""
+    path = 'repos/%s/%s/contents/nbci-ip.txt' % (ORG, DNS_REPO)
+    try: cur = gh(path + '?ref=' + DNS_BRANCH)
+    except RuntimeError: cur = {}
+    if base64.b64decode(cur.get('content', '') or b'').decode().strip() == ip:
+        log('dns already requested', ip); return
+    body = {'message': 'nbci ip %s\n\nPulse: none' % ip, 'branch': DNS_BRANCH, 'content': base64.b64encode((ip + '\n').encode()).decode()}
+    if cur.get('sha'): body['sha'] = cur['sha']
+    if DRY:
+        log('DRY dns ->', ip); return
+    gh(path, 'PUT', body); log('dns update requested', NBCI_HOST, '->', ip)
+
+
+def redeliver(gh, st):
+    """Redeliver the GitHub App's failed webhook deliveries of the last 24 h (once per delivery GUID)."""
+    h = {'Authorization': 'Bearer ' + gh.jwt(), 'Accept': 'application/vnd.github+json'}
+    seen = set(st.setdefault('redelivered', [])); out = []
+    url = 'https://api.github.com/app/hook/deliveries?per_page=100'
+    for _ in range(5):
+        code, page, hdr = req(url, headers=h)
+        out += page or []
+        nxt = [x.split(';')[0].strip(' <>') for x in (hdr.get('Link') or '').split(',') if 'rel="next"' in x]
+        if not nxt or (page and time.time() - ts(page[-1]['delivered_at']) > 86400):
+            break
+        url = nxt[0]
+    ids = L.redeliver_ids(out, time.time(), seen)
+    for i in ids[:100]:
+        if DRY: log('DRY redeliver', i); continue
+        try: req('https://api.github.com/app/hook/deliveries/%s/attempts' % i, 'POST', {}, h)
+        except RuntimeError as e: log('redeliver', i, str(e)[:100])
+    st['redelivered'] = list(seen)[-2000:]
+    log('redeliver: %d failed deliveries re-sent (of %d seen)' % (len(ids[:100]), len(out)))
 
 
 def notify_systemd(msg):
@@ -665,19 +881,22 @@ def main():
     if mode == 'build-image':
         if RUNNER_BOOT == 'startup':
             log('build-image refused: RUNNER_BOOT=startup (no custom images)'); return
-        return build_image(gcp)
+        return _build_image(gcp)
     if mode == 'set-hook':
-        return set_hook(gh)
+        return set_hook(gh, st)
+    if mode == 'redeliver':
+        return redeliver(gh, st)
     if mode in ('status', 'drain', 'once'):
         tick(gh, gcp, st, mode if mode != 'once' else 'reconcile'); st.pop('_pulse_token', None); save_state(st); return
     try:
         Hook.secret = gcp.secret('nbci-webhook-secret').encode()
         srv = http.server.ThreadingHTTPServer(('127.0.0.1', int(E('HOOK_PORT', '8787'))), Hook)
         threading.Thread(target=srv.serve_forever, daemon=True).start()
-        _safe(set_hook, gh)
+        st.pop('hook_host', None); st.pop('hook_url', None); _safe(set_hook, gh, st)
     except Exception as e:
         log('webhook receiver off (polling only):', e)
-    notify_systemd('READY=1'); teams('controller started (DRY_RUN=%d)' % DRY, DRY)
+    EVENTS['redeliver_now'] = True       # deliveries that failed while we were down (the full poll covers jobs; this covers runs/PRs)
+    notify_systemd('READY=1'); notify(st, 'controller started (DRY_RUN=%d)' % DRY, key='started', window_s=3600)
     while True:
         t = time.time()
         try: tick(gh, gcp, st)

@@ -23,6 +23,12 @@ if [ ! -f /var/lib/nbci/.base ]; then
 fi
 # route job's Pulse-trailer step calls `gh api` (Ubuntu 24.04 universe package); idempotent for old VMs
 command -v gh >/dev/null 2>&1 || apt-get install -yq gh
+# OS security patches: unattended-upgrades (security pocket), reboot at 04:40 UTC when a kernel/libc patch needs it
+dpkg -s unattended-upgrades >/dev/null 2>&1 || apt-get install -yq unattended-upgrades
+printf 'APT::Periodic::Update-Package-Lists "1";\nAPT::Periodic::Unattended-Upgrade "1";\n' > /etc/apt/apt.conf.d/20auto-upgrades
+printf 'Unattended-Upgrade::Automatic-Reboot "true";\nUnattended-Upgrade::Automatic-Reboot-Time "04:40";\n' > /etc/apt/apt.conf.d/52nbci-reboot
+systemctl enable --now unattended-upgrades apt-daily-upgrade.timer >/dev/null 2>&1 || true
+git config --system --get-all safe.directory | grep -qx /opt/nbci/src || git config --system --add safe.directory /opt/nbci/src
 
 # GitHub App installation token (JWT signed by openssl; key only in a 0600 tmpfs file for a moment)
 gh_token() {
@@ -58,7 +64,10 @@ GH_APP_ID=$APP
 GH_APP_INSTALLATION_ID=$INST
 DRY_RUN=$(attr nbci-dry-run || echo 1)
 TRAIN_REPOS=$(attr nbci-train-repos || true)
-PULSE_MCP_URL=$(attr nbci-pulse-url || true)
+PULSE_MCP_URL=$(attr nbci-pulse-url || echo https://pulse.moonhive.in/mcp)
+NBCI_ALERT_TASK=$(attr nbci-alert-task || echo 71b8be5b)
+NBCI_HOST=$(attr nbci-host || echo nbci.moonhive.in)
+NB_DAILY_VM_MIN=$(attr nbci-daily-vm-min || echo 1500)
 NB_DAILY_CAP_USD=$(attr nbci-daily-cap || echo 2)
 RUNNER_BOOT=$(attr nbci-runner-boot || echo image)
 HANDS_OFF_LEGACY=$(attr nbci-hands-off-legacy || echo 1)
@@ -84,10 +93,25 @@ MemoryMax=300M
 [Install]
 WantedBy=multi-user.target
 U
+install -m 644 /opt/nbci/src/runner/controller/nbci-guard.service /etc/systemd/system/nbci-guard.service
 IP=$(md instance/network-interfaces/0/access-configs/0/external-ip)
+HOST=$(attr nbci-host || echo nbci.moonhive.in)
+# Fixed host (DNS-only A record kept current by the ops/nbci-dns workflow) + the sslip.io name of today's IP as the
+# fallback. Port 443 only (firewall): ACME uses TLS-ALPN on 443, the HTTP challenge and :80 redirects are off.
 cat > /etc/caddy/Caddyfile <<C
-${IP//./-}.sslip.io {
+{
+  auto_https disable_redirects
+}
+$HOST, ${IP//./-}.sslip.io {
+  tls {
+    issuer acme {
+      disable_http_challenge
+    }
+  }
   handle /gh {
+    reverse_proxy 127.0.0.1:8787
+  }
+  handle /healthz {
     reverse_proxy 127.0.0.1:8787
   }
   respond 404
@@ -98,10 +122,10 @@ cat > /etc/cron.d/nbci <<'CRON'
 17 4 * * * root /opt/nbci/src/runner/controller/bootstrap.sh >/var/log/nbci-update.log 2>&1
 CRON
 systemctl daemon-reload
-systemctl enable --now caddy nbci
+systemctl enable --now caddy nbci nbci-guard
 caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null 2>&1 &&
   { systemctl reload caddy || systemctl restart caddy; } || echo 'nbci: Caddyfile invalid - webhook down, polling only'
-systemctl restart nbci
+systemctl restart nbci nbci-guard
 
 # 2 controller-local runners for nb-ctl jobs (auto repos only; legacy nb-route runners are never shared) (route/notify: seconds of curl/jq). User ghr cannot
 # reach the metadata server, so job code can never use the controller's service account.
