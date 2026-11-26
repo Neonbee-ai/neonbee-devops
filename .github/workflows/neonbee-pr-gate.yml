@@ -152,6 +152,17 @@ jobs:
       # backend, contract + integration) in a develop push run. See step 'prior'.
       prior_pass: ${{ steps.prior.outputs.prior_pass || 'false' }}
     steps:
+      # ── Pulse task id (zero-agent release: the merge train and the Pulse 'released' update read it) ──
+      # The title must carry PULSE-<8 hex> (the Pulse task's short id). Bots (dependabot) are exempt.
+      # Kill switch: org/repo variable NB_PULSE_TITLE=off.
+      - name: PR title has a Pulse task id
+        if: github.event_name == 'pull_request' && vars.NB_PULSE_TITLE != 'off' && !endsWith(github.event.pull_request.user.login, '[bot]')
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          if printf '%s' "$TITLE" | grep -qiE 'PULSE-[0-9a-f]{8}([^0-9a-f]|$)'; then echo "Pulse id found"; exit 0; fi
+          echo "::error::PR title needs a Pulse task id, e.g. 'fix(crm): lead import PULSE-1a2b3c4d'. Edit the title, then re-run this job."
+          exit 1
       # ── Gate reuse on develop -> main promotion ─────────────────────────
       # Main's tree is usually byte-identical to a develop commit whose push
       # run already passed the same unit/contract/integration tiers. Reuse that

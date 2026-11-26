@@ -1,58 +1,63 @@
 #!/usr/bin/env python3
-"""nb-autoscaler: the ONE controller for Neonbee-ai self-hosted CI capacity (runs on the Internal Tools VM).
+"""nb-autoscaler: the ONE controller for Neonbee-ai CI (systemd service on the Internal Tools VM).
 
-Every POLL_S seconds it:
-  1. reads the org's queued jobs (ETag-cached, so unchanged repos cost no rate limit) and runners;
-  2. starts GCP Spot runner VMs (stock ubuntu-2404 + startup.sh, ephemeral IP, no service account,
-     no custom image) sized to the backlog the Mac Minis cannot take, within MAX_VCPU (quota 32);
-  3. hands each VM slot a one-job JIT runner config through instance metadata (ephemeral runners);
-  4. deletes VMs (boot disk auto-deletes) once no slot has been busy for IDLE_S (180 s), plus
-     TERMINATED / never-registered VMs and runner records with no VM;
-  5. alerts Teams when a Mac Mini runner is offline or a job waits > QUEUE_ALERT_S;
-  6. (opt-in, PROMOTE_REPOS) enables auto-merge on a repo's develop PR once the same branch's main
-     merge has a fully green push run (main deploy green -> develop follows, per repo).
+Capacity. CI runs ONLY on GCP Spot runner VMs. The Mac Minis carry no CI labels (they do the pre-push
+gate over ssh; macmini-preview-2 keeps aqa-coord for AutoQA). Every POLL_S seconds:
+  1. read the org's queued jobs (ETag-cached) and runners;
+  2. demand = queued jobs the burst label set can serve (ci/runner-labels.json) minus idle VM slots;
+  3. refill empty slots of live VMs with one-job JIT runner configs, then create new VMs (stock
+     ubuntu-2404 + startup.sh, no service account, ephemeral IP, auto-delete disk) within the free vCPU
+     quota (MAX_VCPU 32), trying every zone in GCP_ZONES on Spot stock-outs;
+  4. delete a VM only after IDLE_S (180 s) with no busy or pending slot, and only after GitHub has
+     accepted the removal of all its runners (a runner that just took a job refuses -> VM kept).
+Fallback. When GCP cannot give capacity (API/auth error, billing/payment problem, quota exhausted, or
+stock-out in 2+ zones) while jobs wait, ONE Mac Mini runner (fallback.runner) gets the CI labels and
+Teams is alerted; the labels come off again after GCP next starts a VM. Reconciled every pass.
+Release (nb_release.py): merge train, develop promotion, Pulse 'released'.
+Never-breaking: every pass is a fresh idempotent reconcile from GitHub + GCE state; exceptions are
+logged and the loop continues; systemd Restart=always + WatchdogSec; a heartbeat file, org variable
+NB_AUTOSCALER_HEARTBEAT and a Teams heartbeat; DRY_RUN=1 logs every action instead of doing it.
 
-Labels come only from ci/runner-labels.json. Routing stays as is: NB_BURST stays off, the router sends
-first runs to runner-vm, and both Minis and burst VMs carry runner-vm, so the first free runner wins.
-
-Modes: loop (default) | once | status | drain (delete every VM it owns).  Stdlib only.
-Env: ORG, GCP_PROJECT, GCP_ZONES, GH_TOKEN (or GH_TOKEN_FILE), GCLOUD, LABELS_FILE, MAX_VCPU, POLL_S,
-     IDLE_S, BOOT_GRACE_S, MIN_AGE_S, QUEUE_ALERT_S, TEAMS_WEBHOOK, PROMOTE_REPOS, DRY_RUN, BUNDLE_REPO.
+Modes: loop (default) | once | status | drain (delete all its idle VMs). Stdlib only.
 """
-import calendar, json, os, subprocess, sys, time, urllib.error, urllib.request
+import calendar, json, os, socket, subprocess, sys, time, urllib.error, urllib.request
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+import nb_release  # noqa: E402
 
 E = os.environ.get
-HERE = os.path.dirname(os.path.abspath(__file__))
 ORG = E('ORG', 'Neonbee-ai')
 PROJECT = E('GCP_PROJECT', 'gen-lang-client-0521938031')
 ZONES = E('GCP_ZONES', 'europe-west1-b,europe-west1-c,europe-west1-d').split(',')
 GCLOUD = E('GCLOUD', 'gcloud')
 LABELS_FILE = E('LABELS_FILE', os.path.join(HERE, '..', '..', 'ci', 'runner-labels.json'))
-MAX_VCPU = int(E('MAX_VCPU', '32'))          # GCP CPUS_ALL_REGIONS quota; nothing else may use it
+STATE_FILE = E('STATE_FILE', '/var/lib/nb-autoscaler/state.json')
+HEARTBEAT_FILE = E('HEARTBEAT_FILE', '/var/lib/nb-autoscaler/heartbeat')
+MAX_VCPU = int(E('MAX_VCPU', '32'))
 VCPU_PER_SLOT = int(E('VCPU_PER_SLOT', '2'))
 POLL_S = int(E('POLL_S', '30'))
-IDLE_S = int(E('IDLE_S', '180'))             # delete a VM after 3 idle minutes
-BOOT_GRACE_S = int(E('BOOT_GRACE_S', '420'))  # a slot handed a JIT config counts as capacity this long
-DEAD_BOOT_S = int(E('DEAD_BOOT_S', '720'))    # VM with no runner ever online after this -> delete
-MIN_AGE_S = int(E('MIN_AGE_S', '20'))         # let an idle Mini take a job before buying a VM
+IDLE_S = int(E('IDLE_S', '180'))
+BOOT_GRACE_S = int(E('BOOT_GRACE_S', '420'))
+MIN_AGE_S = int(E('MIN_AGE_S', '5'))
 QUEUE_ALERT_S = int(E('QUEUE_ALERT_S', '900'))
+FALLBACK_AFTER_S = int(E('FALLBACK_AFTER_S', '120'))   # jobs waiting this long with GCP failing -> fallback
+HEARTBEAT_H = float(E('HEARTBEAT_H', '6'))
+RELEASE_S = int(E('RELEASE_S', '60'))
 RECENT_H = float(E('RECENT_H', '8'))
 STEM = E('VM_STEM', 'nbci')
-DRY = E('DRY_RUN', '0') == '1'
+DRY = E('DRY_RUN', '1') == '1'                       # safe default: an unconfigured start does nothing
 BUNDLE_REPO = E('BUNDLE_REPO', 'Neonbee-ai/neonbee-devops')
-MINI_PREFIX = E('MINI_PREFIX', 'macmini')
-# Shapes by slots (2 vCPU per job slot). Largest first; the planner picks the fewest VMs.
 SHAPES = [(8, 't2d-standard-16'), (4, 't2d-standard-8'), (2, 't2d-standard-4'), (1, 't2d-standard-2')]
 DEAD = ('TERMINATED', 'STOPPED', 'SUSPENDED')
 
 
-# ── pure logic (unit-tested in tests/test_autoscaler.py) ───────────────────────────────────────────
-def load_labels(path=LABELS_FILE):
+# ── pure logic (tests/test_autoscaler.py) ──────────────────────────────────────────────────────────
+def load_config(path=LABELS_FILE):
     d = json.load(open(path))
-    out = {}
-    for name, p in d['pools'].items():
-        out[name] = p['base'] + (d['ci_labels'] if p.get('include_ci_labels') else []) + p.get('extra', [])
-    return out
+    pools = {n: p['base'] + (d['ci_labels'] if p.get('include_ci_labels') else []) + p.get('extra', [])
+             for n, p in d['pools'].items()}
+    return pools, d.get('fallback', {}), d['ci_labels']
 
 
 def lower(xs):
@@ -60,17 +65,15 @@ def lower(xs):
 
 
 def servable(job_labels, pool_labels):
-    """GitHub gives a job to a runner whose labels are a superset of the job's runs-on labels."""
     return lower(job_labels) <= lower(pool_labels)
 
 
 def plan_vms(need_slots, free_vcpu):
-    """Fewest VMs covering need_slots within free_vcpu. Returns [(slots, machine)]."""
     plan, left, room = [], need_slots, free_vcpu
     for slots, machine in SHAPES:
         while left >= slots and room >= slots * VCPU_PER_SLOT:
             plan.append((slots, machine)); left -= slots; room -= slots * VCPU_PER_SLOT
-    for slots, machine in reversed(SHAPES):          # remainder: smallest shape that covers it
+    for slots, machine in reversed(SHAPES):
         if left <= 0:
             break
         if slots >= left and room >= slots * VCPU_PER_SLOT:
@@ -79,8 +82,6 @@ def plan_vms(need_slots, free_vcpu):
 
 
 def slot_state(vm, runners_by_name, now):
-    """Per slot: 'busy' | 'idle' (runner online, no job) | 'pending' (JIT handed out, not yet online,
-    within BOOT_GRACE_S) | 'empty' (needs a JIT config). vm = {'name', 'slots', 'md': {key: value}}."""
     out = {}
     for k in range(vm['slots']):
         name, at = vm['md'].get('name-%d' % k), int(vm['md'].get('at-%d' % k, '0') or 0)
@@ -97,26 +98,25 @@ def slot_state(vm, runners_by_name, now):
 
 
 def vm_should_delete(vm, states, last_busy, now):
-    """Delete when no slot is busy or pending and nothing ran for IDLE_S; or when it never came up."""
     if vm['status'] in DEAD:
         return 'dead (%s)' % vm['status']
     vals = set(states.values())
     if 'busy' in vals or 'pending' in vals:
         return None
-    if now - vm['created'] > DEAD_BOOT_S and vm.get('ever_online') is False:
-        return 'no runner came online in %ds' % DEAD_BOOT_S
-    if now - max(last_busy, vm['created']) >= IDLE_S:
-        return 'idle %ds' % (now - max(last_busy, vm['created']))
-    return None
+    idle_for = now - max(last_busy, vm['created'])
+    return 'idle %ds' % idle_for if idle_for >= IDLE_S else None
 
 
-def demand(jobs, runners, pool_labels, now):
-    """Jobs the burst pool can serve and no idle runner (Mini or VM) can take right now."""
+def demand(jobs, runners, pool_labels, now, stem=STEM):
+    """Queued jobs the burst pool can serve and no idle burst-VM slot can take. Idle Mac Minis are
+    never counted as capacity: CI must not depend on them (the fallback runner is the only exception
+    and it only exists while GCP is failing)."""
     q = [j for j in jobs if servable(j['labels'], pool_labels) and now - j['created'] >= MIN_AGE_S]
-    idle = [r for r in runners if r['status'] == 'online' and not r['busy']]
+    idle = [r for r in runners if r['name'].startswith(stem + '-') and r['status'] == 'online' and not r['busy']]
     taken, waiting = set(), []
     for j in q:
-        m = next((r['id'] for r in idle if r['id'] not in taken and servable(j['labels'], [l['name'] for l in r['labels']])), None)
+        m = next((r['id'] for r in idle if r['id'] not in taken
+                  and servable(j['labels'], [l['name'] for l in r['labels']])), None)
         if m is None:
             waiting.append(j)
         else:
@@ -124,12 +124,39 @@ def demand(jobs, runners, pool_labels, now):
     return waiting
 
 
-def promote_ready(main_runs):
-    """main push runs of one merge commit: all completed and none failed/cancelled/timed out."""
-    if not main_runs:
+def classify_gce_error(text):
+    t = text.lower()
+    if 'billing' in t or 'payment' in t or 'accountdisabled' in t or 'account_disabled' in t:
+        return 'billing'
+    if 'quota' in t:
+        return 'quota'
+    if 'zone_resource_pool_exhausted' in t or 'does not have enough resources' in t or 'stockout' in t:
+        return 'stockout'
+    return 'api'
+
+
+def gcp_failing(attempts):
+    """attempts = [(zone, kind)] of failed creates this pass. Billing/quota/api errors count at once;
+    stock-outs count only when 2+ different zones are out."""
+    kinds = {k for _, k in attempts}
+    if kinds & {'billing', 'quota', 'api'}:
+        return sorted(kinds & {'billing', 'quota', 'api'})[0]
+    if len({z for z, k in attempts if k == 'stockout'}) >= 2:
+        return 'stockout'
+    return None
+
+
+def fallback_decision(on, waiting_s, failing, vm_started):
+    """Next fallback state. On: GCP failing while a job has waited FALLBACK_AFTER_S. Off: GCP started a VM."""
+    if vm_started:
         return False
-    bad = {'failure', 'cancelled', 'timed_out', 'action_required', 'startup_failure', 'stale'}
-    return all(r['status'] == 'completed' and r['conclusion'] not in bad for r in main_runs)
+    if failing and waiting_s >= FALLBACK_AFTER_S:
+        return True
+    return on
+
+
+def promote_ready(runs):
+    return nb_release.main_green(runs)
 
 
 # ── I/O ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -152,7 +179,7 @@ def _req(url, method='GET', body=None, headers=None):
     except urllib.error.HTTPError as e:
         if e.code == 304:
             return 304, None, e.headers
-        raise RuntimeError('%s %s -> %s %s' % (method, url.split('?')[0], e.code, e.read()[:300]))
+        raise RuntimeError('%s %s -> %s %s' % (method, url.split('?')[0], e.code, e.read()[:400]))
 
 
 def gh_token():
@@ -177,20 +204,12 @@ def gh(path, method='GET', body=None, cache=False):
     return data
 
 
-def ghql(query, variables):
-    _, d, _ = _req('https://api.github.com/graphql', 'POST', {'query': query, 'variables': variables},
-                   {'Authorization': 'Bearer ' + gh_token()})
-    if d.get('errors'):
-        raise RuntimeError(d['errors'])
-    return d['data']
-
-
 _gtok = [0, '']
 
 
 def gce(path, method='GET', body=None):
     if time.time() - _gtok[0] > 1800:
-        _gtok[1] = subprocess.check_output([GCLOUD, 'auth', 'print-access-token'], text=True).strip()
+        _gtok[1] = subprocess.check_output([GCLOUD, 'auth', 'print-access-token'], text=True, timeout=60).strip()
         _gtok[0] = time.time()
     _, d, _ = _req('https://compute.googleapis.com/compute/v1/projects/%s%s' % (PROJECT, path), method, body,
                    {'Authorization': 'Bearer ' + _gtok[1]})
@@ -203,8 +222,7 @@ def queued_jobs():
         if r['archived'] or not r['pushed_at'] or ts(r['pushed_at']) < since:
             continue
         for st in ('queued', 'in_progress'):
-            runs = gh('repos/%s/actions/runs?status=%s&per_page=30' % (r['full_name'], st), cache=True)
-            for run in runs['workflow_runs']:
+            for run in gh('repos/%s/actions/runs?status=%s&per_page=30' % (r['full_name'], st), cache=True)['workflow_runs']:
                 for j in gh('repos/%s/actions/runs/%s/jobs?filter=latest&per_page=100' % (r['full_name'], run['id']))['jobs']:
                     if j['status'] == 'queued' and j['labels']:
                         out.append({'repo': r['name'], 'id': j['id'], 'name': j['name'], 'labels': j['labels'],
@@ -235,25 +253,22 @@ def our_vms():
 
 def free_vcpu(vms):
     g = {x['metric']: x for x in gce('')['quotas']}['CPUS_ALL_REGIONS']
-    region = ZONES[0].rsplit('-', 1)[0]
-    r = {x['metric']: x for x in gce('/regions/' + region)['quotas']}.get('CPUS', g)
-    used_by_us = sum(v['vcpu'] for v in vms if v['status'] not in DEAD)
-    return max(0, min(int(g['limit'] - g['usage']), int(r['limit'] - r['usage']), MAX_VCPU - used_by_us))
+    r = {x['metric']: x for x in gce('/regions/' + ZONES[0].rsplit('-', 1)[0])['quotas']}.get('CPUS', g)
+    used = sum(v['vcpu'] for v in vms if v['status'] not in DEAD)
+    return max(0, min(int(g['limit'] - g['usage']), int(r['limit'] - r['usage']), MAX_VCPU - used))
 
 
 def bundle_url():
-    """Short-lived signed download URL of the newest burst-tools bundle (no token goes to the VM)."""
     try:
         rel = [x for x in gh('repos/%s/releases?per_page=20' % BUNDLE_REPO) if x['tag_name'].startswith('burst-tools-')]
         a = next(a for a in rel[0]['assets'] if a['name'] == 'burst-tools.tar.gz')
-        req = urllib.request.Request(a['url'], headers={'Authorization': 'Bearer ' + gh_token(),
-                                                        'Accept': 'application/octet-stream'})
 
         class NoRedir(urllib.request.HTTPRedirectHandler):
             def redirect_request(self, *a, **k):
                 return None
         try:
-            urllib.request.build_opener(NoRedir).open(req, timeout=20)
+            urllib.request.build_opener(NoRedir).open(urllib.request.Request(
+                a['url'], headers={'Authorization': 'Bearer ' + gh_token(), 'Accept': 'application/octet-stream'}), timeout=20)
         except urllib.error.HTTPError as e:
             if e.code in (301, 302, 307):
                 return e.headers['Location']
@@ -263,25 +278,23 @@ def bundle_url():
 
 
 def jit(name, labels):
-    d = gh('orgs/%s/actions/runners/generate-jitconfig' % ORG, 'POST',
-           {'name': name, 'runner_group_id': 1, 'labels': labels, 'work_folder': '_work'})
-    return d['encoded_jit_config']
+    return gh('orgs/%s/actions/runners/generate-jitconfig' % ORG, 'POST',
+              {'name': name, 'runner_group_id': 1, 'labels': labels, 'work_folder': '_work'})['encoded_jit_config']
 
 
-def startup_script():
-    return open(os.path.join(HERE, 'startup.sh')).read()
-
-
-def create_vm(slots, machine, labels):
+def create_vm(slots, machine, labels, failures):
+    """Returns True when GCE accepted the VM. Appends (zone, kind) to failures for every refusal."""
     name = '%s-%s-%d' % (STEM, time.strftime('%m%d-%H%M%S', time.gmtime()), slots)
-    md = [{'key': 'startup-script', 'value': startup_script()}, {'key': 'slots', 'value': str(slots)},
-          {'key': 'bundle-url', 'value': bundle_url()}]
     now = int(time.time())
-    for k in range(slots):                             # every slot starts 'pending' with its own JIT config
+    md = [{'key': 'startup-script', 'value': open(os.path.join(HERE, 'startup.sh')).read()},
+          {'key': 'slots', 'value': str(slots)}, {'key': 'bundle-url', 'value': bundle_url()}]
+    jits = []
+    for k in range(slots):
         rn = '%s-s%d-%d' % (name, k, now % 100000)
         md += [{'key': 'jit-%d' % k, 'value': '' if DRY else jit(rn, labels)},
                {'key': 'name-%d' % k, 'value': rn}, {'key': 'at-%d' % k, 'value': str(now)}]
-    for z in ZONES:                                    # Spot stock-outs: try the next zone
+        jits.append(rn)
+    for z in ZONES:
         body = {'name': name, 'machineType': 'zones/%s/machineTypes/%s' % (z, machine), 'labels': {STEM: '1'},
                 'scheduling': {'provisioningModel': 'SPOT', 'instanceTerminationAction': 'DELETE',
                                'maxRunDuration': {'seconds': 4 * 3600}, 'automaticRestart': False,
@@ -291,14 +304,26 @@ def create_vm(slots, machine, labels):
                     'diskSizeGb': str(40 + 10 * slots), 'diskType': 'zones/%s/diskTypes/pd-balanced' % z}}],
                 'networkInterfaces': [{'network': 'global/networks/default',
                                        'accessConfigs': [{'type': 'ONE_TO_ONE_NAT', 'name': 'External NAT'}]}],
-                'serviceAccounts': [],                 # job code can never reach GCP
-                'metadata': {'items': md}}
+                'serviceAccounts': [], 'metadata': {'items': md}}
         if DRY:
-            log('DRY create', name, machine, z); return
+            log('DRY create', name, machine, z); return True
         try:
-            gce('/zones/%s/instances' % z, 'POST', body); log('created', name, machine, z, 'slots=%d' % slots); return
-        except RuntimeError as e:
-            log('create failed in', z, str(e)[:160])
+            op = gce('/zones/%s/instances' % z, 'POST', body)
+            err = (op or {}).get('error')
+            if err:
+                raise RuntimeError(json.dumps(err))
+            log('created', name, machine, z, 'slots=%d' % slots); return True
+        except Exception as e:
+            kind = classify_gce_error(str(e)); failures.append((z, kind))
+            log('create failed', z, kind, str(e)[:160])
+            if kind in ('billing', 'quota'):
+                break                                   # same answer in every zone
+    for rn in jits:                                     # unused JIT registrations
+        for r in runners():
+            if r['name'] == rn:
+                try: gh('orgs/%s/actions/runners/%s' % (ORG, r['id']), 'DELETE')
+                except RuntimeError: pass
+    return False
 
 
 def set_md(vm, updates):
@@ -310,8 +335,10 @@ def set_md(vm, updates):
 
 
 def delete_vm(vm, rs, why):
-    """Deregister the VM's runners first: GitHub refuses (422) to delete a runner that just took a job,
-    and then the VM is kept, so a job assigned between the tick's snapshot and now is never killed."""
+    """Never deletes a VM running a job: its runners are deregistered first and GitHub refuses (422)
+    for a busy runner, which keeps the VM. A TERMINATED VM runs nothing and is deleted directly."""
+    if any(r['busy'] for r in rs if r['name'].startswith(vm['name'] + '-s')):
+        return False
     log('delete', vm['name'], why)
     if DRY:
         return True
@@ -321,7 +348,7 @@ def delete_vm(vm, rs, why):
                 try: gh('orgs/%s/actions/runners/%s' % (ORG, r['id']), 'DELETE')
                 except RuntimeError as e:
                     if ' 404 ' not in str(e):
-                        log('keep', vm['name'], '- runner', r['name'], 'is busy'); return False
+                        log('keep', vm['name'], '- runner', r['name'], 'took a job'); return False
     gce('/zones/%s/instances/%s' % (vm['zone'], vm['name']), 'DELETE')
     return True
 
@@ -330,140 +357,172 @@ def alert(text):
     hook = E('TEAMS_WEBHOOK')
     log('ALERT', text)
     if hook and not DRY:
-        try: _req(hook, 'POST', {'text': text})
+        try: _req(hook, 'POST', {'text': '[nb-autoscaler] ' + text})
         except Exception as e: log('alert failed', e)
 
 
-# ── one pass ──────────────────────────────────────────────────────────────────────────────────────
-STATE = {'last_busy': {}, 'ever_online': {}, 'alerted': {}, 'promoted': set(), 'last_promote': 0}
+def set_fallback(runner, on, ci_labels):
+    """Idempotent: make the fallback Mini runner's custom labels = ci_labels (on) or none (off)."""
+    have = {l['name'] for l in runner['labels'] if l.get('type') == 'custom'}
+    want = set(ci_labels) if on else set()
+    if have == want:
+        return False
+    log('fallback runner', runner['name'], 'ON' if on else 'OFF')
+    if not DRY:
+        if want:
+            gh('orgs/%s/actions/runners/%s/labels' % (ORG, runner['id']), 'PUT', {'labels': sorted(want)})
+        else:
+            gh('orgs/%s/actions/runners/%s/labels' % (ORG, runner['id']), 'DELETE')
+    return True
 
 
-def tick(mode='scale'):
+def notify_systemd(msg):
+    addr = E('NOTIFY_SOCKET')
+    if not addr:
+        return
+    try:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        s.connect('\0' + addr[1:] if addr.startswith('@') else addr); s.sendall(msg.encode()); s.close()
+    except OSError:
+        pass
+
+
+# ── state (survives restarts; everything else is re-derived each pass) ─────────────────────────────
+def load_state():
+    try:
+        st = json.load(open(STATE_FILE))
+    except Exception:
+        st = {}
+    for k, v in (('last_busy', {}), ('alerted', {}), ('fallback', False),
+                 ('last_heartbeat', 0), ('last_release', 0), ('release', {})):
+        st.setdefault(k, v)
+    return st
+
+
+def save_state(st):
+    try:
+        os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
+        tmp = STATE_FILE + '.tmp'
+        json.dump(st, open(tmp, 'w')); os.replace(tmp, STATE_FILE)
+    except OSError as e:
+        log('state save failed', e)
+
+
+# ── one reconcile pass ──────────────────────────────────────────────────────────────────────────────
+def tick(st, mode='scale'):
     now = time.time()
-    pools = load_labels(); burst = pools['burst']
+    pools, fb, ci_labels = load_config(); burst = pools['burst']
     rs = runners(); by_name = {r['name']: r for r in rs}
-    jobs = queued_jobs(); vms = our_vms()
+    jobs = queued_jobs()
     waiting = demand(jobs, rs, burst, now)
+    failures, started, gce_ok = [], False, True
+    try:
+        vms = our_vms()
+    except Exception as e:
+        vms, gce_ok = [], False
+        failures.append(('-', classify_gce_error(str(e)))); log('gce list failed', str(e)[:200])
     if mode == 'status':
         for j in waiting: print('waiting %-24s %-40s %4ds' % (j['repo'], j['name'][:40], now - j['created']))
         for v in vms: print('vm      %-28s %-10s %s' % (v['name'], v['status'], slot_state(v, by_name, now)))
-        print('queued=%d waiting=%d vms=%d free_vcpu=%d' % (len(jobs), len(waiting), len(vms), free_vcpu(vms)))
-        return
-    if mode == 'drain':
-        for v in vms: delete_vm(v, rs, 'drain')
+        print('queued=%d waiting=%d vms=%d fallback=%s' % (len(jobs), len(waiting), len(vms), st['fallback']))
         return
     need = len(waiting)
-    # 1. refill empty slots of live VMs first (cheapest capacity), count pending as capacity
     live = []
     for v in vms:
-        st = slot_state(v, by_name, now)
-        if any(s in ('busy', 'idle') for s in st.values()):
-            STATE['ever_online'][v['name']] = True
-        if 'busy' in st.values():
-            STATE['last_busy'][v['name']] = now
-        v['ever_online'] = STATE['ever_online'].get(v['name'], False)
-        why = vm_should_delete(v, st, STATE['last_busy'].get(v['name'], now if v['ever_online'] else 0), now)
-        if why and not (need > 0 and v['status'] not in DEAD and 'empty' in st.values() and v['ever_online']):
-            if delete_vm(v, rs, why):
-                continue
+        s = slot_state(v, by_name, now)
+        if 'busy' in s.values():
+            st['last_busy'][v['name']] = now
+        why = vm_should_delete(v, s, st['last_busy'].get(v['name'], now), now)
+        reusable = need > 0 and v['status'] == 'RUNNING' and 'empty' in s.values()
+        if (mode == 'drain' or (why and not reusable)) and delete_vm(v, rs, why or 'drain'):
+            st['last_busy'].pop(v['name'], None); continue
         live.append(v)
-        need -= sum(1 for s in st.values() if s == 'pending')   # idle runners were already netted in demand()
+        need -= sum(1 for x in s.values() if x == 'pending')
         upd = {}
-        for k, s in st.items():
-            if s == 'empty' and need > 0 and v['status'] == 'RUNNING':
+        for k, x in s.items():
+            if x == 'empty' and need > 0 and v['status'] == 'RUNNING':
                 rn = '%s-s%d-%d' % (v['name'], k, int(now) % 100000)
                 upd.update({'jit-%d' % k: '' if DRY else jit(rn, burst), 'name-%d' % k: rn, 'at-%d' % k: str(int(now))})
                 need -= 1
         if upd:
             set_md(v, upd)
-    # 2. buy new VMs for the rest
-    if need > 0:
-        for slots, machine in plan_vms(need, free_vcpu(vms)):
-            create_vm(slots, machine, burst)
-    # 3. stale runner records of deleted VMs
+    if mode == 'drain':
+        return
+    if need > 0 and gce_ok:
+        try:
+            room = free_vcpu(vms)
+        except Exception as e:
+            room = 0; failures.append(('-', classify_gce_error(str(e))))
+        plan = plan_vms(need, room)
+        ours = sum(v['vcpu'] for v in vms if v['status'] not in DEAD)
+        if not plan and room < VCPU_PER_SLOT and ours + VCPU_PER_SLOT <= MAX_VCPU:
+            failures.append(('-', 'quota'))          # GCP quota used up by something else (at our own cap = fine)
+        for slots, machine in plan:
+            started = create_vm(slots, machine, burst, failures) or started
+    # stale runner records of VMs that are gone
     names = {v['name'] for v in live}
     for r in rs:
         if r['name'].startswith(STEM + '-') and r['status'] == 'offline' and not r['busy'] \
                 and r['name'].rsplit('-s', 1)[0] not in names and not DRY:
             try: gh('orgs/%s/actions/runners/%s' % (ORG, r['id']), 'DELETE')
             except RuntimeError: pass
-    # 4. health alerts (once per incident)
-    for r in rs:
-        key = 'off:' + r['name']
-        if r['name'].startswith(MINI_PREFIX) and r['status'] == 'offline':
-            STATE['alerted'].setdefault(key, now)
-            if now - STATE['alerted'][key] >= 300 and STATE['alerted'].get(key + ':sent') is None:
-                alert('CI runner %s offline for 5+ min (disk full or Mini down?)' % r['name']); STATE['alerted'][key + ':sent'] = now
-        elif key in STATE['alerted']:
-            STATE['alerted'].pop(key, None); STATE['alerted'].pop(key + ':sent', None)
+    # fallback Mini runner
+    failing = gcp_failing(failures)
+    oldest = max([now - j['created'] for j in waiting] or [0])
+    new = fallback_decision(st['fallback'], oldest if failing else 0, failing, started)
+    if new != st['fallback']:
+        alert('GCP cannot start runners (%s): fallback Mini runner %s ON for CI' % (failing, fb.get('runner')) if new
+              else 'GCP started a VM again: fallback Mini runner %s OFF' % fb.get('runner'))
+        st['fallback'] = new
+    fr = by_name.get(fb.get('runner', ''))
+    if fr:
+        set_fallback(fr, st['fallback'], fb.get('labels') or ci_labels)
+    elif st['fallback']:
+        alert('fallback runner %s is not registered: no CI capacity at all' % fb.get('runner'))
+    # alerts, once per incident
     for j in jobs:
         key = 'q:%s' % j['id']
-        if now - j['created'] > QUEUE_ALERT_S and key not in STATE['alerted']:
-            STATE['alerted'][key] = now
-            alert('CI job %s / %s queued %d min, labels %s' % (j['repo'], j['name'], (now - j['created']) // 60, j['labels']))
-    log('queued=%d waiting=%d vms=%d need_after=%d' % (len(jobs), len(waiting), len(live), max(need, 0)))
-    # 5. per-repo develop promotion (opt-in)
-    if E('PROMOTE_REPOS') and now - STATE['last_promote'] >= 120:
-        STATE['last_promote'] = now
-        try: promote()
-        except Exception as e: log('promote error', e)
-
-
-AUTO_MERGE = 'mutation($id:ID!){enablePullRequestAutoMerge(input:{pullRequestId:$id,mergeMethod:MERGE}){clientMutationId}}'
-
-
-def develop_protected(repo):
+        if now - j['created'] > QUEUE_ALERT_S and key not in st['alerted']:
+            st['alerted'][key] = now
+            alert('job %s / %s queued %d min, labels %s' % (j['repo'], j['name'], (now - j['created']) // 60, j['labels']))
+    st['alerted'] = {k: v for k, v in st['alerted'].items() if now - v < 86400}
+    log('queued=%d waiting=%d vms=%d need_after=%d fallback=%s%s' % (
+        len(jobs), len(waiting), len(live), max(need, 0), st['fallback'], ' gcp=' + failing if failing else ''))
+    # release flow
+    if now - st['last_release'] >= RELEASE_S and E('TRAIN_REPOS'):
+        st['last_release'] = now
+        nb_release.Release(gh, ORG, log, alert, st['release'], DRY).tick(nb_release.Pulse(log, DRY))
+    # heartbeat
     try:
-        d = gh('repos/%s/%s/branches/develop/protection/required_status_checks' % (ORG, repo))
-        return bool(d.get('contexts') or d.get('checks'))
-    except RuntimeError:
-        return False
-
-
-def promote():
-    """For each opted-in repo: a release branch merged to main whose main push runs are all green ->
-    enable auto-merge on the open develop PR from the same branch. GitHub merges it once develop's
-    required checks pass, so develop never merges ahead of a green main deploy."""
-    allow = E('PROMOTE_REPOS', '')
-    repos = [r['name'] for r in gh('orgs/%s/repos?sort=pushed&direction=desc&per_page=100' % ORG, cache=True)] \
-        if allow == '*' else [x.strip() for x in allow.split(',') if x.strip()]
-    since = time.time() - RECENT_H * 3600
-    for repo in repos:
-        for pr in gh('repos/%s/%s/pulls?state=closed&base=main&sort=updated&direction=desc&per_page=10' % (ORG, repo)):
-            if not pr.get('merged_at') or ts(pr['merged_at']) < since:
-                continue
-            key = '%s#%s' % (repo, pr['number'])
-            if key in STATE['promoted']:
-                continue
-            runs = gh('repos/%s/%s/actions/runs?head_sha=%s&branch=main&event=push&per_page=20'
-                      % (ORG, repo, pr['merge_commit_sha']))['workflow_runs']
-            if not promote_ready(runs):
-                continue
-            head = pr['head']['ref']
-            dev = gh('repos/%s/%s/pulls?state=open&base=develop&head=%s:%s' % (ORG, repo, ORG, head))
-            if not dev:
-                STATE['promoted'].add(key); continue
-            if not develop_protected(repo):
-                log('promote skip %s: develop has no required checks (auto-merge would merge untested)' % repo)
-                STATE['promoted'].add(key); continue
-            if DRY:
-                log('DRY auto-merge', repo, dev[0]['number'])
-            else:
-                ghql(AUTO_MERGE, {'id': dev[0]['node_id']})
-                log('auto-merge enabled', repo, '#%s' % dev[0]['number'], 'after main', key)
-            STATE['promoted'].add(key)
+        os.makedirs(os.path.dirname(HEARTBEAT_FILE), exist_ok=True); open(HEARTBEAT_FILE, 'w').write(str(int(now)))
+    except OSError:
+        pass
+    if now - st.get('last_hb_var', 0) >= 300 and not DRY:   # sessions / ci-wait can see it is alive
+        st['last_hb_var'] = now
+        try: gh('orgs/%s/actions/variables/NB_AUTOSCALER_HEARTBEAT' % ORG, 'PATCH', {'value': str(int(now))})
+        except RuntimeError:
+            try: gh('orgs/%s/actions/variables' % ORG, 'POST', {'name': 'NB_AUTOSCALER_HEARTBEAT', 'value': str(int(now)), 'visibility': 'all'})
+            except RuntimeError: pass
+    if now - st['last_heartbeat'] >= HEARTBEAT_H * 3600:
+        st['last_heartbeat'] = now
+        alert('heartbeat: alive, %d VMs, %d jobs queued, fallback=%s' % (len(live), len(jobs), st['fallback']))
 
 
 def main():
     mode = (sys.argv[1:] or ['loop'])[0]
+    st = load_state()
     if mode in ('status', 'drain', 'once'):
-        return tick({'once': 'scale'}.get(mode, mode))
+        tick(st, {'once': 'scale'}.get(mode, mode)); save_state(st); return
+    notify_systemd('READY=1')
+    alert('started (DRY_RUN=%s)' % int(DRY))
     while True:
         t = time.time()
         try:
-            tick()
-        except Exception as e:      # never die: a dead controller leaves VMs running
+            tick(st)
+        except Exception as e:
             log('tick error', str(e)[:300])
+        save_state(st)
+        notify_systemd('WATCHDOG=1')
         time.sleep(max(1, POLL_S - (time.time() - t)))
 
 

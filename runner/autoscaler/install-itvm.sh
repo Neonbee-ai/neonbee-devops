@@ -13,4 +13,5 @@ id nbci >/dev/null 2>&1 || useradd -r -m -s /usr/sbin/nologin nbci
 [ -f /etc/nb-autoscaler.gh-token ] || { echo "put the PAT in /etc/nb-autoscaler.gh-token (600, nbci)" >&2; exit 1; }
 install -m 644 "$SRC/runner/autoscaler/nb-autoscaler.service" /etc/systemd/system/nb-autoscaler.service
 systemctl daemon-reload && systemctl enable --now nb-autoscaler && systemctl restart nb-autoscaler
+echo "*/5 * * * * root $SRC/runner/autoscaler/nb-autoscaler-watchdog.sh" > /etc/cron.d/nb-autoscaler-watchdog
 sudo -u nbci env $(grep -v '^#' /etc/nb-autoscaler.env | xargs) python3 "$SRC/runner/autoscaler/nb_autoscaler.py" status

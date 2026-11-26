@@ -1,17 +1,20 @@
-# nb-autoscaler — one controller for burst CI capacity
+# nb-autoscaler — CI capacity + zero-agent release, one controller
 
-Replaces: `gcp-burst.sh up/hold/down`, NB_BURST toggling, gb* merge-gate VMs, the Cloud Run scaler, manual swaps.
+Runs on the Internal Tools VM as systemd `nb-autoscaler` (`install-itvm.sh`; Restart=always, WatchdogSec,
+cron `nb-autoscaler-watchdog.sh` dead-man check). Every 30 s it reconciles from GitHub + GCE state.
 
-- Runs on the Internal Tools VM as systemd `nb-autoscaler` (`install-itvm.sh`), polls every 30 s.
-- Demand = queued jobs whose labels fit the burst pool (`ci/runner-labels.json`) and that no idle
-  runner (Mac Mini or VM) can take after 20 s. Capacity = 2 vCPU per job slot, up to MAX_VCPU=32.
-- VMs: Spot, stock ubuntu-2404, `startup.sh`, ephemeral IP, no service account, boot disk auto-delete,
-  maxRunDuration 4 h. Each slot runs one JIT (ephemeral) runner per job; the controller refills slots
-  while there is demand and deletes the VM after 180 s with no busy slot.
-- Routing is unchanged: keep NB_BURST=off. Minis and VMs both carry `runner-vm`, first free wins.
-- Alerts (TEAMS_WEBHOOK): Mini runner offline 5+ min, job queued 15+ min.
-- PROMOTE_REPOS: after a release branch's main merge has all push runs green, enable auto-merge on the
-  develop PR from the same branch (only where develop has required checks).
+- **CI runs only on GCP Spot VMs** (stock ubuntu-2404 + `startup.sh`, no SA, ephemeral IP, auto-delete
+  disk, 4 h max). 2 vCPU per job slot, up to MAX_VCPU=32, zones tried in order on stock-outs. One JIT
+  (ephemeral) runner per job. A VM is deleted after 180 s idle, never while a runner is busy.
+- **Mac Minis carry no CI labels** (`ci/runner-labels.json`): pre-push gate over ssh only; macmini-preview
+  and -2 keep aqa-coord (AutoQA). **Fallback:** `fallback.runner` gets the CI labels only while GCP
+  cannot start VMs (billing/quota/API error, or stock-out in 2+ zones) and a job waited 2 min; Teams
+  alert; labels removed after GCP starts a VM.
+- **Merge train** (`nb_release.py`, TRAIN_REPOS): PRs labelled `nb-merge` merge one at a time per
+  repo+base once up to date with the base and every check is green (the Free plan has no merge queue).
+- **After a green main run**: develop PR from the same branch is queued; Pulse ids in the PR title/body
+  move to PULSE_RELEASED_STATUS.
+- Heartbeat: file each pass, org var NB_AUTOSCALER_HEARTBEAT every 5 min, Teams every 6 h.
 
-Ops: `nb_autoscaler.py status` (read-only) · `once` · `drain` (delete all its VMs). DRY_RUN=1 logs only.
+Ops: `nb_autoscaler.py status` · `once` · `drain`. DRY_RUN=1 (default) logs, changes nothing.
 Tests: `python3 -m unittest tests.test_autoscaler`.

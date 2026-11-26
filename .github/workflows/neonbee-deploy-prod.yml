@@ -2396,20 +2396,42 @@ jobs:
             ssh root@"$IP" "bash '$REMOTE_SCRIPT' '$PM2_NAME'; RC=\$?; rm -f '$REMOTE_SCRIPT'; exit \$RC" || return 1
           }
 
+          # ── canary (org/repo var NB_DEPLOY_CANARY=true): HA first; primary only if HA is healthy ──
+          # deploy_vm already health-checks the PM2 app (online within 15 tries) and fails otherwise.
+          # HA red -> HA is rolled back to dist-prev (same mechanism as neonbee-rollback.yml) and the
+          # primary is never touched, so a bad build cannot reach both VMs. Off = old parallel fan-out.
+          HA_TARGETED=0
+          if [ -n "$HA_IP" ] && { [ "$TARGET_VM" = "prod" ] || [ "$TARGET_VM" = "storefront" ]; }; then HA_TARGETED=1; fi
+          H=99  # sentinel: HA not configured / not applicable
+          if [ "${{ vars.NB_DEPLOY_CANARY }}" = "true" ] && [ "$HA_TARGETED" = 1 ]; then
+            echo "Canary: HA VM first"
+            deploy_vm "$HA_IP" "${SERVICE_NAME}-ha" > "$DEPLOY_TMP/ha.log" 2>&1; H=$?
+            if [ $H -ne 0 ]; then
+              echo "=== HA VM log ==="; cat "$DEPLOY_TMP/ha.log"
+              echo "::error::Canary failed on HA (exit $H): rolling HA back to dist-prev; primary NOT deployed"
+              ssh root@"$HA_IP" "[ -d '$SERVICE_DIR/dist-prev' ] && rsync -a --delete '$SERVICE_DIR/dist-prev/' '$SERVICE_DIR/dist/' && pm2 reload '${SERVICE_NAME}-ha' --update-env" \
+                && echo "HA rolled back" || echo "::error::HA rollback failed — run neonbee-rollback.yml for $SERVICE_NAME"
+              echo "ha=failure" >> "$GITHUB_OUTPUT"
+              exit 1
+            fi
+            echo "Canary healthy on HA: deploying primary"
+            deploy_vm "$SERVER_IP" "$SERVICE_NAME" > "$DEPLOY_TMP/primary.log" 2>&1; P=$?
+            HA_PID=canary
+          else
           # ── fan out: both VMs start simultaneously ─────────────────────────
           deploy_vm "$SERVER_IP" "$SERVICE_NAME" > "$DEPLOY_TMP/primary.log" 2>&1 &
           PRIMARY_PID=$!
 
           HA_PID=""
-          if [ -n "$HA_IP" ] && { [ "$TARGET_VM" = "prod" ] || [ "$TARGET_VM" = "storefront" ]; }; then
+          if [ "$HA_TARGETED" = 1 ]; then
             deploy_vm "$HA_IP" "${SERVICE_NAME}-ha" > "$DEPLOY_TMP/ha.log" 2>&1 &
             HA_PID=$!
           fi
 
           # ── wait and collect ───────────────────────────────────────────────
           wait $PRIMARY_PID; P=$?
-          H=99  # sentinel: HA not configured / not applicable
           [ -n "$HA_PID" ] && { wait $HA_PID; H=$?; }
+          fi
 
           echo "=== Primary VM log ==="
           cat "$DEPLOY_TMP/primary.log"
