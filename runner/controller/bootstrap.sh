@@ -96,7 +96,7 @@ MemoryMax=300M
 WantedBy=multi-user.target
 U
 install -m 644 /opt/nbci/src/runner/controller/nbci-guard.service /etc/systemd/system/nbci-guard.service
-# Night train (overnight develop->main release train; was a LaunchAgent on the Mac Mini). Metadata nbci-night-train
+# Night train (overnight develop->main release train, runs only here). Metadata nbci-night-train
 # off|dry|live (default off), nbci-nt-deadline (ISO UTC; the train stops after it), nbci-nt-aqa-repos (comma list).
 cat > /etc/night-train.env <<ENV
 NT_MODE=$(attr nbci-night-train || echo off)

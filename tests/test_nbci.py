@@ -61,8 +61,8 @@ class Minis(unittest.TestCase):
             with self.subTest(mini=name):
                 self.assertFalse(ci & set(labels))
 
-    def test_exactly_one_fallback_runner_and_it_is_mini_3(self):
-        self.assertEqual(CFG['fallback']['runner'], 'macmini-preview-3')
+    def test_given_the_user_order_then_no_mac_mini_is_a_fallback_runner(self):
+        self.assertIsNone(CFG['fallback']['runner'])
         self.assertEqual(set(CFG['fallback']['labels']), {'nb-auto', 'nb-deploy', 'nb-ctl', 'nb-size-l', 'nb-size-s'})
 
 

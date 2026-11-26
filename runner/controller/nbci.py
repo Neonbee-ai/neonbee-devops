@@ -13,9 +13,9 @@ route/notify jobs (nb-route) run on 2 runners on this VM itself: no VM boot for 
 Budget: one 32-vCPU quota for CI + AutoQA, priority deploy > gate > AutoQA (AutoQA's allowance is
 published as org variable NB_AUTOQA_VCPU_ALLOWANCE). Daily spend cap (NB_DAILY_CAP_USD, default 2)
 computed from real prices; Teams at 50/80/100 %; at 100 % only deploy VMs start.
-Fallback: macmini-preview-3 gets CI labels only while GCP cannot start VMs (billing, quota, API,
-stock-out in 2+ zones). Off switch: org variable NB_CI_MODE=legacy -> no VMs, no train merges,
-fallback runner ON (today's behaviour); auto -> this design.
+No fallback runner: while GCP cannot start VMs (billing, quota, API, stock-out in 2+ zones) jobs wait and
+Pulse is alerted; no Mac Mini ever gets CI labels. Off switch: org variable NB_CI_MODE=legacy -> no VMs,
+no train merges; auto -> this design.
 
 GitHub API budget (App: 5,000 + 50 x (54-20) = 6,700 calls/h; 304 answers are free):
   webhooks deliver jobs/PR/push events; reconcile every 5 min: repos (ETag) + 1 runs list per
@@ -689,7 +689,7 @@ def tick(gh, gcp, st, mode='scale'):
             if not DRY:
                 try: gh('orgs/%s/actions/runners/%s' % (ORG, r['id']), 'DELETE')
                 except RuntimeError: pass
-    # fallback Mini runner
+    # fallback runner: none configured (fallback.runner null) -> state + alert only, no labels moved
     failing = L.gcp_failing(failures)
     oldest = max([now - j['created'] for j in waiting] or [0])
     new = L.fallback_next(st['fallback'], oldest if failing else 0, failing, started)
@@ -697,11 +697,11 @@ def tick(gh, gcp, st, mode='scale'):
     if new != st['fallback']:
         st['fallback'] = new
         if new: day['fallback'] += 1
-        alert(('fallback runner %s ON: GCP cannot start VMs (%s)' % (fb['runner'], failing))
-              if new else 'GCP started a VM again: fallback runner %s OFF' % fb['runner'])
-    if fb['runner'] in rby:
+        alert(('GCP cannot start VMs (%s): jobs wait (fallback runner: %s)' % (failing, fb.get('runner') or 'none'))
+              if new else 'GCP started a VM again (fallback runner: %s)' % (fb.get('runner') or 'none'))
+    if fb.get('runner') and fb['runner'] in rby:
         set_fallback(gh, rby[fb['runner']], st['fallback'], fb['labels'])
-    # alerts: Mini fallback offline while needed, long queue, bypass
+    # alerts: long queue, bypass
     for j in jobs:
         k = 'q%s' % j['id']
         c = L.class_for(j['labels'], classes)

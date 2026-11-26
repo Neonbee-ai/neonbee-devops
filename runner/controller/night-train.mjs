@@ -19,7 +19,7 @@
 // the label) · NT_DEADLINE (ISO, default 2026-11-27T06:00:00Z) · NT_AQA_REPOS (comma list of repos with an AQA
 // trigger; default none) · NT_HOME (default ~/.night-train; controller /var/lib/night-train). Stop file: $NT_HOME/STOP.
 // State is per night: $NT_HOME/state-<deadline date>.json. Merges use `gh pr merge --merge --match-head-commit`
-// directly (never --admin); PRs must have passed the Mini pre-push gate before push.
+// directly (never --admin); a PR merges only when its own GitHub checks are green.
 import { execFileSync } from "child_process";
 import fs from "fs"; import os from "os"; import path from "path"; import crypto from "crypto";
 

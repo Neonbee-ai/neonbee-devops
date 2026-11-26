@@ -138,14 +138,15 @@
     "macmini-preview-3": []
   },
   "fallback": {
-    "runner": "macmini-preview-3",
+    "runner": null,
     "labels": [
       "nb-auto",
       "nb-deploy",
       "nb-ctl",
       "nb-size-l",
       "nb-size-s"
-    ]
+    ],
+    "_doc": "No fallback runner: nb-ci never hands CI labels to a Mac Mini (user order 2026-11-27). GCP refusing VMs = jobs wait + Pulse alert."
   },
   "quota": {
     "max_vcpu": 32,

@@ -26,7 +26,7 @@ check_suite, workflow_run. Measured: a reconcile pass costs 29 calls cold, 1 cal
 
 Isolation (v3.1): `NB_CI_MODE` per repo (repo variable overrides org). Auto repos route to `nb-auto` / `nb-deploy` /
 `nb-ctl`, labels no legacy runner has; legacy repos keep `runner-vm` / `nb-route` on today's runners, so a controller
-crash or GCP outage cannot touch them. The fallback Mini only gains/loses the auto labels. One train per repo+base:
+crash or GCP outage cannot touch them. No fallback runner: nb-ci never hands labels to a Mac Mini. One train per repo+base:
 failing PRs are ejected, the rest carry on. Flaky infra (runner lost, preemption, network) is re-run once and never
 counted as a code failure. Pulse (`nb_pulse.py`): comment + `fixing` + one bug per task+check + failed test cases on
 failure; bug closed + `reverify` on the fix; queued and retried, never blocking CI; AutoQA hook = JSON spool files.

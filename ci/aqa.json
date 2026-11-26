@@ -22,6 +22,6 @@
   "evidence_template": "gs://neonbee-aqa-0521938031/replay/{env}/{sha}",
   "bundle_template": "gs://neonbee-aqa-0521938031/aqa/{qa_sha}.tgz",
   "qa_repo": "neonbee-qa",
-  "qa_ref": "feat/aqa-replay",
+  "qa_ref": "main",
   "startup_path": "aqa/vm-startup.sh"
 }

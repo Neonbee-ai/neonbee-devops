@@ -36,15 +36,15 @@ else
   $G pubsub subscriptions create nbci-alerts-relay --project $P --topic nbci-alerts --push-endpoint "$URL/" --push-auth-service-account $SA \
     --ack-deadline 60 --message-retention-duration 1d --min-retry-delay 30s --max-retry-delay 600s
 fi
-# notification channel (Pub/Sub) + uptime check + policy
-CH=$($G beta monitoring channels list --project $P --filter='displayName="nbci-alerts"' --format='value(name)' | head -1)
-[ -n "$CH" ] || CH=$($G beta monitoring channels create --project $P --display-name nbci-alerts --type pubsub --channel-labels topic=projects/$P/topics/nbci-alerts --format='value(name)')
-UC=$($G monitoring uptime list-configs --project $P --filter='displayName="nbci-controller-healthz"' --format='value(name)' | head -1)
-[ -n "$UC" ] || UC=$($G monitoring uptime create nbci-controller-healthz --project $P --resource-type uptime-url \
-  --resource-labels host=$HOST,project_id=$P --protocol https --path /healthz --port 443 --period 5 --timeout 10 \
-  --regions usa-iowa,usa-virginia,europe --status-codes 200 --format='value(name)')
+# notification channel (Pub/Sub) + uptime check + policy, via the Monitoring REST API (no alpha/beta components)
+TOK=$($G auth print-access-token); MON=https://monitoring.googleapis.com/v3/projects/$P
+api() { curl -fsS -H "Authorization: Bearer $TOK" -H 'Content-Type: application/json' "$@"; }
+CH=$(api "$MON/notificationChannels" | python3 -c 'import json,sys;print(next((c["name"] for c in json.load(sys.stdin).get("notificationChannels",[]) if c.get("displayName")=="nbci-alerts"),""))')
+[ -n "$CH" ] || CH=$(api -X POST "$MON/notificationChannels" -d "{\"type\":\"pubsub\",\"displayName\":\"nbci-alerts\",\"labels\":{\"topic\":\"projects/$P/topics/nbci-alerts\"}}" | python3 -c 'import json,sys;print(json.load(sys.stdin)["name"])')
+UC=$(api "$MON/uptimeCheckConfigs" | python3 -c 'import json,sys;print(next((c["name"] for c in json.load(sys.stdin).get("uptimeCheckConfigs",[]) if c.get("displayName")=="nbci-controller-healthz"),""))')
+[ -n "$UC" ] || UC=$(api -X POST "$MON/uptimeCheckConfigs" -d "{\"displayName\":\"nbci-controller-healthz\",\"monitoredResource\":{\"type\":\"uptime_url\",\"labels\":{\"host\":\"$HOST\",\"project_id\":\"$P\"}},\"httpCheck\":{\"path\":\"/healthz\",\"port\":443,\"useSsl\":true,\"validateSsl\":true,\"acceptedResponseStatusCodes\":[{\"statusValue\":200}]},\"period\":\"300s\",\"timeout\":\"10s\",\"selectedRegions\":[\"USA_IOWA\",\"USA_VIRGINIA\",\"EUROPE\"]}" | python3 -c 'import json,sys;print(json.load(sys.stdin)["name"])')
 CID=${UC##*/}
-if ! $G alpha monitoring policies list --project $P --filter='displayName="nbci controller down"' --format='value(name)' | grep -q .; then
+if ! api "$MON/alertPolicies" | grep -q '"displayName": "nbci controller down"'; then
   cat > /tmp/nbci-policy.json <<J
 {"displayName":"nbci controller down","combiner":"OR","notificationChannels":["$CH"],
  "documentation":{"content":"https://$HOST/healthz failing from 2+ regions for 10 min: the nbci controller VM or its loop is down. Runbook: neonbee-devops runner/controller/RUNBOOK.md","mimeType":"text/markdown"},
@@ -54,7 +54,7 @@ if ! $G alpha monitoring policies list --project $P --filter='displayName="nbci 
    "aggregations":[{"alignmentPeriod":"600s","perSeriesAligner":"ALIGN_NEXT_OLDER","crossSeriesReducer":"REDUCE_COUNT_FALSE","groupByFields":["resource.label.project_id","resource.label.host"]}],
    "comparison":"COMPARISON_GT","thresholdValue":1,"duration":"600s","trigger":{"count":1}}}]}
 J
-  $G alpha monitoring policies create --project $P --policy-from-file /tmp/nbci-policy.json --format='value(name)'; rm -f /tmp/nbci-policy.json
+  api -X POST "$MON/alertPolicies" -d @/tmp/nbci-policy.json | python3 -c 'import json,sys;print("policy", json.load(sys.stdin)["name"])'; rm -f /tmp/nbci-policy.json
 fi
 BA=$($G billing projects describe $P --format='value(billingAccountName)'); BA=${BA##*/}
 if ! $G billing budgets list --billing-account $BA --billing-project $P --format='value(displayName)' | grep -qx 'nbci project budget'; then

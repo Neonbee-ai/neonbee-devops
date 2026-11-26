@@ -43,7 +43,7 @@ Every alert is one comment on Pulse `71b8be5b` starting with `[nbci]`. Deduped p
 | `controller heartbeat Ns old` | watchdog restarted `nbci` (loop hung) |
 | `nbci STOPPED by the churn guard` | VMs outnumbered queued jobs; inspect, then `sudo rm -f /run/nbci-stopped-by-guard && sudo systemctl start nbci` |
 | `job ... queued N min` | a job waited > 15 min: quota, stock-out or labels with no class |
-| `VM create failed` | GCE refused in every zone (quota/stockout/billing/api); fallback Mini takes over after a few minutes |
+| `VM create failed` | GCE refused in every zone (quota/stockout/billing/api); jobs wait (no fallback runner, never a Mac Mini) and retry every pass |
 | `daily VM-minutes cap reached` | `NB_DAILY_VM_MIN` (default 1500) hit: no VM starts until 00:00 UTC. Raise via metadata `nbci-daily-vm-min` + reboot |
 | `CI spend today ... (capped)` | `$NB_DAILY_CAP_USD` hit: only deploy VMs start |
 | `budget "nbci project budget": N%` | monthly project budget (INR 6000) 50/90/100 % |
