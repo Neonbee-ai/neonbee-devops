@@ -32,7 +32,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import nbci_logic as L  # noqa: E402
 import nb_release  # noqa: E402
-from nbci_io import GCP, GitHub, log, meta, req, teams  # noqa: E402
+import nb_pulse  # noqa: E402
+from nbci_io import GCP, GitHub, job_log, log, meta, req, teams  # noqa: E402
 
 E = os.environ.get
 ORG = E('ORG', 'Neonbee-ai')
@@ -54,7 +55,7 @@ ALLOWED_PUSHERS = set(filter(None, E('ALLOWED_PUSHERS', '').split(',')))
 DRY = E('DRY_RUN', '1') == '1'
 
 LOCK = threading.Lock()
-EVENTS = {'jobs': {}, 'done_runners': set(), 'dirty_repos': set(), 'last_event': 0, 'waits': [], 'pushes': []}
+EVENTS = {'jobs': {}, 'done_runners': set(), 'dirty_repos': set(), 'last_event': 0, 'waits': [], 'pushes': [], 'failed': []}
 
 
 def ts(s):
@@ -97,6 +98,9 @@ def on_event(kind, ev):
                 rn = j.get('runner_name') or ''
                 if ev['action'] == 'completed' and rn.startswith(STEM + '-') and not rn.startswith('nbci-ctl-'):
                     EVENTS['done_runners'].add(rn)
+                if ev['action'] == 'completed' and j.get('conclusion') in ('failure', 'cancelled') and rn.startswith(STEM + '-'):
+                    EVENTS['failed'].append({'repo': repo, 'job': j['id'], 'run': j['run_id'], 'attempt': j.get('run_attempt', 1),
+                                             'name': j['name'], 'conclusion': j['conclusion'], 'runner': rn})
         elif kind in ('pull_request', 'check_suite', 'workflow_run', 'check_run'):
             EVENTS['dirty_repos'].add(repo)
         elif kind == 'push':
@@ -224,15 +228,28 @@ def org_var(gh, name, value=None):
 
 
 def set_fallback(gh, runner, on, labels):
-    have = {l['name'] for l in runner['labels'] if l.get('type') == 'custom'}
-    want = set(labels) if on else set()
+    """Adds (on) or removes (off) ONLY the fallback labels; the runner's legacy labels are never touched,
+    so legacy repos keep their capacity whatever the controller does."""
+    have = sorted(l['name'] for l in runner['labels'] if l.get('type') == 'custom')
+    want = L.fallback_target(have, labels, on)
     if have == want:
         return False
-    log('fallback runner', runner['name'], 'ON' if on else 'OFF')
+    log('fallback runner', runner['name'], 'ON' if on else 'OFF', want)
     if not DRY:
-        if want: gh('orgs/%s/actions/runners/%s/labels' % (ORG, runner['id']), 'PUT', {'labels': sorted(want)})
+        if want: gh('orgs/%s/actions/runners/%s/labels' % (ORG, runner['id']), 'PUT', {'labels': want})
         else: gh('orgs/%s/actions/runners/%s/labels' % (ORG, runner['id']), 'DELETE')
     return True
+
+
+def repo_mode(gh, st, repo, org_mode, now):
+    c = st.setdefault('modes', {}).get(repo)
+    if c and now - c[1] < 300:
+        return c[0]
+    try: rv = gh('repos/%s/%s/actions/variables/NB_CI_MODE' % (ORG, repo), cache=True).get('value', '')
+    except RuntimeError: rv = ''
+    m = L.repo_mode(rv, org_mode)
+    st['modes'][repo] = (m, now)
+    return m
 
 
 # ── image (family nb-ci-runner), rebuilt weekly ────────────────────────────────────────────────────
@@ -304,7 +321,7 @@ def tick(gh, gcp, st, mode='scale'):
     cfg = L.load(os.path.join(CFG, 'runner-labels.json')); manifest = L.load(os.path.join(CFG, 'release-manifest.json'))
     classes = cfg['classes']; byname = {c['name']: c for c in classes}; prices = cfg['prices_usd']
     alert = lambda t: teams(t, DRY)  # noqa: E731
-    ci_mode = org_var(gh, 'NB_CI_MODE') or 'legacy'
+    ci_mode = org_var(gh, 'NB_CI_MODE') or 'legacy'        # org default; repo variables override it
     rs = runners(gh); rby = {r['name']: r for r in rs}
     webhook_live = now - EVENTS['last_event'] < 900
     if every(st, 'reconcile', RECONCILE_S if webhook_live else 60, now) or mode != 'scale':
@@ -316,6 +333,7 @@ def tick(gh, gcp, st, mode='scale'):
         waits, EVENTS['waits'] = EVENTS['waits'], []
         pushes, EVENTS['pushes'] = EVENTS['pushes'], []
         dirty, EVENTS['dirty_repos'] = set(EVENTS['dirty_repos']), set()
+        failed, EVENTS['failed'] = EVENTS['failed'], []
     day = st['day'].setdefault(today, {'usd': 0.0, 'vcpu_h': {}, 'jobs': 0, 'waits': [], 'create_fail': 0, 'fallback': 0, 'bypass': 0})
     day['waits'] = (day['waits'] + waits)[-5000:]
     failures, started = [], False
@@ -372,7 +390,8 @@ def tick(gh, gcp, st, mode='scale'):
         print('mode=%s want=%s spend=$%.3f (%s) fallback=%s rate_left=%s' % (
             ci_mode, [c['name'] for c in want], day['usd'], spend, st['fallback'], gh.remaining))
         return
-    if want and gce_ok and ci_mode == 'auto':
+    # VMs only ever serve auto-lane labels (nb-auto / nb-deploy): legacy repos' jobs match no class.
+    if want and gce_ok:
         try:
             room = free_vcpu(gcp); image = image_link(gcp)
         except Exception as e:
@@ -407,12 +426,12 @@ def tick(gh, gcp, st, mode='scale'):
     # fallback Mini runner
     failing = L.gcp_failing(failures)
     oldest = max([now - j['created'] for j in waiting] or [0])
-    new = True if ci_mode == 'legacy' else L.fallback_next(st['fallback'], oldest if failing else 0, failing, started)
+    new = L.fallback_next(st['fallback'], oldest if failing else 0, failing, started)
     fb = cfg['fallback']
     if new != st['fallback']:
         st['fallback'] = new
         if new: day['fallback'] += 1
-        alert(('fallback runner %s ON: %s' % (fb['runner'], 'NB_CI_MODE=legacy' if ci_mode == 'legacy' else 'GCP cannot start VMs (%s)' % failing))
+        alert(('fallback runner %s ON: GCP cannot start VMs (%s)' % (fb['runner'], failing))
               if new else 'GCP started a VM again: fallback runner %s OFF' % fb['runner'])
     if fb['runner'] in rby:
         set_fallback(gh, rby[fb['runner']], st['fallback'], fb['labels'])
@@ -428,17 +447,43 @@ def tick(gh, gcp, st, mode='scale'):
     st['alerted'] = {k: v for k, v in st['alerted'].items() if now - v < 3 * 86400}
     log('mode=%s jobs=%d vms=%d want=%d room=%d spend=$%.3f %s fallback=%s%s' % (
         ci_mode, len(jobs), len(live), len(want), room, day['usd'], spend, st['fallback'], ' gcp=' + failing if failing else ''))
-    # release train: on events, plus a sweep every 10 min while the rate budget allows
-    if ci_mode == 'auto' and E('TRAIN_REPOS'):
-        rel = nb_release.Release(gh, ORG, manifest, log, alert, st['release'], DRY)
-        pulse = nb_release.Pulse(st.get('_pulse_token', ''), log, DRY)
+    # Pulse queue (failures, fixes, released): drained a few per pass, retried, never blocks CI
+    pq = nb_pulse.PulseQueue(st.setdefault('pulse', {}), nb_pulse.MCP(E('PULSE_MCP_URL', ''), st.get('_pulse_token', '')), log,
+                             DRY or not (E('PULSE_MCP_URL') and st.get('_pulse_token')))
+    pq.ingest_spool()
+
+    def released(tid, note):
+        pq._put('status', task=tid, status=E('PULSE_RELEASED_STATUS', 'released')); pq._put('comment', task=tid, text=note)
+    rel_state = st['release']
+    # flaky-infra retry for any failed job on an nb-ci runner (push runs too), once per run
+    for f in failed:
+        try:
+            if repo_mode(gh, st, f['repo'], ci_mode, now) != 'auto' or str(f['run']) in rel_state.setdefault('retried', {}):
+                continue
+            kind = L.classify_log(job_log(gh, ORG, f['repo'], f['job']), f['conclusion'],
+                                  runner_gone=f['conclusion'] == 'cancelled' and f['runner'] not in rby)
+            if L.should_retry(kind, f['attempt']):
+                log('infra retry', f['repo'], f['name'], f['run'])
+                rel_state['retried'][str(f['run'])] = now
+                if not DRY:
+                    gh('repos/%s/%s/actions/runs/%s/rerun-failed-jobs' % (ORG, f['repo'], f['run']), 'POST', {})
+        except Exception as e:
+            log('retry check', f['repo'], str(e)[:120])
+    # merge train: auto repos of TRAIN_REPOS only, on events + a sweep every 10 min within the rate budget
+    if E('TRAIN_REPOS'):
+        names = [r['name'] for r in gh('orgs/%s/repos?per_page=100' % ORG, cache=True) if not r['archived']] \
+            if E('TRAIN_REPOS') == '*' else [x.strip() for x in E('TRAIN_REPOS').split(',') if x.strip()]
+        auto = [r for r in names if repo_mode(gh, st, r, ci_mode, now) == 'auto']
+        rel = nb_release.Release(gh, ORG, manifest, log, alert, rel_state, pq, DRY, auto)
         if every(st, 'train', 600, now) and not gh.low():
-            rel.tick(pulse)
+            rel.tick(released)
         else:
-            for repo in dirty & set(rel.repos()):
-                rel.tick(pulse, only=repo)
+            for repo in dirty & set(auto):
+                rel.tick(released, only=repo)
+    try: pq.drain()
+    except Exception as e: log('pulse drain', e)
     # weekly image rebuild (background thread; the loop keeps serving)
-    if ci_mode == 'auto' and every(st, 'image_check', 3600, now):
+    if every(st, 'image_check', 3600, now):
         try:
             age_d = (now - ts(gcp.compute('/global/images/family/' + IMAGE_FAMILY)['creationTimestamp'])) / 86400
         except Exception:

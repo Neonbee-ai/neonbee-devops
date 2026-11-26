@@ -53,7 +53,7 @@ concurrency:
 
 jobs:
   cf:
-    runs-on: [self-hosted, nb-route]
+    runs-on: ${{ vars.NB_CI_MODE == 'auto' && fromJSON('["self-hosted","nb-ctl"]') || fromJSON('["self-hosted","nb-route"]') }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4

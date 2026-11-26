@@ -141,3 +141,22 @@ def teams(text, dry):
     if hook and not dry:
         try: req(hook, 'POST', {'text': '[nb-ci] ' + text})
         except Exception as e: log('teams failed', e)
+
+
+def job_log(gh, org, repo, job_id, max_bytes=3_000_000):
+    """Plain-text log of one Actions job (the API redirects to blob storage, fetched without auth)."""
+    class NoRedir(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *a, **k):
+            return None
+    url = 'https://api.github.com/repos/%s/%s/actions/jobs/%s/logs' % (org, repo, job_id)
+    r = urllib.request.Request(url, headers={'Authorization': 'Bearer ' + gh.token(), 'Accept': 'application/vnd.github+json'})
+    try:
+        urllib.request.build_opener(NoRedir).open(r, timeout=20)
+        return ''
+    except urllib.error.HTTPError as e:
+        if e.code not in (301, 302, 303, 307, 308):
+            return ''
+        loc = e.headers['Location']
+    with urllib.request.urlopen(loc, timeout=30) as f:
+        b = f.read(max_bytes)
+    return b.decode('utf-8', 'ignore')

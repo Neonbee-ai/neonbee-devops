@@ -185,7 +185,8 @@ def group_of(repo, manifest):
 
 
 def open_group(pending_repos, manifest):
-    """Lowest group index that still has work (queued main PR, or merged but main not green yet)."""
+    """Lowest group index that still has work. pending_repos: repos whose release item still blocks
+    (see release_blocking)."""
     return min((group_of(r, manifest) for r in pending_repos), default=None)
 
 
@@ -201,3 +202,79 @@ def bypass(push, train_shas, bot_logins, allowed):
     if push.get('after') in train_shas:
         return None
     return '%s pushed %s to %s outside the merge train' % (who or '?', (push.get('after') or '')[:9], ref[11:])
+
+
+# ── isolation, retries, failure reporting (design v3.1) ───────────────────────────────────────────
+def repo_mode(repo_var, org_var):
+    """NB_CI_MODE per repo: a repo variable overrides the org one; anything but 'auto' is legacy."""
+    v = (repo_var or '').strip() or (org_var or '').strip()
+    return 'auto' if v == 'auto' else 'legacy'
+
+
+def fallback_target(current_custom, fb_labels, on):
+    """The fallback runner keeps its own labels; only fb_labels are added (on) or taken away (off)."""
+    cur = set(current_custom)
+    return sorted(cur | set(fb_labels)) if on else sorted(cur - set(fb_labels))
+
+
+CODE_RE = re.compile(r'error TS\d+|##\[error\]Error:|Test Suites:.*\bfailed|\bTests:\s+\d+ failed|\bFAIL\s+\S+|'
+                     r'\bELIFECYCLE\b|error Command failed|Cannot find module|SyntaxError:|AssertionError|npm ERR! Test failed')
+INFRA_MARKERS = ('The runner has received a shutdown signal', 'The self-hosted runner lost communication',
+                 'Communication with the server has been lost', 'lost communication with the server',
+                 'Could not resolve host', 'Temporary failure resolving', 'getaddrinfo EAI_AGAIN', 'ECONNRESET',
+                 'Connection reset by peer', 'Connection timed out', 'ssh: connect to host', 'No space left on device',
+                 'Cannot allocate memory', '502 Bad Gateway', '503 Service Unavailable', '429 Too Many Requests',
+                 'curl: (56)', 'curl: (7)', 'curl: (28)', 'Broken pipe', 'No route to host', 'preempted',
+                 'Kex_exchange_identification', 'banner exchange')
+ANSI = re.compile('\x1b\\[[0-9;]*[A-Za-z]')
+
+
+def classify_log(text, conclusion='failure', runner_gone=False):
+    """'code' | 'infra' | 'unknown'. A compile/test error anywhere means the code is at fault, whatever
+    network noise is also in the log. A job whose runner vanished (Spot preemption, VM deleted) is infra."""
+    t = ANSI.sub('', text or '')
+    if CODE_RE.search(t):
+        return 'code'
+    if runner_gone or any(m in t for m in INFRA_MARKERS):
+        return 'infra'
+    return 'unknown'
+
+
+def should_retry(kind, run_attempt):
+    """Flaky infra is retried exactly once and is not a code failure; a second failure counts."""
+    return kind == 'infra' and int(run_attempt or 1) == 1
+
+
+def log_excerpt(text, n=20):
+    """<= n lines around the first error (or the tail), secrets already masked by GitHub as ***."""
+    lines = [ANSI.sub('', l)[:300] for l in (text or '').splitlines()]
+    idx = next((i for i, l in enumerate(lines) if CODE_RE.search(l) or '##[error]' in l), None)
+    if idx is None:
+        return '\n'.join(lines[-n:])
+    lo = max(0, idx - n // 2)
+    return '\n'.join(lines[lo:lo + n])
+
+
+def bug_key(task_id, check):
+    return '%s|%s' % (task_id, check)
+
+
+def pick_train(cands):
+    """Independent per repo+base. cands: [(number, action)] oldest first. Every ejectable PR is ejected
+    (never blocks the rest); the oldest merge-ready PR merges; if none is ready, ONLY the oldest PR that
+    is behind is updated (one CI re-run at a time). waiting / held PRs block nobody."""
+    out = [(n, a) for n, a in cands if a.startswith('eject:')]
+    ready = [n for n, a in cands if a == 'merge']
+    if ready:
+        out.append((ready[0], 'merge'))
+    else:
+        behind = [n for n, a in cands if a == 'update']
+        if behind:
+            out.append((behind[0], 'update'))
+    return out
+
+
+def release_blocking(item, now, stale_s=7200):
+    """Manifest order only couples PRs of the same release branch (release/*), and a stuck, held,
+    ejected or red item stops blocking after stale_s, so one bad repo never freezes the release."""
+    return item['branch'].startswith('release/') and item['state'] in ('queued', 'inflight') and now - item['since'] < stale_s

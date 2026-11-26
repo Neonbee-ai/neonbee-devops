@@ -1,16 +1,20 @@
-"""Zero-agent release flow (Free plan: no protection / merge queue / auto-merge, so this is the queue).
+"""Zero-agent release flow for NB_CI_MODE=auto repos (Free plan: this is the merge queue).
 
-merge train   open PRs labelled nb-merge, per repo+base the oldest first. Needs a Pulse id in the title,
-              `needs-migration` holds it until `migration-applied` is added, main PRs follow the release
-              manifest groups (core -> backends -> frontends -> shell-fe -> devops). Behind its base ->
-              update-branch (CI re-tests on the latest base); every check on the head green + PR Gate
-              present -> merge commit pinned to the head sha. Ejects with a comment + Teams on failure.
-after main    a merged main PR whose main push runs are all green -> the develop PR from the same branch
-              gets nb-merge; every Pulse id in its title/body -> PULSE_RELEASED_STATUS + comment.
-Idempotent: decisions are re-derived from GitHub every pass; state only remembers announcements.
+Isolation: one independent train per repo+base. Every labelled PR is evaluated on its own each pass;
+any PR that fails is ejected (comment + Teams + Pulse) and the others carry on; the oldest merge-ready
+PR merges; if none is ready only the oldest PR behind its base is updated. Errors are caught per PR and
+per repo. Manifest order (core -> backends -> frontends -> shell-fe -> devops) applies only to PRs of
+the same release/* branch and stops blocking after 2 h, so one bad repo never freezes the rest.
+
+Failures: a red check is classified from its job log. Flaky infra (runner lost, Spot preemption,
+network) -> the failed jobs are re-run once automatically and nothing is reported. Anything else ->
+eject + Pulse (nb_pulse: comment, 'fixing', one bug per task+check, test cases failed).
+Fix: the same check green later -> bug closed, task -> 'reverify'; green main -> develop PR queued,
+task -> 'released'.
 """
-import json, os, time, urllib.request
+import os, time
 import nbci_logic as L
+from nbci_io import job_log
 
 E = os.environ.get
 LABEL = E('TRAIN_LABEL', 'nb-merge')
@@ -22,150 +26,190 @@ def _ts(s):
 
 
 class Release:
-    def __init__(self, gh, org, manifest, log, alert, state, dry):
-        self.gh, self.org, self.m, self.log, self.alert, self.st, self.dry = gh, org, manifest, log, alert, state, dry
-        for k in ('announced', 'red', 'labelled', 'train_shas', 'ejected'):
+    def __init__(self, gh, org, manifest, log, alert, state, pulse, dry, repos):
+        self.gh, self.org, self.m, self.log, self.alert, self.st, self.pq, self.dry = gh, org, manifest, log, alert, state, pulse, dry
+        self.repo_list = repos
+        for k in ('announced', 'red', 'labelled', 'train_shas'):
             self.st.setdefault(k, [])
-
-    def repos(self):
-        allow = E('TRAIN_REPOS', '')
-        if allow == '*':
-            return [r['name'] for r in self.gh('orgs/%s/repos?per_page=100' % self.org, cache=True) if not r['archived']]
-        return [x.strip() for x in allow.split(',') if x.strip()]
+        for k in ('retried', 'rel'):
+            self.st.setdefault(k, {})
 
     def _do(self, what, path, method, body=None):
         if self.dry:
             self.log('DRY', what, path); return {}
         return self.gh(path, method, body)
 
-    def ensure_label(self, repo):
+    def ensure_labels(self, repo):
         if repo in self.st['labelled'] or self.dry:
             return
         for name, color in ((LABEL, '0e8a16'), ('needs-migration', 'd93f0b'), ('migration-applied', '0075ca')):
-            try:
-                self.gh('repos/%s/%s/labels' % (self.org, repo), 'POST', {'name': name, 'color': color})
+            try: self.gh('repos/%s/%s/labels' % (self.org, repo), 'POST', {'name': name, 'color': color})
             except RuntimeError as e:
-                if ' 422 ' not in str(e):
-                    raise
+                if ' 422 ' not in str(e): raise
         self.st['labelled'].append(repo)
 
-    def queued(self, repo):
-        prs = self.gh('repos/%s/%s/pulls?state=open&sort=created&direction=asc&per_page=50' % (self.org, repo), cache=True)
-        return [p for p in prs if p['base']['ref'] in ('main', 'develop') and any(l['name'] == LABEL for l in p['labels'])]
-
-    def pending_main(self, queued_by_repo):
-        """Repos with release work in flight on main: a queued main PR, or a merge whose main runs are not green yet."""
-        out = {r for r, prs in queued_by_repo.items() if any(p['base']['ref'] == 'main' for p in prs)}
-        for key in self.st.get('inflight', []):
-            out.add(key.split('#')[0])
+    # ── failure analysis ──────────────────────────────────────────────────────────────────────────
+    def failing(self, repo, runs):
+        """[(check_run, job, kind, excerpt)] for the red checks of a head commit (latest per name)."""
+        latest = {}
+        for c in runs:
+            if c['name'] not in latest or c['id'] > latest[c['name']]['id']:
+                latest[c['name']] = c
+        out = []
+        for c in latest.values():
+            if c['status'] != 'completed' or c['conclusion'] in L.OK:
+                continue
+            job, text = None, ''
+            if (c.get('app') or {}).get('slug') == 'github-actions':
+                try:
+                    job = self.gh('repos/%s/%s/actions/jobs/%s' % (self.org, repo, c['id']))
+                    text = job_log(self.gh, self.org, repo, c['id'])
+                except Exception as e:
+                    self.log('log fetch', repo, c['name'], str(e)[:80])
+            gone = c['conclusion'] in ('cancelled',) and job and (job.get('runner_name') or '').startswith('nbci-')
+            kind = L.classify_log(text, c['conclusion'], runner_gone=bool(gone))
+            out.append((c, job, kind, L.log_excerpt(text)))
         return out
 
-    def train(self, repo, prs, open_grp):
-        heads = {}
-        for p in prs:
-            heads.setdefault(p['base']['ref'], p)
-        for base, p in heads.items():
-            pr = self.gh('repos/%s/%s/pulls/%s' % (self.org, repo, p['number']))
-            sha = pr['head']['sha']
-            behind = self.gh('repos/%s/%s/compare/%s...%s' % (self.org, repo, base, sha)).get('behind_by', 0)
-            runs = self.gh('repos/%s/%s/commits/%s/check-runs?per_page=100' % (self.org, repo, sha))['check_runs']
-            grp_ok = base != 'main' or open_grp is None or L.group_of(repo, self.m) <= open_grp
-            act = L.train_action(pr, behind, L.checks_verdict(runs), grp_ok)
-            tag = '%s#%s->%s' % (repo, pr['number'], base)
-            if act == 'merge':
-                r = self._do('merge', 'repos/%s/%s/pulls/%s/merge' % (self.org, repo, pr['number']), 'PUT',
-                             {'merge_method': 'merge', 'sha': sha})
-                if r.get('sha'):
-                    self.st['train_shas'] = (self.st['train_shas'] + [r['sha']])[-300:]
-                    if base == 'main':
-                        self.st.setdefault('inflight', []).append('%s#%s' % (repo, pr['number']))
-                self.log('merged', tag, sha[:9])
-            elif act == 'update':
-                self._do('update-branch', 'repos/%s/%s/pulls/%s/update-branch' % (self.org, repo, pr['number']), 'PUT',
-                         {'expected_head_sha': sha})
-            elif act.startswith('eject:'):
-                why = act[6:]
-                self._do('unlabel', 'repos/%s/%s/issues/%s/labels/%s' % (self.org, repo, pr['number'], LABEL), 'DELETE')
-                self._do('comment', 'repos/%s/%s/issues/%s/comments' % (self.org, repo, pr['number']), 'POST',
-                         {'body': 'nb-merge train: removed from the queue: %s. Fix it and add `%s` again.' % (why, LABEL)})
-                self.alert('merge train ejected %s: %s' % (tag, why))
-            elif act.startswith('hold:') and tag not in self.st['ejected']:
-                self.st['ejected'].append(tag); self.log('hold', tag, act[5:])
+    def retry_infra(self, repo, fails):
+        """True if every failure is flaky infra and was (or is being) retried once."""
+        if not fails or any(k != 'infra' for _, _, k, _ in fails):
+            return False
+        for c, job, kind, _ in fails:
+            if not job or not L.should_retry(kind, job.get('run_attempt')):
+                return False
+        for c, job, _, _ in fails:
+            rid = str(job['run_id'])
+            if rid not in self.st['retried']:
+                self._do('rerun-failed-jobs', 'repos/%s/%s/actions/runs/%s/rerun-failed-jobs' % (self.org, repo, rid), 'POST', {})
+                self.st['retried'][rid] = time.time()
+                self.log('infra retry', repo, c['name'], rid)
+        return True
 
-    def after_main(self, repo, pulse):
+    def report(self, repo, pr, fails, severity):
+        for tid in L.pulse_ids(pr.get('title'), pr.get('body')):
+            for c, job, kind, exc in fails:
+                url = (job or {}).get('html_url') or c.get('html_url', '')
+                self.pq.report_failure(tid, c['name'], repo, pr.get('number', 0), url, exc, severity)
+
+    def fixed(self, repo, pr, runs):
+        green = {c['name'] for c in runs if c['status'] == 'completed' and c['conclusion'] in L.OK}
+        for tid in L.pulse_ids(pr.get('title'), pr.get('body')):
+            for key, bug in list(self.pq.st['bugs'].items()):
+                t, chk = key.split('|', 1)
+                if t == tid and bug.get('open') and chk in green:
+                    self.pq.report_fixed(tid, chk, repo, pr.get('number', 0), pr.get('html_url', ''))
+
+    # ── one repo+base train ───────────────────────────────────────────────────────────────────────
+    def evaluate(self, repo, pr, open_grp, now):
+        base, sha = pr['base']['ref'], pr['head']['sha']
+        behind = self.gh('repos/%s/%s/compare/%s...%s' % (self.org, repo, base, sha)).get('behind_by', 0)
+        runs = self.gh('repos/%s/%s/commits/%s/check-runs?per_page=100' % (self.org, repo, sha))['check_runs']
+        verdict = L.checks_verdict(runs)
+        branch = pr['head']['ref']
+        grp_ok = True
+        if base == 'main' and branch.startswith('release/') and open_grp is not None:
+            grp_ok = L.group_of(repo, self.m) <= open_grp
+        act = L.train_action(pr, behind, verdict, grp_ok)
+        fails = []
+        if act.startswith('eject:a check failed'):
+            fails = self.failing(repo, runs)
+            if self.retry_infra(repo, fails):
+                act = 'wait'                          # flaky infra: retried once, not a code failure
+            elif fails and all(k == 'infra' for _, _, k, _ in fails):
+                act = 'eject:infrastructure failed twice (not a code failure) - re-run when GCP is healthy'
+                fails = []
+        if verdict == 'green':
+            self.fixed(repo, pr, runs)
+        return act, fails
+
+    def train(self, repo, prs, open_grp, now):
+        for base in ('main', 'develop'):
+            cands, info = [], {}
+            for p in [p for p in prs if p['base']['ref'] == base]:
+                try:
+                    pr = self.gh('repos/%s/%s/pulls/%s' % (self.org, repo, p['number']))
+                    act, fails = self.evaluate(repo, pr, open_grp, now)
+                except Exception as e:                # one broken PR never stops the others
+                    self.log('train eval error', repo, p['number'], str(e)[:160]); continue
+                cands.append((pr['number'], act)); info[pr['number']] = (pr, act, fails)
+                if base == 'main' and pr['head']['ref'].startswith('release/'):
+                    it = self.st['rel'].setdefault(repo, {'branch': pr['head']['ref'], 'state': 'queued', 'since': now})
+                    it['state'] = 'held' if act.startswith(('hold:needs-migration', 'eject:')) else it['state']
+            for n, act in L.pick_train(cands):
+                pr, _, fails = info[n]
+                tag = '%s#%s->%s' % (repo, n, base)
+                try:
+                    if act == 'merge':
+                        r = self._do('merge', 'repos/%s/%s/pulls/%s/merge' % (self.org, repo, n), 'PUT',
+                                     {'merge_method': 'merge', 'sha': pr['head']['sha']})
+                        if r.get('sha'):
+                            self.st['train_shas'] = (self.st['train_shas'] + [r['sha']])[-300:]
+                        if base == 'main' and repo in self.st['rel']:
+                            self.st['rel'][repo].update(state='inflight', since=now)
+                        self.log('merged', tag)
+                    elif act == 'update':
+                        self._do('update-branch', 'repos/%s/%s/pulls/%s/update-branch' % (self.org, repo, n), 'PUT',
+                                 {'expected_head_sha': pr['head']['sha']})
+                    elif act.startswith('eject:'):
+                        why = act[6:]
+                        self._do('unlabel', 'repos/%s/%s/issues/%s/labels/%s' % (self.org, repo, n, LABEL), 'DELETE')
+                        self._do('comment', 'repos/%s/%s/issues/%s/comments' % (self.org, repo, n), 'POST',
+                                 {'body': 'nb-merge train: removed from the queue (other PRs carry on): %s. Fix it and add `%s` again.' % (why, LABEL)})
+                        self.alert('merge train ejected %s: %s' % (tag, why))
+                        if fails:
+                            self.report(repo, pr, fails, 'Medium')
+                except Exception as e:
+                    self.log('train action error', tag, act, str(e)[:160])
+
+    def after_main(self, repo, pulse_released):
         since = time.time() - 12 * 3600
         for pr in self.gh('repos/%s/%s/pulls?state=closed&base=main&sort=updated&direction=desc&per_page=15' % (self.org, repo), cache=True):
             if not pr.get('merged_at') or _ts(pr['merged_at']) < since:
                 continue
             key = '%s#%s' % (repo, pr['number'])
-            if key in self.st['announced']:
+            if key in self.st['announced'] or key in self.st['red']:
                 continue
             runs = self.gh('repos/%s/%s/actions/runs?head_sha=%s&branch=main&event=push&per_page=30'
                            % (self.org, repo, pr['merge_commit_sha']))['workflow_runs']
+            if not runs or any(r['status'] != 'completed' for r in runs):
+                continue
             if not L.main_green(runs):
-                if runs and all(r['status'] == 'completed' for r in runs) and key not in self.st['red']:
-                    self.st['red'].append(key)
-                    self.alert('main RED for %s: develop not promoted, Pulse not released' % key)
+                checks = self.gh('repos/%s/%s/commits/%s/check-runs?per_page=100' % (self.org, repo, pr['merge_commit_sha']))['check_runs']
+                fails = self.failing(repo, checks)
+                if self.retry_infra(repo, fails):
+                    continue
+                self.st['red'].append(key)
+                self.st['rel'].pop(repo, None)             # never blocks the release order
+                self.alert('main RED for %s: develop not promoted, Pulse not released' % key)
+                self.report(repo, pr, fails, 'High')
                 continue
             for d in self.gh('repos/%s/%s/pulls?state=open&base=develop&head=%s:%s' % (self.org, repo, self.org, pr['head']['ref'])):
                 self._do('label develop', 'repos/%s/%s/issues/%s/labels' % (self.org, repo, d['number']), 'POST', {'labels': [LABEL]})
             for tid in L.pulse_ids(pr.get('title'), pr.get('body')):
-                pulse(tid, 'Released to production: %s/%s PR #%s (%s), main runs green.'
-                      % (self.org, repo, pr['number'], pr['merge_commit_sha'][:9]))
+                pulse_released(tid, 'Released to production: %s/%s PR #%s (%s), main runs green.'
+                               % (self.org, repo, pr['number'], pr['merge_commit_sha'][:9]))
             self.st['announced'] = (self.st['announced'] + [key])[-500:]
-            self.st['inflight'] = [k for k in self.st.get('inflight', []) if k != key]
+            self.st['rel'].pop(repo, None)
 
-    def tick(self, pulse, only=None):
-        repos = [only] if only else self.repos()
+    def tick(self, pulse_released, only=None):
+        now = time.time()
+        repos = [only] if only else self.repo_list
         queued = {}
         for repo in repos:
             try:
-                self.ensure_label(repo)
-                queued[repo] = self.queued(repo)
+                self.ensure_labels(repo)
+                prs = self.gh('repos/%s/%s/pulls?state=open&sort=created&direction=asc&per_page=50' % (self.org, repo), cache=True)
+                queued[repo] = [p for p in prs if p['base']['ref'] in ('main', 'develop') and any(l['name'] == LABEL for l in p['labels'])]
             except Exception as e:
                 self.log('train read error', repo, str(e)[:160])
-        grp = L.open_group(self.pending_main(queued), self.m)
+        blocking = {r for r, it in self.st['rel'].items() if L.release_blocking(it, now)}
+        grp = L.open_group(blocking, self.m)
         for repo in repos:
             try:
                 if queued.get(repo):
-                    self.train(repo, queued[repo], grp)
-                self.after_main(repo, pulse)
+                    self.train(repo, queued[repo], grp, now)
+                self.after_main(repo, pulse_released)
             except Exception as e:
                 self.log('release error', repo, str(e)[:200])
-
-
-class Pulse:
-    """Pulse MCP (JSON-RPC over HTTP). Robust choice over a webhook endpoint: the controller already
-    sees the green main run, retries every pass, and needs no extra public endpoint."""
-
-    def __init__(self, token, log, dry):
-        self.url, self.token = E('PULSE_MCP_URL', ''), token
-        self.status = E('PULSE_RELEASED_STATUS', 'released')
-        self.log, self.dry, self.sid, self.n = log, dry, None, 0
-
-    def _rpc(self, method, params):
-        self.n += 1
-        h = {'Content-Type': 'application/json', 'Accept': 'application/json, text/event-stream',
-             'Authorization': 'Bearer ' + self.token}
-        if self.sid:
-            h['Mcp-Session-Id'] = self.sid
-        body = json.dumps({'jsonrpc': '2.0', 'id': self.n, 'method': method, 'params': params}).encode()
-        with urllib.request.urlopen(urllib.request.Request(self.url, data=body, headers=h, method='POST'), timeout=30) as f:
-            self.sid = f.headers.get('Mcp-Session-Id') or self.sid
-            raw = f.read().decode()
-        for line in raw.splitlines():
-            line = line[5:].strip() if line.startswith('data:') else line.strip()
-            if line.startswith('{'):
-                return json.loads(line)
-        return {}
-
-    def __call__(self, task_id, note):
-        if not (self.url and self.token) or self.dry:
-            self.log('pulse %s %s -> %s' % ('DRY' if self.dry else 'unconfigured', task_id, self.status)); return
-        if not self.sid:
-            self._rpc('initialize', {'protocolVersion': '2025-03-26', 'capabilities': {},
-                                     'clientInfo': {'name': 'nb-ci', 'version': '3'}})
-        for name, args in (('update_task_status', {'task_id': task_id, 'status': self.status}),
-                           ('add_comment', {'task_id': task_id, 'message': note})):
-            r = self._rpc('tools/call', {'name': name, 'arguments': args})
-            self.log('pulse', name, task_id, json.dumps(r.get('result', r.get('error', {})))[:120])
+        self.st['retried'] = {k: v for k, v in self.st['retried'].items() if now - v < 7 * 86400}

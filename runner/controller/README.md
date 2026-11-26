@@ -22,3 +22,10 @@ Ops: `nbci.py status` (read-only) · `once` · `drain` · `build-image` · `set-
 GitHub App permissions: org self-hosted runners (write), org variables (write); repo actions, checks,
 metadata (read), contents, pull requests, issues (write). Events: workflow_job, push, pull_request,
 check_suite, workflow_run. Measured: a reconcile pass costs 29 calls cold, 1 call warm (+28 free 304s).
+
+Isolation (v3.1): `NB_CI_MODE` per repo (repo variable overrides org). Auto repos route to `nb-auto` / `nb-deploy` /
+`nb-ctl`, labels no legacy runner has; legacy repos keep `runner-vm` / `nb-route` on today's runners, so a controller
+crash or GCP outage cannot touch them. The fallback Mini only gains/loses the auto labels. One train per repo+base:
+failing PRs are ejected, the rest carry on. Flaky infra (runner lost, preemption, network) is re-run once and never
+counted as a code failure. Pulse (`nb_pulse.py`): comment + `fixing` + one bug per task+check + failed test cases on
+failure; bug closed + `reverify` on the fix; queued and retried, never blocking CI; AutoQA hook = JSON spool files.

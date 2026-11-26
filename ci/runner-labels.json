@@ -1,5 +1,5 @@
 {
-  "_doc": "THE canonical runner config (nb-ci controller, scripts/ci/mini-runner-labels.sh, tests). CI runs only on GCP: one ephemeral VM per job, sized by class. A job goes to the first class whose labels contain all its runs-on labels (order matters). Mac Minis carry no CI labels; macmini-preview and -2 keep aqa-coord (AutoQA, not CI). The fallback runner gets fallback_labels only while GCP cannot start VMs.",
+  "_doc": "THE canonical runner config (nb-ci controller, scripts/ci/mini-runner-labels.sh, tests). Isolation: auto repos (NB_CI_MODE=auto, repo variable overrides org) route to nb-auto / nb-deploy / nb-ctl, labels no legacy runner carries; legacy repos keep runner-vm / nb-route on today's runners, so neither side can take the other's jobs. One ephemeral VM per job, first class whose labels contain all of the job's labels. The fallback runner gets fallback_labels ADDED (its own labels untouched) only while GCP cannot start VMs. Mac Mini CI labels (ci_labels) are removed only after every repo is auto.",
   "ci_labels": [
     "runner-vm",
     "nb-route",
@@ -18,9 +18,9 @@
         "self-hosted",
         "Linux",
         "X64",
-        "nb-route"
+        "nb-ctl"
       ],
-      "_doc": "route + notify jobs (seconds of curl/jq): served by the 2 runners on the always-on controller VM, no VM boot"
+      "_doc": "route + notify jobs of auto repos (runs-on nb-ctl): the 2 runners on the always-on controller VM, no VM boot"
     },
     {
       "name": "deploy",
@@ -50,13 +50,7 @@
         "self-hosted",
         "Linux",
         "X64",
-        "runner-vm",
-        "nb-pool",
-        "lane-burst",
-        "lane-dev",
-        "lane-prod",
-        "contabo",
-        "browsers"
+        "nb-auto"
       ]
     },
     {
@@ -71,14 +65,8 @@
         "self-hosted",
         "Linux",
         "X64",
-        "nb-size-l",
-        "runner-vm",
-        "nb-pool",
-        "lane-burst",
-        "lane-dev",
-        "lane-prod",
-        "contabo",
-        "browsers"
+        "nb-auto",
+        "nb-size-l"
       ]
     },
     {
@@ -93,8 +81,8 @@
         "self-hosted",
         "Linux",
         "X64",
-        "nb-size-s",
-        "runner-vm"
+        "nb-auto",
+        "nb-size-s"
       ]
     }
   ],
@@ -145,15 +133,11 @@
   "fallback": {
     "runner": "macmini-preview-3",
     "labels": [
-      "runner-vm",
-      "nb-route",
-      "nb-pool",
-      "lane-burst",
-      "lane-dev",
-      "lane-prod",
-      "contabo",
-      "browsers",
-      "nb-deploy"
+      "nb-auto",
+      "nb-deploy",
+      "nb-ctl",
+      "nb-size-l",
+      "nb-size-s"
     ]
   },
   "quota": {
