@@ -345,3 +345,31 @@ def service_accounts(c, project):
     if not k:
         return []
     return [{'email': 'nbci-cache-%s@%s.iam.gserviceaccount.com' % (k, project), 'scopes': [CACHE_SA[k]]}]
+
+
+LIVE = ('PROVISIONING', 'STAGING', 'RUNNING')
+
+
+def churn_verdict(vms, runners, queued_by_class, since, now, window_s=300, cap=8):
+    """Auto-stop verdict for the controller-side guard. Parallel gate/deploy VMs are normal: a class only
+    counts as churning when it has more idle (runner not busy) live VMs than queued jobs of that class, and has
+    had for more than one reconcile window. More than `cap` live nbci VMs trips at once. `since` is the guard's
+    own state {class: first-seen-over-supplied time}. Returns a reason or None."""
+    live = [v for v in vms if v['status'] in LIVE and not v.get('builder') and v.get('cls') != 'aqa']
+    if len(live) > cap:
+        return '%d live nbci VMs (cap %d)' % (len(live), cap)
+    idle = {}
+    for v in live:
+        r = runners.get(v['name'])
+        if not (r and r.get('busy')):
+            idle[v['cls']] = idle.get(v['cls'], 0) + 1
+    over = {c: n - queued_by_class.get(c, 0) for c, n in idle.items() if n > queued_by_class.get(c, 0)}
+    for c in list(since):
+        if c not in over:
+            del since[c]
+    for c in over:
+        since.setdefault(c, now)
+    for c, t in since.items():
+        if now - t > window_s:
+            return 'class %s: %d idle VM(s) beyond its %d queued job(s) for %ds' % (c, over[c], queued_by_class.get(c, 0), now - t)
+    return None

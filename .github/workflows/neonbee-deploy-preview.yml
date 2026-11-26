@@ -359,8 +359,35 @@ jobs:
             echo "App: https://$label.$PREVIEW_DOMAIN"
           fi
 
-  build-deploy:
+  # A failing commit never deploys: the preview waits for the PR Gate of the SAME sha. Gate absent after the grace
+  # window (a branch with no PR) = no gate exists to wait for, so the preview proceeds as it always did.
+  gate-ok:
     needs: [route, check]
+    if: needs.check.outputs.run == 'true'
+    runs-on: ${{ vars.NB_CI_MODE == 'auto' && fromJSON('["self-hosted","nb-ctl"]') || fromJSON('["self-hosted","nb-route"]') }}
+    timeout-minutes: 25
+    steps:
+      - name: Wait for the PR Gate of this sha
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN || github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          deadline=$((SECONDS + 1380)); seen=0
+          while [ $SECONDS -lt $deadline ]; do
+            row=$(gh api "repos/$REPO/commits/$SHA/check-runs?per_page=100" --jq '[.check_runs[]|select(.name=="gate / Gate" or .name=="Gate")]|sort_by(.id)|last|"\(.status) \(.conclusion // "")"' 2>/dev/null || true)
+            case "$row" in
+              "completed success") echo "PR Gate passed for $SHA"; exit 0;;
+              completed*) echo "::error::PR Gate for $SHA ended '$row' - the preview does not deploy a commit whose gate failed"; exit 1;;
+              ""|null*) seen=$((seen + 1)); [ $seen -ge 8 ] && { echo "::notice::no PR Gate for $SHA after 2 min - no PR to gate, deploying"; exit 0; };;
+              *) seen=0;;
+            esac
+            sleep 15
+          done
+          echo "::error::PR Gate for $SHA did not finish in 23 min"; exit 1
+
+  build-deploy:
+    needs: [route, check, gate-ok]
     if: needs.check.outputs.run == 'true'
     # The runner VM only: the Mac Minis are reserved for autonomous QA and the
     # Dev VM never builds (it only receives dist).

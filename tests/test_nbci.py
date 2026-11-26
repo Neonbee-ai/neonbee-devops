@@ -853,5 +853,82 @@ class StandardVm(unittest.TestCase):
             self.assertIn("'onHostMaintenance': 'TERMINATE' if c['spot'] else 'MIGRATE'", f.read())
 
 
+class Guard(unittest.TestCase):
+    def vm(self, n, cls='gate', status='RUNNING'):
+        return {'name': 'nbci-%s-%d' % (cls, n), 'cls': cls, 'status': status}
+
+    def test_given_parallel_vms_each_matching_a_queued_job_then_the_guard_stays_quiet(self):
+        vms = [self.vm(1), self.vm(2), self.vm(3, 'deploy')]
+        since = {}
+        for t in (0, 400, 800):
+            self.assertIsNone(L.churn_verdict(vms, {}, {'gate': 2, 'deploy': 1}, since, t))
+
+    def test_given_more_idle_vms_than_queued_jobs_for_more_than_a_window_then_it_trips(self):
+        vms = [self.vm(1), self.vm(2), self.vm(3)]
+        since = {}
+        self.assertIsNone(L.churn_verdict(vms, {}, {'gate': 1}, since, 0))
+        self.assertIsNone(L.churn_verdict(vms, {}, {'gate': 1}, since, 300))
+        self.assertIn('class gate', L.churn_verdict(vms, {}, {'gate': 1}, since, 301))
+
+    def test_given_the_excess_clears_within_the_window_then_the_timer_resets(self):
+        vms = [self.vm(1), self.vm(2)]
+        since = {}
+        L.churn_verdict(vms, {}, {'gate': 1}, since, 0)
+        self.assertIsNone(L.churn_verdict(vms, {}, {'gate': 2}, since, 200))
+        self.assertEqual(since, {})
+        self.assertIsNone(L.churn_verdict(vms, {}, {'gate': 1}, since, 400))
+
+    def test_given_busy_runners_then_their_vms_are_never_excess(self):
+        vms = [self.vm(1), self.vm(2), self.vm(3)]
+        busy = {v['name']: {'busy': True} for v in vms}
+        since = {}
+        self.assertIsNone(L.churn_verdict(vms, busy, {}, since, 0))
+        self.assertIsNone(L.churn_verdict(vms, busy, {}, since, 9999))
+
+    def test_given_more_than_eight_live_vms_then_it_trips_at_once(self):
+        vms = [self.vm(i) for i in range(9)]
+        busy = {v['name']: {'busy': True} for v in vms}
+        self.assertIn('9 live', L.churn_verdict(vms, busy, {}, {}, 0))
+        self.assertIsNone(L.churn_verdict(vms[:8], busy, {}, {}, 0))
+
+    def test_given_stopped_builder_and_aqa_vms_then_they_do_not_count(self):
+        vms = [self.vm(1, status='TERMINATED'), dict(self.vm(2), builder=True), self.vm(3, 'aqa')]
+        self.assertIsNone(L.churn_verdict(vms, {}, {}, {}, 99999))
+
+
+class GateBeforeAqa(unittest.TestCase):
+    def test_given_a_failed_cancelled_or_pending_gate_then_aqa_is_blocked(self):
+        import nbci_aqa as A
+        run = lambda s, c: [{'id': 1, 'name': 'gate / Gate', 'status': s, 'conclusion': c}]
+        self.assertEqual(A.gate_blocks(run('completed', 'failure')), 'gate failure')
+        self.assertEqual(A.gate_blocks(run('completed', 'cancelled')), 'gate cancelled')
+        self.assertEqual(A.gate_blocks(run('in_progress', None)), 'gate pending')
+        self.assertEqual(A.gate_blocks(run('completed', 'success')), '')
+
+    def test_given_no_gate_check_or_a_rerun_that_passed_then_aqa_is_allowed(self):
+        import nbci_aqa as A
+        self.assertEqual(A.gate_blocks([{'id': 1, 'name': 'build', 'status': 'completed', 'conclusion': 'failure'}]), '')
+        reruns = [{'id': 1, 'name': 'Gate', 'status': 'completed', 'conclusion': 'failure'},
+                  {'id': 2, 'name': 'Gate', 'status': 'completed', 'conclusion': 'success'}]
+        self.assertEqual(A.gate_blocks(reruns), '')
+
+    def test_given_the_preview_workflow_then_build_deploy_needs_gate_ok_which_waits_for_the_same_sha(self):
+        import yaml
+        with open(os.path.join(os.path.dirname(__file__), '..', '.github', 'workflows', 'neonbee-deploy-preview.yml')) as f:
+            j = yaml.safe_load(f)['jobs']
+        self.assertIn('gate-ok', j['build-deploy']['needs'])
+        self.assertIn('commits/$SHA/check-runs', j['gate-ok']['steps'][0]['run'])
+
+    def test_given_a_restart_then_the_first_pass_polls_every_queued_job(self):
+        with open(os.path.join(os.path.dirname(__file__), '..', 'runner', 'controller', 'nbci.py')) as f:
+            self.assertIn("EVENTS.get('need_full_poll', True)", f.read())
+
+    def test_given_the_guard_unit_then_it_runs_on_the_controller_as_a_restarting_service(self):
+        with open(os.path.join(os.path.dirname(__file__), '..', 'runner', 'controller', 'nbci-guard.service')) as f:
+            b = f.read()
+        self.assertIn('nbci_guard.py', b)
+        self.assertIn('Restart=always', b)
+
+
 if __name__ == '__main__':
     unittest.main()

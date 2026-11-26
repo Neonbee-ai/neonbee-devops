@@ -351,6 +351,14 @@ def aqa_trigger(gh, gcp, st, now, today, failures):
             log('aqa skip', key, why)
             if why == 'daily cap': alert_once(st, now, 'AQA daily cap reached (%s)' % cfg.get('daily_cap', 8))
             continue
+        try:
+            why_gate = A.gate_blocks(gh('repos/%s/%s/commits/%s/check-runs?per_page=100' % (ORG, repo, run['head_sha']))['check_runs'])
+        except (RuntimeError, KeyError) as e:
+            why_gate = ''; log('aqa gate lookup failed', key, str(e)[:100])
+        if why_gate:
+            log('aqa skip', key, why_gate)
+            if why_gate != 'gate pending': A.record(ast, key, today, now)      # a failed gate never gets AQA for this sha
+            continue
         shas, msgs = [run['head_sha']], []
         try:
             prev = [r for r in gh('repos/%s/%s/actions/workflows/%s/runs?branch=%s&status=success&per_page=5' % (
@@ -417,8 +425,9 @@ def tick(gh, gcp, st, mode='scale'):
     alert = lambda t: teams(t, DRY)  # noqa: E731
     ci_mode = org_var(gh, 'NB_CI_MODE') or 'legacy'        # org default; repo variables override it
     rs = runners(gh); rby = {r['name']: r for r in rs}
-    webhook_live = now - EVENTS['last_event'] < 900
-    if every(st, 'reconcile', RECONCILE_S if webhook_live else 60, now) or mode != 'scale':
+    webhook_live = now - EVENTS['last_event'] < 900 and not EVENTS.get('need_full_poll', True)
+    if every(st, 'reconcile', RECONCILE_S if webhook_live else 60, now) or mode != 'scale' or EVENTS.get('need_full_poll', True):
+        EVENTS['need_full_poll'] = False   # first pass after a start: poll every queued job (webhook events sent while down are lost)
         polled = queued_jobs(gh)
         with LOCK:
             EVENTS['jobs'] = polled

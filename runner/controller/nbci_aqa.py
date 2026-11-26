@@ -113,3 +113,15 @@ def vm_body(cfg, name, zone, items, stem, max_run_s):
             'networkInterfaces': [{'network': 'global/networks/default', 'accessConfigs': [{'type': 'ONE_TO_ONE_NAT', 'name': 'External NAT'}]}],
             'serviceAccounts': [{'email': sa, 'scopes': cfg.get('scopes', ['https://www.googleapis.com/auth/cloud-platform'])}] if sa else [],
             'metadata': {'items': meta}}
+
+
+def gate_blocks(check_runs):
+    """Reason AQA must not run for a sha, from its check runs: the newest 'Gate' (reusable 'gate / Gate' or 'Gate')
+    failed, was cancelled, or has not finished. '' = no Gate exists (nothing to wait for) or it passed."""
+    gates = sorted([c for c in check_runs if c.get('name') in ('gate / Gate', 'Gate')], key=lambda c: c.get('id', 0))
+    if not gates:
+        return ''
+    g = gates[-1]
+    if g.get('status') != 'completed':
+        return 'gate pending'
+    return '' if g.get('conclusion') == 'success' else 'gate %s' % g.get('conclusion')
