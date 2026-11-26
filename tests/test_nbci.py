@@ -710,5 +710,41 @@ class Speed(unittest.TestCase):
         self.assertIn('/run/nb-gcs-token', b)
 
 
+class GateSpeed(unittest.TestCase):
+    WF = os.path.join(os.path.dirname(__file__), '..', '.github', 'workflows')
+
+    def load(self, name):
+        import yaml
+        with open(os.path.join(self.WF, name)) as f:
+            return yaml.safe_load(f)
+
+    def test_given_the_pr_gate_then_unit_and_security_are_parallel_jobs_and_gate_needs_both(self):
+        j = self.load('neonbee-pr-gate.yml')['jobs']
+        self.assertEqual(j['unit']['needs'], ['route'])
+        self.assertEqual(j['security']['needs'], ['route'])
+        self.assertEqual(sorted(j['gate']['needs']), ['route', 'security', 'unit'])
+        self.assertEqual(j['gate']['name'], 'Gate')          # the required check name is unchanged
+        self.assertEqual(j['gate']['if'], 'always()')        # a failed or skipped job must fail the gate, not skip it
+
+    def test_given_the_gate_aggregator_then_it_fails_unless_both_results_are_success(self):
+        run = self.load('neonbee-pr-gate.yml')['jobs']['gate']['steps'][0]['run']
+        self.assertIn('"$UNIT" = success', run)
+        self.assertIn('"$SECURITY" = success', run)
+
+    def test_given_a_pr_then_gitleaks_scans_only_the_pr_commits_and_pushes_scan_everything(self):
+        with open(os.path.join(self.WF, 'neonbee-pr-gate.yml')) as f:
+            b = f.read()
+        self.assertIn('GL_SCOPE=(--log-opts "$NB_PR_BASE..HEAD")', b)
+        self.assertIn('"${GL_SCOPE[@]}"', b)
+
+    def test_given_the_npm_cache_then_pr_jobs_only_restore_and_only_deploy_saves_on_develop_and_main(self):
+        with open(os.path.join(self.WF, 'neonbee-pr-gate.yml')) as f:
+            self.assertNotIn('Save npm cache', f.read())
+        with open(os.path.join(self.WF, 'neonbee-deploy-vite-mfe.yml')) as f:
+            b = f.read()
+        self.assertIn("github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main'", b)
+        self.assertIn('NB_NPM_CACHE_HIT != \'1\'', b)
+
+
 if __name__ == '__main__':
     unittest.main()

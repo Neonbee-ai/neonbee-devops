@@ -323,9 +323,10 @@ jobs:
           echo "runs_on=$lane" >> "$GITHUB_OUTPUT"
           echo "lane: $lane ($why)" >> "$GITHUB_STEP_SUMMARY"
 
-  gate:
+  # UT: install, typecheck, unit tests, lint. Runs in parallel with `security`; `gate` needs both.
+  unit:
     needs: [route]
-    name: Gate
+    name: Unit tests
     # The runner VM only: the Mac Minis are reserved for autonomous QA and the
     # Dev VM never builds.
     runs-on: ${{ fromJSON(needs.route.outputs.runs_on) }}
@@ -355,6 +356,24 @@ jobs:
           npm config set //npm.pkg.github.com/:_authToken "${PAT_TOKEN}" --global
         env:
           PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
+      - name: Restore npm cache (GCS)
+        if: vars.NB_NPM_CACHE_BUCKET != '' && env.NB_NPM_CACHE_OBJ == ''
+        continue-on-error: true
+        env:
+          BUCKET: ${{ vars.NB_NPM_CACHE_BUCKET }}
+        run: |
+          # Private bucket, us-central1, 14-day lifecycle. The token file is written at boot by the runner VM
+          # (read-only service account on gate VMs, read-write on deploy VMs); no token = no cache, never an error.
+          [ -s /run/nb-gcs-token ] && [ -f package-lock.json ] || { echo "npm cache: no token or lockfile - skipped"; exit 0; }
+          key="$(sha256sum package-lock.json | cut -c1-32)-node$(node -p 'process.versions.node.split(".")[0]')"
+          obj="npm%2F${GITHUB_REPOSITORY//\//__}%2F$key.tgz"
+          echo "NB_NPM_CACHE_OBJ=$obj" >> "$GITHUB_ENV"
+          mkdir -p "$NPM_CONFIG_CACHE"
+          if curl -sfL -H "Authorization: Bearer $(cat /run/nb-gcs-token)" "https://storage.googleapis.com/storage/v1/b/$BUCKET/o/$obj?alt=media" | tar xz -C "$NPM_CONFIG_CACHE"; then
+            echo "NB_NPM_CACHE_HIT=1" >> "$GITHUB_ENV"; echo "npm cache: hit $key"
+          else
+            rm -rf "$NPM_CONFIG_CACHE"; mkdir -p "$NPM_CONFIG_CACHE"; echo "npm cache: miss $key"
+          fi
       - name: Install dependencies
         run: |
           # Warm slots keep node_modules between runs — purge before installing.
@@ -592,6 +611,225 @@ jobs:
       - name: Lint
         run: npm run lint --if-present
 
+
+  # Security: audit, licenses, secrets, SAST. Runs in parallel with `unit` (its own VM); `gate` needs both.
+  security:
+    needs: [route]
+    name: Security
+    # The runner VM only: the Mac Minis are reserved for autonomous QA and the
+    # Dev VM never builds.
+    runs-on: ${{ fromJSON(needs.route.outputs.runs_on) }}
+    # shell-fe's unit suite (~610 files) needs ~26 min; 20 cancelled it mid-run.
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4.3.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4.4.0
+        with:
+          node-version: ${{ inputs.node_version }}
+      - name: Isolate npm cache per job
+        shell: bash
+        run: |
+          echo "NPM_CONFIG_CACHE=$RUNNER_TEMP/npm-cache" >> "$GITHUB_ENV"
+          # Job-wide V8 heap ceiling (build, tsc, lint) so one node process cannot
+          # take the host; a --max-old-space-size the caller already set wins.
+          : # heap cap comes from workflow-level env NODE_OPTIONS
+
+      - name: Configure private package registry
+        # Idempotent (npm config set, not an append) since this runs on a
+        # persistent self-hosted runner shared across jobs. Harmless when a
+        # repo has no @so360 scoped dependency.
+        run: |
+          npm config set @so360:registry https://npm.pkg.github.com --global
+          npm config set //npm.pkg.github.com/:_authToken "${PAT_TOKEN}" --global
+        env:
+          PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
+      - name: Restore npm cache (GCS)
+        if: vars.NB_NPM_CACHE_BUCKET != '' && env.NB_NPM_CACHE_OBJ == ''
+        continue-on-error: true
+        env:
+          BUCKET: ${{ vars.NB_NPM_CACHE_BUCKET }}
+        run: |
+          # Private bucket, us-central1, 14-day lifecycle. The token file is written at boot by the runner VM
+          # (read-only service account on gate VMs, read-write on deploy VMs); no token = no cache, never an error.
+          [ -s /run/nb-gcs-token ] && [ -f package-lock.json ] || { echo "npm cache: no token or lockfile - skipped"; exit 0; }
+          key="$(sha256sum package-lock.json | cut -c1-32)-node$(node -p 'process.versions.node.split(".")[0]')"
+          obj="npm%2F${GITHUB_REPOSITORY//\//__}%2F$key.tgz"
+          echo "NB_NPM_CACHE_OBJ=$obj" >> "$GITHUB_ENV"
+          mkdir -p "$NPM_CONFIG_CACHE"
+          if curl -sfL -H "Authorization: Bearer $(cat /run/nb-gcs-token)" "https://storage.googleapis.com/storage/v1/b/$BUCKET/o/$obj?alt=media" | tar xz -C "$NPM_CONFIG_CACHE"; then
+            echo "NB_NPM_CACHE_HIT=1" >> "$GITHUB_ENV"; echo "npm cache: hit $key"
+          else
+            rm -rf "$NPM_CONFIG_CACHE"; mkdir -p "$NPM_CONFIG_CACHE"; echo "npm cache: miss $key"
+          fi
+      - name: Install dependencies
+        run: |
+          # Warm slots keep node_modules between runs — purge before installing.
+          rm -rf node_modules
+          # node_modules reuse: a tree keyed on sha256(package-lock + package.json +
+          # node/npm major + install flags + omit/include env) is stored per caller repo
+          # in a host-local store shared by every runner slot. Writes go to a temp file
+          # + atomic mv, so a reader only ever sees a complete archive; a restore is
+          # extracted to a staging dir, moved in only when tar exits 0, and must pass the
+          # same binary check as a fresh install — otherwise it is discarded and npm ci
+          # runs exactly as before. Repos with root install lifecycle scripts never use it.
+          nb_nm_dir="${NB_NM_CACHE_DIR:-$HOME/.cache/neonbee-nm-cache}/${GITHUB_REPOSITORY//\//__}"
+          nb_nm_bins_ok() {
+            local b
+            [ -f node_modules/.package-lock.json ] || return 1
+            for b in $(node -e "const s=require('./package.json').scripts||{};const o=new Set();for(const k of ['test','build']){const m=String(s[k]||'').match(/\b(vitest|jest|vite|next|nest|tsc)\b/);if(m)o.add(m[1])}console.log([...o].join(' '))" 2>/dev/null); do
+              [ -x "node_modules/.bin/$b" ] || return 1
+              "node_modules/.bin/$b" --version >/dev/null 2>&1 || return 1
+            done
+            return 0
+          }
+          nb_nm_key() {
+            [ -f package-lock.json ] || return 1
+            node -e "const s=require('./package.json').scripts||{};process.exit(['preinstall','install','postinstall','prepare'].some(k=>s[k])?1:0)" 2>/dev/null || return 1
+            NB_NM_FLAGS="$1" NB_NM_NPM="$(npm -v 2>/dev/null | cut -d. -f1)" node -e "const c=require('crypto'),fs=require('fs');const h=c.createHash('sha256');for(const f of ['package-lock.json','package.json','.npmrc'])if(fs.existsSync(f))h.update(f+'\0').update(fs.readFileSync(f));const env=Object.keys(process.env).filter(k=>/^(npm_config_(omit|include|production|only|legacy_peer_deps|ignore_scripts)|NODE_ENV)$/i.test(k)).sort().map(k=>k.toLowerCase()+'='+process.env[k]);h.update(['nm-v1',process.env.NB_NM_FLAGS,process.env.NB_NM_NPM,process.versions.node.split('.')[0],process.platform,process.arch,process.cwd().slice((process.env.GITHUB_WORKSPACE||'').length),...env].join('|'));console.log(h.digest('hex').slice(0,40))"
+          }
+          nb_nm_restore() {
+            local f stage=".nb-nm-restore.$$"
+            for f in "$nb_nm_dir/$1.tar.zst" "$nb_nm_dir/$1.tar.gz"; do
+              [ -f "$f" ] || continue
+              case "$f" in *.zst) command -v zstd >/dev/null 2>&1 || continue ;; esac
+              rm -rf "$stage" node_modules && mkdir -p "$stage" || return 1
+              if ( set -o pipefail; case "$f" in *.zst) zstd -dcq "$f" ;; *) gzip -dc "$f" ;; esac | tar -xf - -C "$stage" ) && [ -d "$stage/node_modules" ]; then
+                mv "$stage/node_modules" node_modules && rm -rf "$stage"
+                if nb_nm_bins_ok; then
+                  touch "$f" 2>/dev/null || true
+                  echo "node_modules restored from runner cache (${f##*/})"
+                  return 0
+                fi
+                echo "::warning::cached node_modules failed the binary check — discarding it and running npm ci"
+              else
+                echo "::warning::cached node_modules archive unreadable — discarding it and running npm ci"
+              fi
+              rm -f "$f"; rm -rf "$stage" node_modules
+            done
+            return 1
+          }
+          nb_nm_save() {
+            local ext tmp used root total old
+            nb_nm_bins_ok || { echo "node_modules cache: fresh tree failed the binary check — not saving"; return 0; }
+            used=$(df -P "$HOME" 2>/dev/null | awk 'NR==2{gsub("%","",$5);print $5}')
+            [ "${used:-100}" -lt "${NB_NM_MAX_DISK_PCT:-85}" ] || { echo "::notice::node_modules cache: disk ${used:-?}% used — not saving"; return 0; }
+            mkdir -p "$nb_nm_dir" || return 0
+            if command -v zstd >/dev/null 2>&1; then ext=zst; else ext=gz; fi
+            tmp="$nb_nm_dir/.$1.$$.$RANDOM.tmp"
+            if ( set -o pipefail; tar -cf - node_modules | if [ "$ext" = zst ]; then zstd -q -3 -T4 -c; else gzip -1 -c; fi > "$tmp" ); then
+              mv -f "$tmp" "$nb_nm_dir/$1.tar.$ext" && echo "node_modules saved to runner cache ($1.tar.$ext)"
+            else
+              rm -f "$tmp"; echo "::warning::node_modules cache save failed — ignored"
+            fi
+            # Bound the store: stale temps, >7 days, last 3 keys per repo, 10 GB total.
+            find "$nb_nm_dir" -maxdepth 1 -name '.*.tmp' -mmin +120 -delete 2>/dev/null || true
+            find "$nb_nm_dir" -maxdepth 1 -name '*.tar.*' -mtime +7 -delete 2>/dev/null || true
+            ls -1t "$nb_nm_dir"/*.tar.* 2>/dev/null | tail -n +4 | while IFS= read -r old; do rm -f "$old"; done
+            root="${nb_nm_dir%/*}"
+            total=$(du -sk "$root" 2>/dev/null | cut -f1)
+            while [ "${total:-0}" -gt 10485760 ]; do
+              old=$(ls -1tr "$root"/*/*.tar.* 2>/dev/null | head -1)
+              [ -n "$old" ] || break
+              rm -f "$old"; total=$(du -sk "$root" 2>/dev/null | cut -f1)
+            done
+            return 0
+          }
+          nb_nm_install() {
+            local key
+            key=$(nb_nm_key "$1") || key=""
+            if [ -n "$key" ] && nb_nm_restore "$key"; then return 0; fi
+            npm_ci_retry || return 1
+            if [ -n "$key" ]; then nb_nm_save "$key"; fi
+            return 0
+          }
+          npm_ci_retry() {
+            # The registry drops connections mid-tarball on this fleet:
+            # ECONNRESET killed core integration-tests, crm contract-tests and
+            # crm build-deploy on 2026-08-22 alone. NPM_CONFIG_FETCH_RETRIES
+            # only covers fetches npm itself classifies as retryable, and a
+            # socket reset during a tarball read is not always one of them.
+            # Purge inside the loop so every attempt installs from clean —
+            # warm slots keep node_modules between runs.
+            local attempt rc
+            for attempt in 1 2 3; do
+              rm -rf node_modules
+              npm ci --legacy-peer-deps --prefer-offline --no-audit --no-fund && return 0
+              rc=$?
+              if [ $attempt -lt 3 ]; then
+                echo "::warning::npm ci failed (exit $rc) on attempt $attempt — retrying after cache clean"
+                npm cache clean --force >/dev/null 2>&1 || true
+                sleep $((attempt * 15))
+              fi
+            done
+            echo "::error::npm ci failed on every attempt — dependencies are NOT installed. Not continuing with a partial tree."
+            return 1
+          }
+          nb_nm_install "--legacy-peer-deps"
+          # `npm ci` can exit 0 on a corrupted npm cache and still leave the
+          # test runner unusable: a missing binary exits 127, a half-installed
+          # one exits 1, and both read as "tests failed". Execute it to be sure.
+          TEST_BIN=$(node -e "const s=require('./package.json').scripts?.test||''; console.log(/vitest/.test(s)?'vitest':/jest/.test(s)?'jest':'')" 2>/dev/null || echo "")
+          runner_ok() {
+            [ -z "$TEST_BIN" ] && return 0
+            [ -x "node_modules/.bin/$TEST_BIN" ] || return 1
+            "node_modules/.bin/$TEST_BIN" --version >/dev/null 2>&1
+          }
+          if ! runner_ok; then
+            echo "::warning::$TEST_BIN cannot run after npm ci — purging npm cache and reinstalling clean"
+            npm cache clean --force
+            rm -rf node_modules
+            npm_ci_retry() {
+            # The registry drops connections mid-tarball on this fleet:
+            # ECONNRESET killed core integration-tests, crm contract-tests and
+            # crm build-deploy on 2026-08-22 alone. NPM_CONFIG_FETCH_RETRIES
+            # only covers fetches npm itself classifies as retryable, and a
+            # socket reset during a tarball read is not always one of them.
+            # Purge inside the loop so every attempt installs from clean —
+            # warm slots keep node_modules between runs.
+            local attempt rc
+            for attempt in 1 2 3; do
+              rm -rf node_modules
+              npm ci --legacy-peer-deps --prefer-offline --no-audit --no-fund && return 0
+              rc=$?
+              if [ $attempt -lt 3 ]; then
+                echo "::warning::npm ci failed (exit $rc) on attempt $attempt — retrying after cache clean"
+                npm cache clean --force >/dev/null 2>&1 || true
+                sleep $((attempt * 15))
+              fi
+            done
+            echo "::error::npm ci failed on every attempt — dependencies are NOT installed. Not continuing with a partial tree."
+            return 1
+          }
+          npm_ci_retry
+          fi
+          if ! runner_ok; then
+            echo "::error::$TEST_BIN still cannot run after a clean reinstall — this runner slot cannot run the gate"
+            exit 1
+          fi
+
+      - name: Inject ci-stubs for MFE repos
+        run: |
+          if [ -d ".ci-stubs/@so360" ]; then
+            mkdir -p node_modules/@so360
+            rm -rf node_modules/@so360/* && cp -r .ci-stubs/@so360/* node_modules/@so360/
+            echo "Injected @so360 ci-stubs for test phase"
+          fi
+
+      # Why this tier exists.
+      #
+      # jest and vitest TRANSPILE without type checking, so a type-only error
+      # passes every test and surfaces only in the deploy workflow's build
+      # step — after the merge. Three reached a deploy in one change wave:
+      # TS1117 (duplicate object key), TS2554 (wrong argument count) and
+      # TS1135 (malformed argument list). Each was invisible here and red
+      # there, which is the exact asymmetry test_when_a_pull_request_is_gated_
+      # then_it_still_runs_every_tier exists to prevent: a PR gate weaker than
+      # the deploy gate relocates the problem instead of solving it.
+      #
+      # This emits nothing, so it does not violate the no-build charter — it is
+      # verification, like the tests above it.
       - name: Security audit
         env:
           NB_EVENT: ${{ github.event_name }}
@@ -633,8 +871,21 @@ jobs:
           --excludePrivatePackages
 
       - name: Scan for secrets
+        env:
+          NB_EVENT: ${{ github.event_name }}
+          NB_PR_BASE: ${{ github.event.pull_request.base.sha }}
         run: |
           rm -rf dist/ coverage/ dist-ssr/
+          # PR events scan only the commits the PR adds (base..HEAD); pushes to develop/main and any
+          # PR whose base is unavailable keep the full-history scan.
+          GL_SCOPE=()
+          if { [ "$NB_EVENT" = pull_request ] || [ "$NB_EVENT" = pull_request_target ]; } && [ -n "$NB_PR_BASE" ] \
+             && git cat-file -e "$NB_PR_BASE^{commit}" 2>/dev/null; then
+            GL_SCOPE=(--log-opts "$NB_PR_BASE..HEAD")
+            echo "gitleaks: diff scan $NB_PR_BASE..HEAD"
+          else
+            echo "gitleaks: full-history scan"
+          fi
           GITLEAKS_VERSION="8.30.1"
           # gitleaks loads the full history into memory. With several repos
           # gating at once on a 3-slot Mac Mini it gets OOM-killed (SIGKILL,
@@ -647,7 +898,7 @@ jobs:
             local bin="$1" attempt=1 rc=0
             while [ $attempt -le 3 ]; do
               rc=0
-              "$bin" detect --source . --verbose || rc=$?
+              "$bin" detect --source . --verbose "${GL_SCOPE[@]}" || rc=$?
               [ $rc -eq 0 ] && return 0
               if [ $rc -eq 137 ] || [ $rc -eq 139 ]; then
                 echo "::warning::gitleaks killed (exit $rc) on attempt $attempt — runner memory pressure, retrying"
@@ -740,6 +991,23 @@ jobs:
           echo "::warning::SAST findings present — report-only, not failing the gate"
           exit 0
 
+  # Aggregator: keeps the required check name "Gate" stable for branch protection and downstream needs.
+  # Both parallel jobs must pass (UT || security); a skipped or cancelled one fails the gate.
+  gate:
+    needs: [route, unit, security]
+    name: Gate
+    if: always()
+    runs-on: ${{ vars.NB_CI_MODE == 'auto' && fromJSON('["self-hosted","nb-ctl"]') || fromJSON('["self-hosted","nb-route"]') }}
+    timeout-minutes: 5
+    steps:
+      - name: Unit tests and security both passed
+        env:
+          UNIT: ${{ needs.unit.result }}
+          SECURITY: ${{ needs.security.result }}
+        run: |
+          echo "unit=$UNIT security=$SECURITY"
+          [ "$UNIT" = success ] && [ "$SECURITY" = success ] || { echo "::error::UT and security must both pass (unit=$UNIT security=$SECURITY)"; exit 1; }
+
   contract-tests:
     name: API Contract Tests
     if: inputs.deploy_type == 'backend' && needs.route.outputs.prior_pass != 'true'
@@ -767,6 +1035,24 @@ jobs:
           npm config set //npm.pkg.github.com/:_authToken "${PAT_TOKEN}" --global
         env:
           PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
+      - name: Restore npm cache (GCS)
+        if: vars.NB_NPM_CACHE_BUCKET != '' && env.NB_NPM_CACHE_OBJ == ''
+        continue-on-error: true
+        env:
+          BUCKET: ${{ vars.NB_NPM_CACHE_BUCKET }}
+        run: |
+          # Private bucket, us-central1, 14-day lifecycle. The token file is written at boot by the runner VM
+          # (read-only service account on gate VMs, read-write on deploy VMs); no token = no cache, never an error.
+          [ -s /run/nb-gcs-token ] && [ -f package-lock.json ] || { echo "npm cache: no token or lockfile - skipped"; exit 0; }
+          key="$(sha256sum package-lock.json | cut -c1-32)-node$(node -p 'process.versions.node.split(".")[0]')"
+          obj="npm%2F${GITHUB_REPOSITORY//\//__}%2F$key.tgz"
+          echo "NB_NPM_CACHE_OBJ=$obj" >> "$GITHUB_ENV"
+          mkdir -p "$NPM_CONFIG_CACHE"
+          if curl -sfL -H "Authorization: Bearer $(cat /run/nb-gcs-token)" "https://storage.googleapis.com/storage/v1/b/$BUCKET/o/$obj?alt=media" | tar xz -C "$NPM_CONFIG_CACHE"; then
+            echo "NB_NPM_CACHE_HIT=1" >> "$GITHUB_ENV"; echo "npm cache: hit $key"
+          else
+            rm -rf "$NPM_CONFIG_CACHE"; mkdir -p "$NPM_CONFIG_CACHE"; echo "npm cache: miss $key"
+          fi
       - name: Install dependencies
         run: |
           rm -rf node_modules
@@ -948,6 +1234,24 @@ jobs:
           npm config set //npm.pkg.github.com/:_authToken "${PAT_TOKEN}" --global
         env:
           PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
+      - name: Restore npm cache (GCS)
+        if: vars.NB_NPM_CACHE_BUCKET != '' && env.NB_NPM_CACHE_OBJ == ''
+        continue-on-error: true
+        env:
+          BUCKET: ${{ vars.NB_NPM_CACHE_BUCKET }}
+        run: |
+          # Private bucket, us-central1, 14-day lifecycle. The token file is written at boot by the runner VM
+          # (read-only service account on gate VMs, read-write on deploy VMs); no token = no cache, never an error.
+          [ -s /run/nb-gcs-token ] && [ -f package-lock.json ] || { echo "npm cache: no token or lockfile - skipped"; exit 0; }
+          key="$(sha256sum package-lock.json | cut -c1-32)-node$(node -p 'process.versions.node.split(".")[0]')"
+          obj="npm%2F${GITHUB_REPOSITORY//\//__}%2F$key.tgz"
+          echo "NB_NPM_CACHE_OBJ=$obj" >> "$GITHUB_ENV"
+          mkdir -p "$NPM_CONFIG_CACHE"
+          if curl -sfL -H "Authorization: Bearer $(cat /run/nb-gcs-token)" "https://storage.googleapis.com/storage/v1/b/$BUCKET/o/$obj?alt=media" | tar xz -C "$NPM_CONFIG_CACHE"; then
+            echo "NB_NPM_CACHE_HIT=1" >> "$GITHUB_ENV"; echo "npm cache: hit $key"
+          else
+            rm -rf "$NPM_CONFIG_CACHE"; mkdir -p "$NPM_CONFIG_CACHE"; echo "npm cache: miss $key"
+          fi
       - name: Install dependencies
         run: |
           rm -rf node_modules

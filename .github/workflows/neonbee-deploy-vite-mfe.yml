@@ -558,6 +558,24 @@ jobs:
             ${{ secrets.DIGITALOCEAN_SSH_KEY }}
 
       # Build on Contabo runner — dist/ generated here, never on target VM
+      - name: Restore npm cache (GCS)
+        if: vars.NB_NPM_CACHE_BUCKET != '' && env.NB_NPM_CACHE_OBJ == ''
+        continue-on-error: true
+        env:
+          BUCKET: ${{ vars.NB_NPM_CACHE_BUCKET }}
+        run: |
+          # Private bucket, us-central1, 14-day lifecycle. The token file is written at boot by the runner VM
+          # (read-only service account on gate VMs, read-write on deploy VMs); no token = no cache, never an error.
+          [ -s /run/nb-gcs-token ] && [ -f package-lock.json ] || { echo "npm cache: no token or lockfile - skipped"; exit 0; }
+          key="$(sha256sum package-lock.json | cut -c1-32)-node$(node -p 'process.versions.node.split(".")[0]')"
+          obj="npm%2F${GITHUB_REPOSITORY//\//__}%2F$key.tgz"
+          echo "NB_NPM_CACHE_OBJ=$obj" >> "$GITHUB_ENV"
+          mkdir -p "$NPM_CONFIG_CACHE"
+          if curl -sfL -H "Authorization: Bearer $(cat /run/nb-gcs-token)" "https://storage.googleapis.com/storage/v1/b/$BUCKET/o/$obj?alt=media" | tar xz -C "$NPM_CONFIG_CACHE"; then
+            echo "NB_NPM_CACHE_HIT=1" >> "$GITHUB_ENV"; echo "npm cache: hit $key"
+          else
+            rm -rf "$NPM_CONFIG_CACHE"; mkdir -p "$NPM_CONFIG_CACHE"; echo "npm cache: miss $key"
+          fi
       - name: Install + build (dev)
         if: github.ref == 'refs/heads/develop'
         run: |
@@ -810,6 +828,24 @@ jobs:
           cp .env .env.production.local
           npm run build
 
+      - name: Restore npm cache (GCS)
+        if: vars.NB_NPM_CACHE_BUCKET != '' && env.NB_NPM_CACHE_OBJ == ''
+        continue-on-error: true
+        env:
+          BUCKET: ${{ vars.NB_NPM_CACHE_BUCKET }}
+        run: |
+          # Private bucket, us-central1, 14-day lifecycle. The token file is written at boot by the runner VM
+          # (read-only service account on gate VMs, read-write on deploy VMs); no token = no cache, never an error.
+          [ -s /run/nb-gcs-token ] && [ -f package-lock.json ] || { echo "npm cache: no token or lockfile - skipped"; exit 0; }
+          key="$(sha256sum package-lock.json | cut -c1-32)-node$(node -p 'process.versions.node.split(".")[0]')"
+          obj="npm%2F${GITHUB_REPOSITORY//\//__}%2F$key.tgz"
+          echo "NB_NPM_CACHE_OBJ=$obj" >> "$GITHUB_ENV"
+          mkdir -p "$NPM_CONFIG_CACHE"
+          if curl -sfL -H "Authorization: Bearer $(cat /run/nb-gcs-token)" "https://storage.googleapis.com/storage/v1/b/$BUCKET/o/$obj?alt=media" | tar xz -C "$NPM_CONFIG_CACHE"; then
+            echo "NB_NPM_CACHE_HIT=1" >> "$GITHUB_ENV"; echo "npm cache: hit $key"
+          else
+            rm -rf "$NPM_CONFIG_CACHE"; mkdir -p "$NPM_CONFIG_CACHE"; echo "npm cache: miss $key"
+          fi
       - name: Install + build (staging)
         if: github.ref == 'refs/heads/qa'
         run: |
@@ -1044,6 +1080,18 @@ jobs:
           npm run build
 
       # ── Dev ──────────────────────────────────────────────────────────────
+      - name: Save npm cache (GCS, develop/main, on miss)
+        if: always() && vars.NB_NPM_CACHE_BUCKET != '' && env.NB_NPM_CACHE_OBJ != '' && env.NB_NPM_CACHE_HIT != '1' && (github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main')
+        continue-on-error: true
+        env:
+          BUCKET: ${{ vars.NB_NPM_CACHE_BUCKET }}
+        run: |
+          # Only deploy VMs hold a read-write token; on a gate VM the upload is refused (403) and ignored.
+          [ -s /run/nb-gcs-token ] && [ -n "$(ls -A "$NPM_CONFIG_CACHE" 2>/dev/null)" ] || exit 0
+          tar czf - -C "$NPM_CONFIG_CACHE" . | curl -sf -X POST -H "Authorization: Bearer $(cat /run/nb-gcs-token)" \
+            -H 'Content-Type: application/gzip' --data-binary @- \
+            "https://storage.googleapis.com/upload/storage/v1/b/$BUCKET/o?uploadType=media&name=$NB_NPM_CACHE_OBJ" >/dev/null \
+            && echo "npm cache: saved" || echo "npm cache: save refused or failed (ignored)"
       - name: Deploy to Dev
         if: github.ref == 'refs/heads/develop'
         env:
