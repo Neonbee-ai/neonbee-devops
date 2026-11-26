@@ -1,0 +1,108 @@
+#!/bin/bash
+# nb-ci controller VM boot (e2-micro, ubuntu-2404, startup-script; safe to re-run on every boot).
+# Instance metadata: nbci-ref (git ref of neonbee-devops), nbci-app-id, nbci-installation-id,
+# nbci-dry-run (1|0), nbci-train-repos. Secrets come from Secret Manager via the attached SA.
+set -uo pipefail
+MD=http://metadata.google.internal/computeMetadata/v1
+md() { curl -sf -m 5 -H 'Metadata-Flavor: Google' "$MD/$1"; }
+attr() { md "instance/attributes/$1"; }
+P=$(md project/project-id); REF=$(attr nbci-ref || echo main)
+APP=$(attr nbci-app-id || true); INST=$(attr nbci-installation-id || true)
+export DEBIAN_FRONTEND=noninteractive
+
+if [ ! -f /var/lib/nbci/.base ]; then
+  fallocate -l 1G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile && echo '/swapfile none swap sw 0 0' >> /etc/fstab
+  apt-get update -q && apt-get install -yq git jq curl openssl python3 iptables debian-keyring debian-archive-keyring apt-transport-https
+  curl -1sLf https://dl.cloudsmith.io/public/caddy/stable/gpg.key | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+  curl -1sLf https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt > /etc/apt/sources.list.d/caddy-stable.list
+  apt-get update -q && apt-get install -yq caddy
+  id nbci >/dev/null 2>&1 || useradd -r -m -s /usr/sbin/nologin nbci
+  id ghr >/dev/null 2>&1 || useradd -m -s /bin/bash ghr
+  mkdir -p /var/lib/nbci && touch /var/lib/nbci/.base
+fi
+
+# GitHub App installation token (JWT signed by openssl; key only in a 0600 tmpfs file for a moment)
+gh_token() {
+  local tok key jwt h b s
+  tok=$(md instance/service-accounts/default/token | jq -r .access_token)
+  key=$(mktemp -p /run); chmod 600 "$key"
+  curl -sf -H "Authorization: Bearer $tok" "https://secretmanager.googleapis.com/v1/projects/$P/secrets/nbci-github-app-key/versions/latest:access" |
+    jq -r .payload.data | base64 -d > "$key"
+  b64u() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
+  h=$(printf '{"alg":"RS256","typ":"JWT"}' | b64u); b=$(printf '{"iat":%d,"exp":%d,"iss":"%s"}' $(( $(date +%s) - 60 )) $(( $(date +%s) + 540 )) "$APP" | b64u)
+  s=$(printf '%s.%s' "$h" "$b" | openssl dgst -sha256 -sign "$key" | b64u); rm -f "$key"
+  curl -sf -X POST -H "Authorization: Bearer $h.$b.$s" -H 'Accept: application/vnd.github+json' \
+    "https://api.github.com/app/installations/$INST/access_tokens" | jq -r .token
+}
+TOKEN=$(gh_token) || TOKEN=
+SRC=/opt/nbci/src
+if [ -n "$TOKEN" ]; then
+  if [ -d $SRC/.git ]; then git -C $SRC fetch -q "https://x-access-token:$TOKEN@github.com/Neonbee-ai/neonbee-devops.git" "$REF" && git -C $SRC checkout -q -f FETCH_HEAD
+  else mkdir -p /opt/nbci && git clone -q --depth 50 -b "$REF" "https://x-access-token:$TOKEN@github.com/Neonbee-ai/neonbee-devops.git" $SRC; fi
+  git -C $SRC remote set-url origin https://github.com/Neonbee-ai/neonbee-devops.git
+fi
+[ -f $SRC/runner/controller/nbci.py ] || { echo "nbci source missing (App not configured?)"; exit 1; }
+
+cat > /etc/nbci.env <<ENV
+GCP_PROJECT=$P
+GH_APP_ID=$APP
+GH_APP_INSTALLATION_ID=$INST
+DRY_RUN=$(attr nbci-dry-run || echo 1)
+TRAIN_REPOS=$(attr nbci-train-repos || true)
+PULSE_MCP_URL=$(attr nbci-pulse-url || true)
+NB_DAILY_CAP_USD=$(attr nbci-daily-cap || echo 2)
+ENV
+cat > /etc/systemd/system/nbci.service <<'U'
+[Unit]
+Description=nb-ci controller (runner VMs, fallback, merge train)
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+[Service]
+Type=notify
+User=nbci
+EnvironmentFile=/etc/nbci.env
+StateDirectory=nbci
+RuntimeDirectory=nbci
+ExecStart=/usr/bin/python3 /opt/nbci/src/runner/controller/nbci.py loop
+Restart=always
+RestartSec=10
+WatchdogSec=900
+NotifyAccess=main
+MemoryMax=300M
+[Install]
+WantedBy=multi-user.target
+U
+IP=$(md instance/network-interfaces/0/access-configs/0/external-ip)
+cat > /etc/caddy/Caddyfile <<C
+${IP//./-}.sslip.io {
+  handle /gh { reverse_proxy 127.0.0.1:8787 }
+  respond 404
+}
+C
+cat > /etc/cron.d/nbci <<'CRON'
+*/5 * * * * root /opt/nbci/src/runner/controller/watchdog.sh
+17 4 * * * root /opt/nbci/src/runner/controller/bootstrap.sh >/var/log/nbci-update.log 2>&1
+CRON
+systemctl daemon-reload
+systemctl enable --now caddy nbci
+systemctl reload caddy || true
+systemctl restart nbci
+
+# 2 controller-local runners for nb-route jobs (route/notify: seconds of curl/jq). User ghr cannot
+# reach the metadata server, so job code can never use the controller's service account.
+iptables -C OUTPUT -m owner --uid-owner ghr -d 169.254.169.254 -j REJECT 2>/dev/null ||
+  iptables -A OUTPUT -m owner --uid-owner ghr -d 169.254.169.254 -j REJECT
+if [ -n "$TOKEN" ]; then
+  V=$(curl -fsSL https://api.github.com/repos/actions/runner/releases/latest | jq -r .tag_name | sed 's/^v//')
+  for i in 1 2; do
+    d=/home/ghr/r$i
+    [ -f "$d/.runner" ] && { systemctl start "actions.runner.Neonbee-ai.nbci-ctl-$i.service" 2>/dev/null; continue; }
+    mkdir -p "$d" && curl -fsSL "https://github.com/actions/runner/releases/download/v$V/actions-runner-linux-x64-$V.tar.gz" | tar xz -C "$d"
+    chown -R ghr: "$d"; [ "$i" = 1 ] && "$d/bin/installdependencies.sh" >/dev/null 2>&1
+    RT=$(curl -sf -X POST -H "Authorization: Bearer $TOKEN" https://api.github.com/orgs/Neonbee-ai/actions/runners/registration-token | jq -r .token)
+    sudo -u ghr "$d/config.sh" --unattended --replace --url https://github.com/Neonbee-ai --token "$RT" \
+      --name "nbci-ctl-$i" --labels nb-route --work _work
+    (cd "$d" && ./svc.sh install ghr && ./svc.sh start)
+  done
+fi

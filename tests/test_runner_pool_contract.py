@@ -19,6 +19,8 @@ ROUTER = "[self-hosted, nb-route]"
 ROUTED = "${{ fromJSON(needs.route.outputs.runs_on) }}"
 # Reusable deploy workflows: the caller's route job picks the lane and passes it in as runs_on.
 FROM_CALLER = "${{ fromJSON(inputs.runs_on) }}"
+# deploy jobs: non-Spot nb-deploy lane from the route job (NB_CI_MODE=auto), else the routed lane
+DEPLOY = "${{ fromJSON(needs.route.outputs.deploy_runs_on) }}"
 # nb-pool: label on Contabo runner-vm + burst runners, used only for NB_BURST=batch re-runs (either lane).
 LANES = {'["self-hosted","runner-vm"]', '["self-hosted","lane-burst"]', '["self-hosted","nb-pool"]'}
 
@@ -36,7 +38,7 @@ class GivenTheOrgWorkflows(unittest.TestCase):
                 continue
             for target in runs_on(path):
                 with self.subTest(workflow=name):
-                    self.assertIn(target.strip(), (RUNNER_VM, ROUTER, ROUTED, FROM_CALLER))
+                    self.assertIn(target.strip(), (RUNNER_VM, ROUTER, ROUTED, FROM_CALLER, DEPLOY))
 
     def test_when_a_job_is_routed_then_its_workflow_has_a_route_job_on_the_router(self):
         for path in WORKFLOWS:

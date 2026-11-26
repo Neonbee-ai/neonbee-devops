@@ -331,6 +331,9 @@ jobs:
     timeout-minutes: 5
     outputs:
       runs_on: ${{ steps.r.outputs.runs_on }}
+      # Deploy jobs (build + rsync/S3) must not run on Spot VMs: a preemption mid-deploy leaves a partial
+      # release. NB_CI_MODE=auto -> nb-deploy (standard VMs from nb-autoscaler); otherwise the same lane.
+      deploy_runs_on: ${{ vars.NB_CI_MODE == 'auto' && '["self-hosted","nb-deploy"]' || steps.r.outputs.runs_on }}
       # 'true' only when this exact tree already passed gate + security (and, for
       # backend, contract + integration) in a develop push run. See step 'prior'.
       prior_pass: ${{ steps.prior.outputs.prior_pass || 'false' }}
@@ -1288,7 +1291,7 @@ jobs:
       && needs.integration-tests.result != 'failure'
     # Linux only: the Mac Mini gate runners also carry `contabo` (they run the
     # gate), but this job builds + rsyncs to the VMs and assumes a Linux host.
-    runs-on: ${{ fromJSON(needs.route.outputs.runs_on) }}
+    runs-on: ${{ fromJSON(needs.route.outputs.deploy_runs_on) }}
     timeout-minutes: 20
     concurrency:
       group: neonbee-prod-${{ inputs.service_name }}
@@ -2396,42 +2399,20 @@ jobs:
             ssh root@"$IP" "bash '$REMOTE_SCRIPT' '$PM2_NAME'; RC=\$?; rm -f '$REMOTE_SCRIPT'; exit \$RC" || return 1
           }
 
-          # ── canary (org/repo var NB_DEPLOY_CANARY=true): HA first; primary only if HA is healthy ──
-          # deploy_vm already health-checks the PM2 app (online within 15 tries) and fails otherwise.
-          # HA red -> HA is rolled back to dist-prev (same mechanism as neonbee-rollback.yml) and the
-          # primary is never touched, so a bad build cannot reach both VMs. Off = old parallel fan-out.
-          HA_TARGETED=0
-          if [ -n "$HA_IP" ] && { [ "$TARGET_VM" = "prod" ] || [ "$TARGET_VM" = "storefront" ]; }; then HA_TARGETED=1; fi
-          H=99  # sentinel: HA not configured / not applicable
-          if [ "${{ vars.NB_DEPLOY_CANARY }}" = "true" ] && [ "$HA_TARGETED" = 1 ]; then
-            echo "Canary: HA VM first"
-            deploy_vm "$HA_IP" "${SERVICE_NAME}-ha" > "$DEPLOY_TMP/ha.log" 2>&1; H=$?
-            if [ $H -ne 0 ]; then
-              echo "=== HA VM log ==="; cat "$DEPLOY_TMP/ha.log"
-              echo "::error::Canary failed on HA (exit $H): rolling HA back to dist-prev; primary NOT deployed"
-              ssh root@"$HA_IP" "[ -d '$SERVICE_DIR/dist-prev' ] && rsync -a --delete '$SERVICE_DIR/dist-prev/' '$SERVICE_DIR/dist/' && pm2 reload '${SERVICE_NAME}-ha' --update-env" \
-                && echo "HA rolled back" || echo "::error::HA rollback failed — run neonbee-rollback.yml for $SERVICE_NAME"
-              echo "ha=failure" >> "$GITHUB_OUTPUT"
-              exit 1
-            fi
-            echo "Canary healthy on HA: deploying primary"
-            deploy_vm "$SERVER_IP" "$SERVICE_NAME" > "$DEPLOY_TMP/primary.log" 2>&1; P=$?
-            HA_PID=canary
-          else
           # ── fan out: both VMs start simultaneously ─────────────────────────
           deploy_vm "$SERVER_IP" "$SERVICE_NAME" > "$DEPLOY_TMP/primary.log" 2>&1 &
           PRIMARY_PID=$!
 
           HA_PID=""
-          if [ "$HA_TARGETED" = 1 ]; then
+          if [ -n "$HA_IP" ] && { [ "$TARGET_VM" = "prod" ] || [ "$TARGET_VM" = "storefront" ]; }; then
             deploy_vm "$HA_IP" "${SERVICE_NAME}-ha" > "$DEPLOY_TMP/ha.log" 2>&1 &
             HA_PID=$!
           fi
 
           # ── wait and collect ───────────────────────────────────────────────
           wait $PRIMARY_PID; P=$?
+          H=99  # sentinel: HA not configured / not applicable
           [ -n "$HA_PID" ] && { wait $HA_PID; H=$?; }
-          fi
 
           echo "=== Primary VM log ==="
           cat "$DEPLOY_TMP/primary.log"

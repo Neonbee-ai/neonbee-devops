@@ -136,6 +136,16 @@ on:
         required: false
         type: boolean
         default: false
+      canary:
+        description: 'SSM mode: deploy the first InService node alone and require it healthy before the rest'
+        required: false
+        type: boolean
+        default: true
+      canary_checks:
+        description: 'Consecutive healthy checks (10 s apart) the canary node needs'
+        required: false
+        type: number
+        default: 3
       verify_url:
         description: 'Optional public URL of one released file (e.g. https://cdn.neonbee.app/accounting/index.html). After rollout it must serve the bytes of verify_file, or the job fails (no revert).'
         required: false
@@ -341,6 +351,10 @@ jobs:
           RF_MIN_HEALTHY: ${{ inputs.refresh_min_healthy_pct }}
           RF_WARMUP: ${{ inputs.refresh_warmup_seconds }}
           RF_TIMEOUT: ${{ inputs.refresh_timeout_seconds }}
+          CANARY: ${{ inputs.canary && vars.NB_CI_MODE != 'legacy' }}
+          CANARY_CHECKS: ${{ inputs.canary_checks }}
+          TG_ARN: ${{ inputs.target_group_arn }}
+          HEALTH_URL: ${{ inputs.health_url }}
         run: |
           set -euo pipefail
           write_current() {  # $1 sha  $2 key  $3 prev sha  $4 prev key
@@ -357,23 +371,57 @@ jobs:
             [ -n "$IDS" ] && [ "$IDS" != "None" ] || { echo "::error::no InService instances in $ASG"; exit 1; }
             echo "Targets: $IDS"
             PARAMS=$(printf '{"service":["%s"],"sha":["%s"],"bucket":["%s"],"key":["%s"]}' "$SERVICE" "$SHA" "$BUCKET" "$KEY")
-            # shellcheck disable=SC2086
-            CMD_ID=$(aws ssm send-command --document-name "$SSM_DOC" --instance-ids $IDS \
-              --parameters "$PARAMS" --max-concurrency "$SSM_CONC" --max-errors "$SSM_ERRS" \
-              --comment "nb-release $SERVICE ${SHA:0:12} run $GITHUB_RUN_ID" \
-              --query Command.CommandId --output text)
-            echo "ssm_command_id=$CMD_ID" >> "$GITHUB_OUTPUT"
-            echo "SSM command $CMD_ID"
-            DEADLINE=$(( $(date +%s) + SSM_TIMEOUT ))
-            while :; do
-              ST=$(aws ssm list-commands --command-id "$CMD_ID" --query 'Commands[0].Status' --output text)
-              case "$ST" in Pending|InProgress|Cancelling) ;; *) break ;; esac
-              [ "$(date +%s)" -lt "$DEADLINE" ] || { echo "::error::SSM command timed out"; aws ssm cancel-command --command-id "$CMD_ID" || true; exit 1; }
-              sleep 10
-            done
-            aws ssm list-command-invocations --command-id "$CMD_ID" \
-              --query 'CommandInvocations[].[InstanceId,Status,StatusDetails]' --output text || true
-            [ "$ST" = "Success" ] || { echo "::error::SSM rollout ended with status $ST"; exit 1; }
+            ssm_run() {  # $@ instance ids; one SSM command, waited for; non-zero on any failure
+              # shellcheck disable=SC2068
+              CMD_ID=$(aws ssm send-command --document-name "$SSM_DOC" --instance-ids $@ \
+                --parameters "$PARAMS" --max-concurrency "$SSM_CONC" --max-errors "$SSM_ERRS" \
+                --comment "nb-release $SERVICE ${SHA:0:12} run $GITHUB_RUN_ID" \
+                --query Command.CommandId --output text)
+              echo "ssm_command_id=$CMD_ID" >> "$GITHUB_OUTPUT"
+              echo "SSM command $CMD_ID -> $*"
+              DEADLINE=$(( $(date +%s) + SSM_TIMEOUT ))
+              while :; do
+                ST=$(aws ssm list-commands --command-id "$CMD_ID" --query 'Commands[0].Status' --output text)
+                case "$ST" in Pending|InProgress|Cancelling) ;; *) break ;; esac
+                [ "$(date +%s)" -lt "$DEADLINE" ] || { echo "::error::SSM command timed out"; aws ssm cancel-command --command-id "$CMD_ID" || true; return 1; }
+                sleep 10
+              done
+              aws ssm list-command-invocations --command-id "$CMD_ID" \
+                --query 'CommandInvocations[].[InstanceId,Status,StatusDetails]' --output text || true
+              [ "$ST" = "Success" ] || { echo "::error::SSM rollout ended with status $ST"; return 1; }
+            }
+            # Canary (input canary, default on; off when NB_CI_MODE=legacy): the first InService node
+            # alone, then CANARY_CHECKS consecutive healthy checks of THAT node (target group) or of the
+            # health URL, then the rest. Any failure -> exit 1 -> "Revert to previous release" restores
+            # the previous release on every node, so a bad build reaches one machine at most.
+            set -- $IDS
+            if [ "$CANARY" = "true" ] && [ $# -gt 1 ]; then
+              FIRST=$1; shift; REST="$*"
+              echo "Canary: $FIRST first"
+              ssm_run "$FIRST" || exit 1
+              OKN=0
+              for _ in $(seq 1 30); do
+                GOOD=1
+                if [ -n "$TG_ARN" ]; then
+                  TS=$(aws elbv2 describe-target-health --target-group-arn "$TG_ARN" --targets "Id=$FIRST" \
+                    --query 'TargetHealthDescriptions[0].TargetHealth.State' --output text 2>/dev/null || echo err)
+                  [ "$TS" = healthy ] || GOOD=0
+                elif [ -n "$HEALTH_URL" ]; then
+                  CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$HEALTH_URL" || echo 000)
+                  case "$CODE" in 2*|3*) ;; *) GOOD=0 ;; esac
+                fi
+                if [ "$GOOD" = 1 ]; then OKN=$((OKN+1)); else OKN=0; fi
+                [ "$OKN" -ge "$CANARY_CHECKS" ] && break
+                sleep 10
+              done
+              [ "$OKN" -ge "$CANARY_CHECKS" ] || { echo "::error::canary $FIRST not healthy (${TS:-}${CODE:-}) - reverting"; exit 1; }
+              echo "Canary healthy: rolling out to $REST"
+              # shellcheck disable=SC2086
+              ssm_run $REST || exit 1
+            else
+              # shellcheck disable=SC2086
+              ssm_run $IDS || exit 1
+            fi
             write_current "$SHA" "$KEY" "$PREV_SHA" "$PREV_KEY"
           else
             # New instances bootstrap from current.json, so promote first; the

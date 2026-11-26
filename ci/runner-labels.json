@@ -1,15 +1,165 @@
 {
-  "_doc": "THE canonical runner label list. Read by runner/autoscaler/nb_autoscaler.py, scripts/ci/mini-runner-labels.sh (root repo) and tests/test_autoscaler.py. CI runs only on burst VMs. Mac Minis carry NO CI labels (pre-push gate over ssh only); macmini-preview and -2 keep aqa-coord (AutoQA coordinator, not CI) as today. The fallback runner gets ci_labels only while GCP cannot start VMs (the autoscaler adds and removes them).",
-  "ci_labels": ["runner-vm", "nb-route", "nb-pool", "lane-burst", "lane-dev", "lane-prod", "contabo", "browsers"],
+  "_doc": "THE canonical runner config (nb-ci controller, scripts/ci/mini-runner-labels.sh, tests). CI runs only on GCP: one ephemeral VM per job, sized by class. A job goes to the first class whose labels contain all its runs-on labels (order matters). Mac Minis carry no CI labels; macmini-preview and -2 keep aqa-coord (AutoQA, not CI). The fallback runner gets fallback_labels only while GCP cannot start VMs.",
+  "ci_labels": [
+    "runner-vm",
+    "nb-route",
+    "nb-pool",
+    "lane-burst",
+    "lane-dev",
+    "lane-prod",
+    "contabo",
+    "browsers"
+  ],
+  "classes": [
+    {
+      "name": "control",
+      "host": "controller",
+      "labels": [
+        "self-hosted",
+        "Linux",
+        "X64",
+        "nb-route"
+      ],
+      "_doc": "route + notify jobs (seconds of curl/jq): served by the 2 runners on the always-on controller VM, no VM boot"
+    },
+    {
+      "name": "deploy",
+      "machine": "e2-standard-4",
+      "vcpu": 4,
+      "ram_gb": 16,
+      "spot": false,
+      "priority": 0,
+      "disk_gb": 40,
+      "labels": [
+        "self-hosted",
+        "Linux",
+        "X64",
+        "nb-deploy"
+      ],
+      "_doc": "build + rsync / S3 release: standard VM, a preemption can never leave a partial deploy"
+    },
+    {
+      "name": "gate",
+      "machine": "e2-standard-4",
+      "vcpu": 4,
+      "ram_gb": 16,
+      "spot": true,
+      "priority": 1,
+      "disk_gb": 40,
+      "labels": [
+        "self-hosted",
+        "Linux",
+        "X64",
+        "runner-vm",
+        "nb-pool",
+        "lane-burst",
+        "lane-dev",
+        "lane-prod",
+        "contabo",
+        "browsers"
+      ]
+    },
+    {
+      "name": "large",
+      "machine": "e2-standard-8",
+      "vcpu": 8,
+      "ram_gb": 32,
+      "spot": true,
+      "priority": 1,
+      "disk_gb": 40,
+      "labels": [
+        "self-hosted",
+        "Linux",
+        "X64",
+        "nb-size-l",
+        "runner-vm",
+        "nb-pool",
+        "lane-burst",
+        "lane-dev",
+        "lane-prod",
+        "contabo",
+        "browsers"
+      ]
+    },
+    {
+      "name": "small",
+      "machine": "e2-standard-2",
+      "vcpu": 2,
+      "ram_gb": 8,
+      "spot": true,
+      "priority": 1,
+      "disk_gb": 30,
+      "labels": [
+        "self-hosted",
+        "Linux",
+        "X64",
+        "nb-size-s",
+        "runner-vm"
+      ]
+    }
+  ],
+  "prices_usd": {
+    "_doc": "GCP Cloud Billing Catalog, us-central1, read 2026-11-26 (services/6F81-5844-456A). Per hour unless noted.",
+    "region": "us-central1",
+    "spot_core": 0.01309,
+    "spot_ram_gb": 0.001754,
+    "std_core": 0.021812,
+    "std_ram_gb": 0.002924,
+    "ip_spot": 0.0025,
+    "ip_std": 0.005,
+    "pd_balanced_gb_month": 0.1,
+    "pd_standard_gb_month": 0.04,
+    "image_gb_month": 0.05
+  },
   "pools": {
-    "burst": { "base": ["self-hosted", "Linux", "X64"], "include_ci_labels": true, "extra": [] },
-    "macmini": { "base": ["self-hosted", "macOS", "ARM64"], "include_ci_labels": false, "extra": [] },
-    "aqa-coord": { "base": ["self-hosted", "macOS", "ARM64"], "include_ci_labels": false, "extra": ["aqa-coord"] }
+    "macmini": {
+      "base": [
+        "self-hosted",
+        "macOS",
+        "ARM64"
+      ],
+      "include_ci_labels": false,
+      "extra": []
+    },
+    "aqa-coord": {
+      "base": [
+        "self-hosted",
+        "macOS",
+        "ARM64"
+      ],
+      "include_ci_labels": false,
+      "extra": [
+        "aqa-coord"
+      ]
+    }
   },
   "minis": {
-    "macmini-preview": ["aqa-coord"],
-    "macmini-preview-2": ["aqa-coord"],
+    "macmini-preview": [
+      "aqa-coord"
+    ],
+    "macmini-preview-2": [
+      "aqa-coord"
+    ],
     "macmini-preview-3": []
   },
-  "fallback": { "runner": "macmini-preview-3", "labels": null }
+  "fallback": {
+    "runner": "macmini-preview-3",
+    "labels": [
+      "runner-vm",
+      "nb-route",
+      "nb-pool",
+      "lane-burst",
+      "lane-dev",
+      "lane-prod",
+      "contabo",
+      "browsers",
+      "nb-deploy"
+    ]
+  },
+  "quota": {
+    "max_vcpu": 32,
+    "reserve_deploy_vcpu": 4,
+    "autoqa_vm_label": "autoqa",
+    "_doc": "One budget for CI + AutoQA: deploy > gate > AutoQA. Gate VMs leave reserve_deploy_vcpu free; AutoQA gets what is left (published as project metadata nb-autoqa-vcpu-allowance)."
+  }
 }
