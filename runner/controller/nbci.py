@@ -175,7 +175,7 @@ def create_vm(gh, gcp, c, failures, image):
     jit = gh('orgs/%s/actions/runners/generate-jitconfig' % ORG, 'POST',
              {'name': name, 'runner_group_id': 1, 'labels': c['labels'], 'work_folder': '_work'})
     sched = {'instanceTerminationAction': 'DELETE', 'maxRunDuration': {'seconds': MAX_RUN_S},
-             'automaticRestart': False, 'onHostMaintenance': 'TERMINATE'}
+             'automaticRestart': False, 'onHostMaintenance': 'TERMINATE' if c['spot'] else 'MIGRATE'}   # e2 standard (deploy) VMs cannot use TERMINATE
     if c['spot']:
         sched['provisioningModel'] = 'SPOT'
     prov = open(os.path.join(HERE, '..', 'image', 'provision.sh')).read() if RUNNER_BOOT == 'startup' else ''
@@ -193,7 +193,7 @@ def create_vm(gh, gcp, c, failures, image):
             gcp.wait_op(gcp.compute('/zones/%s/instances' % z, 'POST', body), z, 120)
             log('created', name, c['machine'], z, 'spot' if c['spot'] else 'standard'); return True
         except Exception as e:
-            k = L.classify_gce_error(str(e)); failures.append((z, k)); log('create failed', z, k, str(e)[:160])
+            k = L.classify_gce_error(str(e)); failures.append((z, k)); log('create failed', z, k, ' '.join(str(e).split())[:700])
             if k in ('billing', 'quota'):
                 break
     try: gh('orgs/%s/actions/runners/%s' % (ORG, jit['runner']['id']), 'DELETE')

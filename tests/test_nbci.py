@@ -847,5 +847,11 @@ class Aqa(unittest.TestCase):
         self.assertIn('30 min', L.vm_verdict(vm, None, False, 1800))
 
 
+class StandardVm(unittest.TestCase):
+    def test_given_a_non_spot_deploy_vm_then_host_maintenance_is_migrate_because_e2_standard_rejects_terminate(self):
+        with open(os.path.join(os.path.dirname(__file__), '..', 'runner', 'controller', 'nbci.py')) as f:
+            self.assertIn("'onHostMaintenance': 'TERMINATE' if c['spot'] else 'MIGRATE'", f.read())
+
+
 if __name__ == '__main__':
     unittest.main()
