@@ -760,6 +760,10 @@ class Aqa(unittest.TestCase):
         import nbci_aqa as A
         self.assertEqual(A.deploy_env(self.run_('Deploy Preview', 'feat/Full Flow_1'), self.CFG), 'pr-feat-full-flow-1')
 
+    def test_given_a_feat_branch_push_deploy_then_the_env_is_its_preview(self):
+        import nbci_aqa as A
+        self.assertEqual(A.deploy_env(self.run_('Deploy Accounting Frontend', 'feat/aqa-flow-3d32de89'), self.CFG), 'pr-feat-aqa-flow-3d32de89')
+
     def test_given_a_main_deploy_then_the_env_is_prod(self):
         import nbci_aqa as A
         self.assertEqual(A.deploy_env(self.run_(branch='main'), self.CFG), 'prod')

@@ -22,8 +22,8 @@ def deploy_env(run, cfg):
     if any(w.lower() in name for w in cfg.get('ignore_workflows', ['teardown', 'rollback'])):
         return None
     br = run.get('head_branch') or ''
-    if 'preview' in name:
-        return 'pr-' + slug(br) if br else None
+    if 'preview' in name or br.startswith(('feat/', 'fix/')):
+        return 'pr-' + slug(br) if br else None      # feat/** and fix/** pushes deploy a preview at pr-<branch-slug>
     if br == 'develop':
         return 'dev'
     if br == 'main':
