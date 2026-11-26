@@ -78,6 +78,35 @@ def plan(waiting, pending_by_class, classes):
     return out
 
 
+def pending_by_class(vms, runners, now, grace_s=NO_JOB_S):
+    """VMs that are supply for waiting jobs: every live VM (PROVISIONING/STAGING/RUNNING) of the class whose
+    runner is not busy. A VM's runner is registered at create time (offline until boot finishes), so a
+    registered-but-offline VM inside the boot grace counts too; counting only unregistered VMs bought a
+    second and third VM for one job."""
+    out = {}
+    for v in vms:
+        if v['status'] not in ('PROVISIONING', 'STAGING', 'RUNNING'):
+            continue
+        r = runners.get(v['name'])
+        if r and r.get('busy'):
+            continue
+        booting = now - v['created'] < grace_s
+        if r is None or booting or (r.get('status') == 'online'):
+            out[v['cls']] = out.get(v['cls'], 0) + 1
+    return out
+
+
+SERVE_WINDOW_S = 900
+
+
+def cap_creates(want, waiting, served, now, window_s=SERVE_WINDOW_S):
+    """Hard cap: at most one create per queued job per window. served: {job_id: unix time a VM was bought
+    for it}. Returns (want trimmed to the unserved jobs, the job ids those creates will serve)."""
+    open_ids = [j['id'] for j in waiting if now - served.get(str(j['id']), 0) >= window_s]
+    n = min(len(want), len(open_ids))
+    return want[:n], open_ids[:n]
+
+
 def vm_verdict(vm, runner, job_done, now, no_job_s=NO_JOB_S):
     """Why to delete one runner VM, or None. vm: {status, created}; runner: GitHub runner or None;
     job_done: the controller saw workflow_job completed for this VM's runner."""

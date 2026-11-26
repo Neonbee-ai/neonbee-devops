@@ -580,5 +580,70 @@ class RunnerBoot(unittest.TestCase):
         self.assertIn("build-image refused: RUNNER_BOOT=startup", src)
 
 
+class Supply(unittest.TestCase):
+    JOB = {'id': 1, 'labels': ['self-hosted', 'nb-auto']}
+
+    def want(self, jobs, vms, runners):
+        pend = L.pending_by_class(vms, runners, 1000, 300)
+        return L.plan(jobs, pend, CLS)
+
+    def vm(self, status='RUNNING', age=30, name='nbci-gate-1'):
+        return {'name': name, 'status': status, 'created': 1000 - age, 'cls': 'gate'}
+
+    def test_given_one_job_and_one_booting_vm_with_an_offline_registered_runner_then_no_create(self):
+        self.assertEqual(self.want([self.JOB], [self.vm('STAGING')], {'nbci-gate-1': {'status': 'offline', 'busy': False}}), [])
+
+    def test_given_one_job_and_no_vms_then_one_create(self):
+        self.assertEqual(len(self.want([self.JOB], [], {})), 1)
+
+    def test_given_two_jobs_and_one_booting_vm_then_one_create(self):
+        self.assertEqual(len(self.want([self.JOB, dict(self.JOB, id=2)], [self.vm()], {'nbci-gate-1': {'status': 'offline', 'busy': False}})), 1)
+
+    def test_given_a_busy_vm_then_it_is_not_supply(self):
+        self.assertEqual(len(self.want([self.JOB], [self.vm(age=600)], {'nbci-gate-1': {'status': 'online', 'busy': True}})), 1)
+
+    def test_given_a_stopped_vm_then_it_is_not_supply(self):
+        self.assertEqual(len(self.want([self.JOB], [self.vm('TERMINATED')], {})), 1)
+
+    def test_given_a_vm_was_bought_for_the_job_then_no_second_create_in_the_window(self):
+        want = L.plan([self.JOB], {}, CLS)
+        out, ids = L.cap_creates(want, [self.JOB], {'1': 1000}, 1030)
+        self.assertEqual((out, ids), ([], []))
+
+    def test_given_an_unserved_job_then_one_create_and_it_is_marked(self):
+        want = L.plan([self.JOB], {}, CLS) * 3
+        out, ids = L.cap_creates(want, [self.JOB], {}, 1000)
+        self.assertEqual((len(out), ids), (1, [1]))
+
+    def test_given_the_window_has_passed_then_the_job_may_buy_again(self):
+        out, _ = L.cap_creates(L.plan([self.JOB], {}, CLS), [self.JOB], {'1': 0}, 1000)
+        self.assertEqual(len(out), 1)
+
+
+class ChurnGuard(unittest.TestCase):
+    def run_guard(self, tmp, names):
+        import subprocess, os
+        env = dict(os.environ, SEEN_FILE=os.path.join(tmp, 'seen'), STOP_CMD='touch ' + os.path.join(tmp, 'stopped'))
+        r = subprocess.run(['bash', os.path.join(os.path.dirname(__file__), '..', 'runner', 'controller', 'churn-guard.sh')],
+                           input=names, text=True, capture_output=True, env=env)
+        return r.returncode, os.path.exists(os.path.join(tmp, 'stopped'))
+
+    def test_given_one_vm_then_the_guard_stays_quiet(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as t:
+            self.assertEqual(self.run_guard(t, 'nbci-gate-1:RUNNING '), (0, False))
+
+    def test_given_a_second_vm_across_polls_then_nbci_is_stopped(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as t:
+            self.run_guard(t, 'nbci-gate-1:RUNNING ')
+            self.assertEqual(self.run_guard(t, 'nbci-gate-2:RUNNING '), (1, True))
+
+    def test_given_two_vms_in_one_space_separated_poll_then_nbci_is_stopped(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as t:
+            self.assertEqual(self.run_guard(t, 'nbci-gate-1:RUNNING nbci-gate-2:STAGING '), (1, True))
+
+
 if __name__ == '__main__':
     unittest.main()

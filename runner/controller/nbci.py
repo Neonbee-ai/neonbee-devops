@@ -384,12 +384,13 @@ def tick(gh, gcp, st, mode='scale'):
         return
     # demand -> VMs (one per job), priority + quota + spend cap
     idle_names = {r['name'] for r in rs if r['status'] == 'online' and not r['busy']}
-    pending = {}
-    for v in live:
-        if v['name'] not in rby or v['name'] in idle_names:
-            pending[v['cls']] = pending.get(v['cls'], 0) + 1
+    pending = L.pending_by_class(live, rby, now, L.NO_JOB_STARTUP_S if RUNNER_BOOT == 'startup' else L.NO_JOB_S)
     waiting = [j for j in jobs if now - j['created'] >= 3]
     want = L.plan(waiting, pending, classes)
+    served = st.setdefault('served', {})
+    for k in [k for k, t in served.items() if now - t > 2 * L.SERVE_WINDOW_S]:
+        del served[k]
+    want, serve_ids = L.cap_creates(want, waiting, served, now)
     room = 0
     if mode == 'status':
         for j in waiting:
@@ -409,6 +410,7 @@ def tick(gh, gcp, st, mode='scale'):
             if image and L.may_start(c, spend, room, reserve):
                 if create_vm(gh, gcp, c, failures, image):
                     started = True; room -= c['vcpu']
+                    if serve_ids: served[str(serve_ids.pop(0))] = now
                 else:
                     day['create_fail'] += 1
             elif spend != 'capped' and room < c['vcpu'] and not any(v['status'] == 'RUNNING' for v in live):
