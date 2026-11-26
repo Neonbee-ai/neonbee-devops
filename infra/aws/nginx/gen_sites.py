@@ -36,7 +36,7 @@ GATEWAY = [
     ("fulfillment", "fulfillment-prod", False), ("support", "support-prod", True),
     ("manufacturing", "manufacturing-prod", False), ("chat", "chat-prod", True),
     ("documents", "documents-prod", False), ("sign", "sign-prod", False),
-    ("folio", "folio-prod", False),
+    ("folio", "folio-prod", False), ("maintenance", "maintenance-prod", False),
 ]
 
 CF_RANGES = """173.245.48.0/20 103.21.244.0/22 103.22.200.0/22 103.31.4.0/22 141.101.64.0/18
