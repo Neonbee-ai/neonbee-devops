@@ -1,0 +1,21 @@
+{
+  "_doc": "Deploy->AQA trigger. Held until contract_ready is true; fill service_account / startup_script / machine from the AQA agent's VM create contract.",
+  "enabled": true,
+  "contract_ready": false,
+  "daily_cap": 8,
+  "deploy_workflows": [
+    "deploy"
+  ],
+  "ignore_workflows": [
+    "teardown",
+    "rollback"
+  ],
+  "machine": "e2-standard-4",
+  "disk_gb": 30,
+  "service_account": null,
+  "scopes": [],
+  "startup_script": null,
+  "pass_stage": "done",
+  "evidence_template": null,
+  "bundle_template": "aqa-bundle-{sha}"
+}

@@ -115,6 +115,8 @@ def vm_verdict(vm, runner, job_done, now, no_job_s=NO_JOB_S):
     job_done: the controller saw workflow_job completed for this VM's runner."""
     if vm['status'] in DEAD:
         return 'stopped (%s): disk still bills' % vm['status']
+    if vm.get('cls') == 'aqa':
+        return None          # AQA VMs have no runner: they poweroff on exit (deleted above) or hit maxRunDuration
     if job_done:
         return 'job completed'
     if runner and runner.get('busy'):

@@ -30,7 +30,8 @@ import hashlib, hmac, http.server, json, os, sys, threading, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-import nbci_logic as L  # noqa: E402
+import nbci_logic as L
+import nbci_aqa as A  # noqa: E402
 import nb_release  # noqa: E402
 import nb_pulse  # noqa: E402
 from nbci_io import GCP, GitHub, job_log, log, meta, req, teams  # noqa: E402
@@ -60,7 +61,7 @@ ALLOWED_PUSHERS = set(filter(None, E('ALLOWED_PUSHERS', '').split(',')))
 DRY = E('DRY_RUN', '1') == '1'
 
 LOCK = threading.Lock()
-EVENTS = {'jobs': {}, 'done_runners': set(), 'dirty_repos': set(), 'last_event': 0, 'waits': [], 'pushes': [], 'failed': []}
+EVENTS = {'jobs': {}, 'done_runners': set(), 'dirty_repos': set(), 'last_event': 0, 'waits': [], 'pushes': [], 'failed': [], 'aqa': []}
 
 
 ts = L.ts   # offset-aware (GCE timestamps are -08:00)
@@ -106,6 +107,10 @@ def on_event(kind, ev):
                                              'name': j['name'], 'conclusion': j['conclusion'], 'runner': rn})
         elif kind in ('pull_request', 'check_suite', 'workflow_run', 'check_run'):
             EVENTS['dirty_repos'].add(repo)
+            wr = ev.get('workflow_run') or {}
+            if kind == 'workflow_run' and ev.get('action') == 'completed' and wr.get('conclusion') == 'success':
+                EVENTS['aqa'] = (EVENTS['aqa'] + [{'repo': repo, 'run': {k: wr.get(k) for k in (
+                    'id', 'name', 'event', 'conclusion', 'head_branch', 'head_sha', 'workflow_id', 'html_url')}}])[-50:]
         elif kind == 'push':
             EVENTS['pushes'].append(dict(ev, _repo=repo))
 
@@ -322,6 +327,64 @@ def every(st, key, seconds, now):
     return False
 
 
+def aqa_trigger(gh, gcp, st, now, today, failures):
+    """Deploy -> AQA: ONE Spot VM per successful deploy run (dedupe repo+sha, daily cap), deleted by the
+    controller once it powers off. Held (events kept) until ci/aqa.json says contract_ready."""
+    cfg = L.load(os.path.join(CFG, 'aqa.json'))
+    with LOCK:
+        pending = list(EVENTS['aqa'])
+        if cfg.get('enabled') and cfg.get('contract_ready'):
+            EVENTS['aqa'] = []
+    if not pending or not cfg.get('enabled'):
+        return
+    if not cfg.get('contract_ready'):
+        log('aqa trigger held: contract_ready=false (%d deploy event(s) waiting)' % len(pending)); return
+    ast = st.setdefault('aqa', {})
+    for ev in pending:
+        repo, run = ev['repo'], ev['run']
+        env = A.deploy_env(run, cfg)
+        key = A.dedupe_key(repo, run['head_sha'])
+        if not env:
+            continue
+        ok, why = A.may_trigger(ast, key, today, cfg.get('daily_cap', 8))
+        if not ok:
+            log('aqa skip', key, why)
+            if why == 'daily cap': alert_once(st, now, 'AQA daily cap reached (%s)' % cfg.get('daily_cap', 8))
+            continue
+        shas, msgs = [run['head_sha']], []
+        try:
+            prev = [r for r in gh('repos/%s/%s/actions/workflows/%s/runs?branch=%s&status=success&per_page=5' % (
+                ORG, repo, run['workflow_id'], run['head_branch']))['workflow_runs'] if r['head_sha'] != run['head_sha']]
+            base = prev[0]['head_sha'] if prev else None
+            cm = gh('repos/%s/%s/compare/%s...%s' % (ORG, repo, base, run['head_sha']))['commits'] if base else \
+                [gh('repos/%s/%s/commits/%s' % (ORG, repo, run['head_sha']))]
+            shas, msgs = [c['sha'] for c in cm], [c['commit']['message'] for c in cm]
+        except RuntimeError as e:
+            log('aqa range lookup failed', key, str(e)[:120])
+        name = 'nbci-aqa-%s' % time.strftime('%m%d%H%M%S', time.gmtime(now))
+        items = A.metadata(env, run['head_sha'], cfg.get('bundle_template', 'aqa-bundle-{sha}').format(sha=run['head_sha']),
+                           A.pulse_ids(msgs), shas, (cfg.get('evidence_template') or run['html_url']).format(repo=repo, sha=run['head_sha']),
+                           cfg.get('pass_stage', 'done'), repo)
+        if DRY:
+            log('DRY aqa create', name, env, key); A.record(ast, key, today, now); continue
+        made = False
+        for z in ZONES:
+            try:
+                gcp.wait_op(gcp.compute('/zones/%s/instances' % z, 'POST', A.vm_body(cfg, name, z, items, STEM, MAX_RUN_S)), z, 120)
+                log('aqa created', name, env, key, 'tasks=%s' % ','.join(A.pulse_ids(msgs))); made = True; break
+            except Exception as e:
+                k = L.classify_gce_error(str(e)); failures.append((z, k)); log('aqa create failed', z, k, str(e)[:160])
+                if k in ('billing', 'quota'): break
+        if made:
+            A.record(ast, key, today, now)
+
+
+def alert_once(st, now, text):
+    k = 'aqa-' + time.strftime('%Y-%m-%d', time.gmtime(now)) + text[:20]
+    if k not in st['alerted']:
+        st['alerted'][k] = now; teams(text, DRY)
+
+
 # ── one reconcile pass ──────────────────────────────────────────────────────────────────────────────
 def tick(gh, gcp, st, mode='scale'):
     now = time.time(); today = time.strftime('%Y-%m-%d', time.gmtime(now))
@@ -415,6 +478,8 @@ def tick(gh, gcp, st, mode='scale'):
                     day['create_fail'] += 1
             elif spend != 'capped' and room < c['vcpu'] and not any(v['status'] == 'RUNNING' for v in live):
                 failures.append(('-', 'quota'))          # nothing of ours running, yet no room: someone else holds it
+    try: aqa_trigger(gh, gcp, st, now, today, failures)
+    except Exception as e: log('aqa trigger error', str(e)[:200])
     # AutoQA share of the one quota
     if every(st, 'autoqa', 120, now) and gce_ok:
         try:

@@ -746,5 +746,77 @@ class GateSpeed(unittest.TestCase):
         self.assertIn('NB_NPM_CACHE_HIT != \'1\'', b)
 
 
+class Aqa(unittest.TestCase):
+    CFG = {'deploy_workflows': ['deploy'], 'ignore_workflows': ['teardown', 'rollback']}
+
+    def run_(self, name='Deploy', branch='develop', conclusion='success'):
+        return {'name': name, 'head_branch': branch, 'conclusion': conclusion, 'event': 'push'}
+
+    def test_given_a_successful_develop_deploy_then_the_env_is_dev(self):
+        import nbci_aqa as A
+        self.assertEqual(A.deploy_env(self.run_(), self.CFG), 'dev')
+
+    def test_given_a_successful_preview_deploy_then_the_env_is_pr_branch(self):
+        import nbci_aqa as A
+        self.assertEqual(A.deploy_env(self.run_('Deploy Preview', 'feat/Full Flow_1'), self.CFG), 'pr-feat-full-flow-1')
+
+    def test_given_a_main_deploy_then_the_env_is_prod(self):
+        import nbci_aqa as A
+        self.assertEqual(A.deploy_env(self.run_(branch='main'), self.CFG), 'prod')
+
+    def test_given_a_failed_or_teardown_or_other_branch_run_then_no_trigger(self):
+        import nbci_aqa as A
+        self.assertIsNone(A.deploy_env(self.run_(conclusion='failure'), self.CFG))
+        self.assertIsNone(A.deploy_env(self.run_('Preview teardown on merge (deploy)'), self.CFG))
+        self.assertIsNone(A.deploy_env(self.run_(branch='qa'), self.CFG))
+        self.assertIsNone(A.deploy_env(self.run_('PR Gate'), self.CFG))
+
+    def test_given_commit_trailers_then_pulse_ids_are_extracted_once_and_none_is_ignored(self):
+        import nbci_aqa as A
+        msgs = ['feat: a\n\nPulse: 3d32de89', 'fix: b\n\nPulse: none', 'c\n\nPulse: 3D32DE89, 0a1b2c3d', 'no trailer']
+        self.assertEqual(A.pulse_ids(msgs), ['3d32de89', '0a1b2c3d'])
+
+    def test_given_the_same_repo_and_sha_then_the_second_trigger_is_a_duplicate(self):
+        import nbci_aqa as A
+        st = {}; k = A.dedupe_key('r', 'abc')
+        self.assertEqual(A.may_trigger(st, k, '2026-11-27', 8), (True, ''))
+        A.record(st, k, '2026-11-27', 1000)
+        self.assertEqual(A.may_trigger(st, k, '2026-11-27', 8), (False, 'duplicate'))
+
+    def test_given_the_daily_cap_is_reached_then_no_more_vms_that_day_but_next_day_is_fine(self):
+        import nbci_aqa as A
+        st = {}
+        for i in range(2):
+            A.record(st, 'r@%d' % i, '2026-11-27', 1000 + i)
+        self.assertEqual(A.may_trigger(st, 'r@new', '2026-11-27', 2), (False, 'daily cap'))
+        self.assertTrue(A.may_trigger(st, 'r@new', '2026-11-28', 2)[0])
+
+    def test_given_a_deploy_then_the_vm_metadata_carries_the_seven_aqa_keys(self):
+        import nbci_aqa as A
+        m = {i['key']: i['value'] for i in A.metadata('dev', 'sha1', 'b', ['3d32de89'], ['c1', 'c2'], 'ev', 'done', 'repo')}
+        self.assertEqual({k: m[k] for k in ('aqa-env', 'aqa-sha', 'aqa-bundle', 'aqa-tasks', 'aqa-commits', 'aqa-evidence', 'aqa-pass-stage')},
+                         {'aqa-env': 'dev', 'aqa-sha': 'sha1', 'aqa-bundle': 'b', 'aqa-tasks': '3d32de89', 'aqa-commits': 'c1,c2',
+                          'aqa-evidence': 'ev', 'aqa-pass-stage': 'done'})
+
+    def test_given_the_contract_then_the_vm_is_spot_with_no_static_ip_and_disks_die_with_it(self):
+        import nbci_aqa as A
+        b = A.vm_body({'service_account': 'a@p.iam', 'startup_script': '#!/bin/bash'}, 'n', 'us-central1-a', [], 'nbci', 5400)
+        self.assertEqual(b['scheduling']['provisioningModel'], 'SPOT')
+        self.assertEqual(b['scheduling']['instanceTerminationAction'], 'DELETE')
+        self.assertTrue(b['disks'][0]['autoDelete'])
+        self.assertNotIn('natIP', b['networkInterfaces'][0]['accessConfigs'][0])
+        self.assertEqual(b['serviceAccounts'][0]['email'], 'a@p.iam')
+        self.assertEqual(b['labels']['nb-class'], 'aqa')
+
+    def test_given_an_aqa_vm_without_a_runner_then_it_is_not_deleted_as_no_job_but_is_when_stopped(self):
+        vm = {'status': 'RUNNING', 'created': 0, 'cls': 'aqa'}
+        self.assertIsNone(L.vm_verdict(vm, None, False, 100000))
+        self.assertIn('stopped', L.vm_verdict(dict(vm, status='TERMINATED'), None, False, 100000))
+
+    def test_given_the_controller_then_the_trigger_is_held_until_the_contract_is_ready(self):
+        with open(os.path.join(os.path.dirname(__file__), '..', 'ci', 'aqa.json')) as f:
+            self.assertFalse(json.load(f)['contract_ready'])
+
+
 if __name__ == '__main__':
     unittest.main()
