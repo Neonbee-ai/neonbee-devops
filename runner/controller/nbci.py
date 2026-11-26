@@ -289,7 +289,7 @@ def build_image(gcp):
         log('image built', img)
         imgs = sorted(gcp.compute('/global/images?filter=family%%3D%s' % IMAGE_FAMILY).get('items', []),
                       key=lambda i: i['creationTimestamp'], reverse=True)
-        for old in imgs[2:]:
+        for old in imgs[1:]:     # keep only the newest image of the family
             gcp.compute('/global/images/%s' % old['name'], 'DELETE'); log('image deleted', old['name'])
     finally:
         try: gcp.wait_op(gcp.compute('/zones/%s/instances/%s' % (z, name), 'DELETE'), z)

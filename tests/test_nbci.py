@@ -1,3 +1,4 @@
+import os
 """BDD tests for the nb-ci controller logic, config and workflow contracts (no network)."""
 import json, os, re, sys, unittest
 
@@ -643,6 +644,36 @@ class ChurnGuard(unittest.TestCase):
         import tempfile
         with tempfile.TemporaryDirectory() as t:
             self.assertEqual(self.run_guard(t, 'nbci-gate-1:RUNNING nbci-gate-2:STAGING '), (1, True))
+
+
+class ImageProvision(unittest.TestCase):
+    PROV = os.path.join(os.path.dirname(__file__), '..', 'runner', 'image', 'provision.sh')
+
+    def body(self):
+        with open(self.PROV) as f:
+            return f.read()
+
+    def test_given_provisioning_then_no_unauthenticated_github_api_call_is_made(self):
+        self.assertNotIn('api.github.com', self.body())
+
+    def test_given_provisioning_then_runner_and_gitleaks_versions_are_pinned(self):
+        b = self.body()
+        self.assertRegex(b, r'V=\$\{RUNNER_VERSION:-\d+\.\d+\.\d+\}')
+        self.assertRegex(b, r'GL=\$\{GITLEAKS_VERSION:-\d+\.\d+\.\d+\}')
+
+    def test_given_provisioning_then_semgrep_installs_in_a_venv_not_system_pip(self):
+        b = self.body()
+        self.assertIn('/opt/semgrep/bin/pip install', b)
+        self.assertNotIn('pip3 install -q --break-system-packages', b)
+
+    def test_given_the_per_job_boot_script_then_it_only_reads_metadata_and_runs_the_runner(self):
+        run = self.body().split("cat > /opt/nb-run.sh <<'RUN'")[1].split('\nRUN\n')[0]
+        for bad in ('apt', 'pip', 'npm', 'curl -fsSL', 'git clone', 'wget'):
+            self.assertNotIn(bad, run)
+
+    def test_given_an_image_build_then_only_the_newest_image_is_kept(self):
+        with open(os.path.join(os.path.dirname(__file__), '..', 'runner', 'controller', 'nbci.py')) as f:
+            self.assertIn('imgs[1:]', f.read())
 
 
 if __name__ == '__main__':

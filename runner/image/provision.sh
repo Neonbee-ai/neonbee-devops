@@ -11,14 +11,16 @@ curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -yq
 id runner >/dev/null 2>&1 || useradd -m -s /bin/bash runner
 echo 'runner ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/runner
 
-V=$(curl -fsSL https://api.github.com/repos/actions/runner/releases/latest | jq -r .tag_name | sed 's/^v//')
+# versions are pinned (no unauthenticated GitHub REST call: shared GCP IPs hit its rate limit); bump on rebuild
+V=${RUNNER_VERSION:-2.338.2}
 mkdir -p /opt/runner && curl -fsSL "https://github.com/actions/runner/releases/download/v$V/actions-runner-linux-x64-$V.tar.gz" | tar xz -C /opt/runner
 /opt/runner/bin/installdependencies.sh
 chown -R runner: /opt/runner
 
-GL=$(curl -fsSL https://api.github.com/repos/gitleaks/gitleaks/releases/latest | jq -r .tag_name | sed 's/^v//')
+GL=${GITLEAKS_VERSION:-8.30.1}
 curl -fsSL "https://github.com/gitleaks/gitleaks/releases/download/v${GL}/gitleaks_${GL}_linux_x64.tar.gz" | tar xz -C /usr/local/bin gitleaks
-pip3 install -q --break-system-packages semgrep
+# venv: the debian-owned typing_extensions cannot be uninstalled by a system-wide pip (broke every startup-mode boot)
+python3 -m venv /opt/semgrep && /opt/semgrep/bin/pip install -q semgrep && ln -sf /opt/semgrep/bin/semgrep /usr/local/bin/semgrep
 
 # Playwright Chromium (system deps as root, browsers into the runner's cache) + warm npm cache
 npx -y playwright@1 install-deps chromium
