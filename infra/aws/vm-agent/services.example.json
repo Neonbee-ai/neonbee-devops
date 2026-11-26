@@ -1,0 +1,48 @@
+{
+  "_comment": "Upload as s3://<release-bucket>/agent/services.json. One entry per PM2 app that runs on the AWS nodes (name = PM2 app name = deploy workflow service_name). Shape example only; the real, full catalog is vm-agent/services.json (keep the two in step). EXCLUDED by owner decision 2026-11-20: so360-command (command.neonbee.app), so360-command-be, the marketing website (neonbee.ai) and the Internal Tools apps - they stay on the Internal Tools VM 167.114.98.177. Never list them here.",
+  "services": [
+    {
+      "name": "nb-nginx-sites",
+      "type": "nginx",
+      "critical": true
+    },
+    {
+      "name": "shell-fe",
+      "type": "nginx",
+      "static": true,
+      "prod_nginx_root": "/var/www/dashboard.neonbee.app/html",
+      "critical": true
+    },
+    {
+      "name": "core-prod",
+      "type": "node",
+      "port": 8000,
+      "health_path": "/v1/health",
+      "script": "dist/src/main.js",
+      "instances": 2,
+      "max_memory": "500M",
+      "critical": true
+    },
+    {
+      "name": "connect-prod",
+      "type": "node",
+      "port": 8048,
+      "health_path": "/health",
+      "script": "dist/main.js",
+      "instances": 1,
+      "max_memory": "500M",
+      "critical": false
+    },
+    {
+      "name": "storefront-web-prod",
+      "type": "node",
+      "port": 8031,
+      "health_path": "/",
+      "exec_mode": "fork",
+      "script": "server.js",
+      "instances": 1,
+      "max_memory": "500M",
+      "critical": true
+    }
+  ]
+}

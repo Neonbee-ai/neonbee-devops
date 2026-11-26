@@ -1,0 +1,9 @@
+[Unit]
+Description=Neonbee node health check (writes /__lb_health flag)
+After=nb-boot.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/nb-agent/bin/nb-health.sh
+SuccessExitStatus=0 1
+TimeoutStartSec=30

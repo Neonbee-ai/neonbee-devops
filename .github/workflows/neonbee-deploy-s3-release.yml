@@ -1,0 +1,494 @@
+name: Neonbee Deploy — S3 Release Rollout (AWS ASG)
+
+# ════════════════════════════════════════════════════════════════════════════
+# Reusable workflow (plan item 2.4). Callers wire it as an opt-in deploy-aws
+# job (repo/org var NB_AWS_DEPLOY == 'true', main only, Stage 3.1); the build
+# artifact `nb-release-<service>` comes from neonbee-deploy-prod.yml.
+#
+#   artifact (built by the caller's build job — build once, never on a VM)
+#     → package: tar(dist | package_paths + extra files + nb-release.json) → zstd (gzip fallback)
+#     → upload:  s3://<bucket>/<service>/<sha>.tar.zst  (+ .sha256)
+#     → rollout: SSM Run Command (document nb-deploy, InService nodes of the ASG,
+#                one at a time by default)  OR  ASG instance refresh
+#     → promote: s3://<bucket>/<service>/current.json  {sha, key, prev, prev_key}
+#     → watch:   health URL / ALB target group for N minutes from the runner
+#     → revert:  on any failure after the upload, roll the previous release back
+#                out the same way and restore current.json
+#
+# Caller requirements:
+#   - runs on self-hosted runners only (runs_on input; never ubuntu-latest)
+#   - OIDC (preferred): caller job needs `permissions: { id-token: write,
+#     contents: read }` and passes aws_role_arn (or repo var NB_AWS_ROLE_ARN).
+#     Fallback: secrets AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY.
+#   - SSM document (default nb-deploy, plan item 2.2) must accept the string
+#     parameters: service, sha, bucket, key.
+# ════════════════════════════════════════════════════════════════════════════
+
+on:
+  workflow_call:
+    inputs:
+      service_name:
+        description: 'Service / PM2 app name, e.g. so360-crm-be (lowercase, digits, dash)'
+        required: true
+        type: string
+      artifact_name:
+        description: 'actions/upload-artifact name holding the built output'
+        required: false
+        type: string
+        default: 'dist'
+      dist_path:
+        description: 'Directory the artifact is downloaded into and packaged from'
+        required: false
+        type: string
+        default: 'dist'
+      extra_files:
+        description: 'Space-separated extra paths from the artifact dir to include if present'
+        required: false
+        type: string
+        default: 'package.json package-lock.json'
+      package_paths:
+        description: >-
+          Newline/space-separated paths inside the artifact dir (dist_path) to bundle at
+          the release root, keeping their relative path (e.g. for Next standalone:
+          ".next/standalone .next/static public"). Default "dist" = legacy layout: the
+          whole artifact dir becomes <release>/dist.
+        required: false
+        type: string
+        default: 'dist'
+      release_bucket:
+        description: 'S3 release bucket (falls back to repo var NB_RELEASE_BUCKET)'
+        required: false
+        type: string
+        default: ''
+      aws_region:
+        description: 'AWS region (falls back to repo var NB_AWS_REGION, then ap-south-1)'
+        required: false
+        type: string
+        default: ''
+      aws_role_arn:
+        description: 'IAM role for GitHub OIDC (falls back to repo var NB_AWS_ROLE_ARN, then to key secrets)'
+        required: false
+        type: string
+        default: ''
+      asg_name:
+        description: 'Auto Scaling Group to roll out to'
+        required: true
+        type: string
+      rollout_mode:
+        description: 'ssm (Run Command on InService nodes) or instance-refresh'
+        required: false
+        type: string
+        default: 'ssm'
+      ssm_document:
+        required: false
+        type: string
+        default: 'nb-deploy'
+      ssm_max_concurrency:
+        required: false
+        type: string
+        default: '1'
+      ssm_max_errors:
+        required: false
+        type: string
+        default: '0'
+      ssm_timeout_seconds:
+        description: 'Overall wait for the SSM command'
+        required: false
+        type: number
+        default: 1200
+      refresh_min_healthy_pct:
+        required: false
+        type: number
+        default: 90
+      refresh_warmup_seconds:
+        required: false
+        type: number
+        default: 120
+      refresh_timeout_seconds:
+        required: false
+        type: number
+        default: 3600
+      health_url:
+        description: 'URL polled from the runner during the watch window (empty = skip)'
+        required: false
+        type: string
+        default: ''
+      target_group_arn:
+        description: 'ALB target group checked during the watch window (empty = skip)'
+        required: false
+        type: string
+        default: ''
+      watch_minutes:
+        required: false
+        type: number
+        default: 5
+      watch_interval_seconds:
+        required: false
+        type: number
+        default: 30
+      watch_max_failures:
+        description: 'Consecutive failed checks that trigger the revert'
+        required: false
+        type: number
+        default: 3
+      dry_run:
+        description: 'Package and print the plan only; no AWS calls'
+        required: false
+        type: boolean
+        default: false
+      runs_on:
+        description: 'JSON runner label list (self-hosted only)'
+        required: false
+        type: string
+        default: '["self-hosted","runner-vm"]'
+    secrets:
+      AWS_ACCESS_KEY_ID:     { required: false }
+      AWS_SECRET_ACCESS_KEY: { required: false }
+    outputs:
+      release_key:
+        value: ${{ jobs.release.outputs.release_key }}
+      previous_sha:
+        value: ${{ jobs.release.outputs.previous_sha }}
+
+jobs:
+  release:
+    name: S3 release → ${{ inputs.asg_name }}
+    runs-on: ${{ fromJSON(inputs.runs_on) }}
+    timeout-minutes: 90
+    concurrency:
+      group: nb-s3-release-${{ inputs.service_name }}-${{ inputs.asg_name }}
+      cancel-in-progress: false
+    outputs:
+      release_key: ${{ steps.pkg.outputs.key }}
+      previous_sha: ${{ steps.prev.outputs.sha }}
+    env:
+      SERVICE: ${{ inputs.service_name }}
+      SHA: ${{ github.sha }}
+      BUCKET: ${{ inputs.release_bucket || vars.NB_RELEASE_BUCKET }}
+      AWS_REGION: ${{ inputs.aws_region || vars.NB_AWS_REGION || 'ap-south-1' }}
+      AWS_DEFAULT_REGION: ${{ inputs.aws_region || vars.NB_AWS_REGION || 'ap-south-1' }}
+      ROLE_ARN: ${{ inputs.aws_role_arn || vars.NB_AWS_ROLE_ARN }}
+      ASG: ${{ inputs.asg_name }}
+      MODE: ${{ inputs.rollout_mode }}
+    steps:
+      - name: Validate inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$1"; exit 1; }
+          [ "${{ runner.environment }}" != "github-hosted" ] || { echo "::error::self-hosted runners only (runs_on)"; exit 1; }
+          [[ "$SERVICE" =~ ^[a-z0-9][a-z0-9-]{1,62}$ ]] || fail "service_name must be lowercase letters, digits, dash"
+          [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || fail "unexpected github.sha"
+          [[ "$ASG" =~ ^[A-Za-z0-9._:/-]{1,255}$ ]] || fail "invalid asg_name"
+          case "$MODE" in ssm|instance-refresh) ;; *) fail "rollout_mode must be ssm or instance-refresh" ;; esac
+          if [ "${{ inputs.dry_run }}" != "true" ]; then
+            [ -n "$BUCKET" ] || fail "release_bucket input or NB_RELEASE_BUCKET var is required"
+            [[ "$BUCKET" =~ ^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$ ]] || fail "invalid bucket name"
+          fi
+          echo "service=$SERVICE sha=$SHA bucket=${BUCKET:-<none>} region=$AWS_REGION asg=$ASG mode=$MODE"
+
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.artifact_name }}
+          path: ${{ inputs.dist_path }}
+
+      - name: Package release bundle
+        id: pkg
+        shell: bash
+        env:
+          DIST_PATH: ${{ inputs.dist_path }}
+          EXTRA_FILES: ${{ inputs.extra_files }}
+          PACKAGE_PATHS: ${{ inputs.package_paths }}
+        run: |
+          set -euo pipefail
+          OUT="${RUNNER_TEMP}/nb-release-${GITHUB_RUN_ID}-${SERVICE}"
+          rm -rf "$OUT"; mkdir -p "$OUT/stage"
+          [ -d "$DIST_PATH" ] && [ -n "$(ls -A "$DIST_PATH")" ] || { echo "::error::$DIST_PATH is empty"; exit 1; }
+          # Normalise the list (newlines/tabs -> spaces). Exactly "dist" = legacy layout.
+          PATHS=$(printf '%s' "$PACKAGE_PATHS" | tr '\r\n\t' '   ' | xargs)
+          if [ "$PATHS" = "dist" ]; then
+            cp -R "$DIST_PATH" "$OUT/stage/dist"
+            # Extra files may sit next to dist in the artifact or in the workspace.
+            for f in $EXTRA_FILES; do
+              if   [ -e "$DIST_PATH/$f" ]; then cp -R "$DIST_PATH/$f" "$OUT/stage/";  rm -rf "$OUT/stage/dist/$f"
+              elif [ -e "$f" ];            then cp -R "$f" "$OUT/stage/"
+              fi
+            done
+          else
+            [ -n "$PATHS" ] || { echo "::error::package_paths is empty"; exit 1; }
+            for p in $PATHS; do
+              case "$p" in /*|..|../*|*/../*|*/..) echo "::error::package_paths entry '$p' must be relative, without '..'"; exit 1 ;; esac
+              p="${p%/}"
+              [ -e "$DIST_PATH/$p" ] || { echo "::error::package_paths entry '$p' not found in $DIST_PATH"; exit 1; }
+              mkdir -p "$OUT/stage/$(dirname "$p")"
+              cp -R "$DIST_PATH/$p" "$OUT/stage/$p"
+            done
+            # Optional extras: from the artifact dir, else the workspace; never fatal.
+            for f in $EXTRA_FILES; do
+              [ -e "$OUT/stage/$f" ] && continue
+              if   [ -e "$DIST_PATH/$f" ]; then cp -R "$DIST_PATH/$f" "$OUT/stage/"
+              elif [ -e "$f" ];            then cp -R "$f" "$OUT/stage/"
+              fi
+            done
+          fi
+          printf '{"service":"%s","sha":"%s","run_id":"%s","repo":"%s","created_at":"%s"}\n' \
+            "$SERVICE" "$SHA" "$GITHUB_RUN_ID" "$GITHUB_REPOSITORY" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$OUT/stage/nb-release.json"
+          if command -v zstd >/dev/null 2>&1; then
+            EXT=tar.zst; tar -C "$OUT/stage" -cf - . | zstd -q -T0 -10 -o "$OUT/bundle.$EXT"
+          else
+            EXT=tar.gz;  tar -C "$OUT/stage" -czf "$OUT/bundle.$EXT" .
+          fi
+          ( cd "$OUT" && { shasum -a 256 "bundle.$EXT" 2>/dev/null || sha256sum "bundle.$EXT"; } | awk '{print $1}' > bundle.sha256 )
+          KEY="${SERVICE}/${SHA}.${EXT}"
+          {
+            echo "file=$OUT/bundle.$EXT"
+            echo "sumfile=$OUT/bundle.sha256"
+            echo "key=$KEY"
+            echo "dir=$OUT"
+          } >> "$GITHUB_OUTPUT"
+          echo "Bundle $KEY ($(du -h "$OUT/bundle.$EXT" | awk '{print $1}'), sha256 $(cat "$OUT/bundle.sha256"))"
+
+      - name: Ensure AWS CLI
+        if: ${{ !inputs.dry_run }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if command -v aws >/dev/null 2>&1; then aws --version; exit 0; fi
+          # Runner-local install in the job temp dir — no system packages touched.
+          python3 -m venv "$RUNNER_TEMP/awscli-venv"
+          "$RUNNER_TEMP/awscli-venv/bin/pip" install -q awscli
+          echo "$RUNNER_TEMP/awscli-venv/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/awscli-venv/bin/aws" --version
+
+      - name: AWS credentials (OIDC role)
+        if: ${{ !inputs.dry_run && (inputs.aws_role_arn != '' || vars.NB_AWS_ROLE_ARN != '') }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ inputs.aws_role_arn || vars.NB_AWS_ROLE_ARN }}
+          role-session-name: nb-release-${{ github.run_id }}
+          aws-region: ${{ inputs.aws_region || vars.NB_AWS_REGION || 'ap-south-1' }}
+
+      - name: AWS credentials (access key fallback)
+        if: ${{ !inputs.dry_run && inputs.aws_role_arn == '' && vars.NB_AWS_ROLE_ARN == '' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ inputs.aws_region || vars.NB_AWS_REGION || 'ap-south-1' }}
+
+      - name: Read previous release
+        id: prev
+        if: ${{ !inputs.dry_run }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          aws sts get-caller-identity --query Arn --output text
+          CUR="${RUNNER_TEMP}/nb-current-${GITHUB_RUN_ID}.json"
+          if aws s3 cp "s3://$BUCKET/$SERVICE/current.json" "$CUR" --only-show-errors 2>/dev/null; then
+            read -r PSHA PKEY < <(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d.get("sha",""), d.get("key",""))' "$CUR")
+          else
+            PSHA=""; PKEY=""
+          fi
+          [ "$PSHA" = "$SHA" ] && echo "::warning::$SHA is already current; rolling out again"
+          echo "sha=$PSHA" >> "$GITHUB_OUTPUT"
+          echo "key=$PKEY" >> "$GITHUB_OUTPUT"
+          echo "Previous release: ${PSHA:-<none>} ${PKEY}"
+
+      - name: Upload bundle to S3
+        id: upload
+        if: ${{ !inputs.dry_run }}
+        shell: bash
+        env:
+          FILE: ${{ steps.pkg.outputs.file }}
+          SUMFILE: ${{ steps.pkg.outputs.sumfile }}
+          KEY: ${{ steps.pkg.outputs.key }}
+          PREV_SHA: ${{ steps.prev.outputs.sha }}
+          PREV_KEY: ${{ steps.prev.outputs.key }}
+        run: |
+          set -euo pipefail
+          aws s3 cp "$FILE" "s3://$BUCKET/$KEY" --only-show-errors \
+            --metadata "sha=$SHA,service=$SERVICE,run=$GITHUB_RUN_ID,sha256=$(cat "$SUMFILE")"
+          aws s3 cp "$SUMFILE" "s3://$BUCKET/$KEY.sha256" --only-show-errors
+          printf '{"sha":"%s","key":"%s","prev":"%s","prev_key":"%s","run_id":"%s"}\n' \
+            "$SHA" "$KEY" "$PREV_SHA" "$PREV_KEY" "$GITHUB_RUN_ID" > "${RUNNER_TEMP}/nb-candidate.json"
+          aws s3 cp "${RUNNER_TEMP}/nb-candidate.json" "s3://$BUCKET/$SERVICE/candidate.json" --only-show-errors \
+            --content-type application/json
+          echo "Uploaded s3://$BUCKET/$KEY"
+
+      - name: Roll out
+        id: rollout
+        if: ${{ !inputs.dry_run }}
+        shell: bash
+        env:
+          KEY: ${{ steps.pkg.outputs.key }}
+          PREV_SHA: ${{ steps.prev.outputs.sha }}
+          PREV_KEY: ${{ steps.prev.outputs.key }}
+          SSM_DOC: ${{ inputs.ssm_document }}
+          SSM_CONC: ${{ inputs.ssm_max_concurrency }}
+          SSM_ERRS: ${{ inputs.ssm_max_errors }}
+          SSM_TIMEOUT: ${{ inputs.ssm_timeout_seconds }}
+          RF_MIN_HEALTHY: ${{ inputs.refresh_min_healthy_pct }}
+          RF_WARMUP: ${{ inputs.refresh_warmup_seconds }}
+          RF_TIMEOUT: ${{ inputs.refresh_timeout_seconds }}
+        run: |
+          set -euo pipefail
+          write_current() {  # $1 sha  $2 key  $3 prev sha  $4 prev key
+            printf '{"sha":"%s","key":"%s","prev":"%s","prev_key":"%s","run_id":"%s","updated_at":"%s"}\n' \
+              "$1" "$2" "$3" "$4" "$GITHUB_RUN_ID" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "${RUNNER_TEMP}/nb-current-out.json"
+            aws s3 cp "${RUNNER_TEMP}/nb-current-out.json" "s3://$BUCKET/$SERVICE/current.json" --only-show-errors \
+              --content-type application/json
+          }
+          if [ "$MODE" = "ssm" ]; then
+            # InService nodes only: a node still booting reads current.json itself.
+            # shellcheck disable=SC2016  # JMESPath backtick literals
+            IDS=$(aws autoscaling describe-auto-scaling-groups --auto-scaling-group-names "$ASG" \
+              --query 'AutoScalingGroups[0].Instances[?LifecycleState==`InService`].InstanceId' --output text)
+            [ -n "$IDS" ] && [ "$IDS" != "None" ] || { echo "::error::no InService instances in $ASG"; exit 1; }
+            echo "Targets: $IDS"
+            PARAMS=$(printf '{"service":["%s"],"sha":["%s"],"bucket":["%s"],"key":["%s"]}' "$SERVICE" "$SHA" "$BUCKET" "$KEY")
+            # shellcheck disable=SC2086
+            CMD_ID=$(aws ssm send-command --document-name "$SSM_DOC" --instance-ids $IDS \
+              --parameters "$PARAMS" --max-concurrency "$SSM_CONC" --max-errors "$SSM_ERRS" \
+              --comment "nb-release $SERVICE ${SHA:0:12} run $GITHUB_RUN_ID" \
+              --query Command.CommandId --output text)
+            echo "ssm_command_id=$CMD_ID" >> "$GITHUB_OUTPUT"
+            echo "SSM command $CMD_ID"
+            DEADLINE=$(( $(date +%s) + SSM_TIMEOUT ))
+            while :; do
+              ST=$(aws ssm list-commands --command-id "$CMD_ID" --query 'Commands[0].Status' --output text)
+              case "$ST" in Pending|InProgress|Cancelling) ;; *) break ;; esac
+              [ "$(date +%s)" -lt "$DEADLINE" ] || { echo "::error::SSM command timed out"; aws ssm cancel-command --command-id "$CMD_ID" || true; exit 1; }
+              sleep 10
+            done
+            aws ssm list-command-invocations --command-id "$CMD_ID" \
+              --query 'CommandInvocations[].[InstanceId,Status,StatusDetails]' --output text || true
+            [ "$ST" = "Success" ] || { echo "::error::SSM rollout ended with status $ST"; exit 1; }
+            write_current "$SHA" "$KEY" "$PREV_SHA" "$PREV_KEY"
+          else
+            # New instances bootstrap from current.json, so promote first; the
+            # revert step restores the previous pointer if anything fails.
+            write_current "$SHA" "$KEY" "$PREV_SHA" "$PREV_KEY"
+            PREFS=$(printf '{"MinHealthyPercentage":%s,"InstanceWarmup":%s,"SkipMatching":false}' "$RF_MIN_HEALTHY" "$RF_WARMUP")
+            RF_ID=$(aws autoscaling start-instance-refresh --auto-scaling-group-name "$ASG" \
+              --preferences "$PREFS" --query InstanceRefreshId --output text)
+            echo "refresh_id=$RF_ID" >> "$GITHUB_OUTPUT"
+            echo "Instance refresh $RF_ID"
+            DEADLINE=$(( $(date +%s) + RF_TIMEOUT ))
+            while :; do
+              ST=$(aws autoscaling describe-instance-refreshes --auto-scaling-group-name "$ASG" \
+                --instance-refresh-ids "$RF_ID" --query 'InstanceRefreshes[0].[Status,PercentageComplete]' --output text)
+              echo "  $ST"
+              case "${ST%%[[:space:]]*}" in
+                Successful) break ;;
+                Failed|Cancelled|RollbackSuccessful|RollbackFailed) echo "::error::instance refresh $ST"; exit 1 ;;
+              esac
+              [ "$(date +%s)" -lt "$DEADLINE" ] || { echo "::error::instance refresh timed out"; exit 1; }
+              sleep 20
+            done
+          fi
+          echo "Rollout of $SERVICE ${SHA:0:12} complete"
+
+      - name: Post-deploy watch
+        if: ${{ !inputs.dry_run && (inputs.health_url != '' || inputs.target_group_arn != '') }}
+        shell: bash
+        env:
+          HEALTH_URL: ${{ inputs.health_url }}
+          TG_ARN: ${{ inputs.target_group_arn }}
+          WATCH_MIN: ${{ inputs.watch_minutes }}
+          INTERVAL: ${{ inputs.watch_interval_seconds }}
+          MAX_FAIL: ${{ inputs.watch_max_failures }}
+        run: |
+          set -uo pipefail
+          END=$(( $(date +%s) + WATCH_MIN * 60 )); FAILS=0; N=0
+          while [ "$(date +%s)" -lt "$END" ]; do
+            N=$((N+1)); OK=1; WHY=""
+            if [ -n "$HEALTH_URL" ]; then
+              CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$HEALTH_URL" || echo 000)
+              case "$CODE" in 2*|3*) ;; *) OK=0; WHY="health $CODE" ;; esac
+            fi
+            if [ -n "$TG_ARN" ]; then
+              # shellcheck disable=SC2016  # JMESPath backtick literals
+              BAD=$(aws elbv2 describe-target-health --target-group-arn "$TG_ARN" \
+                --query 'length(TargetHealthDescriptions[?TargetHealth.State!=`healthy`])' --output text 2>/dev/null || echo err)
+              [ "$BAD" = "0" ] || { OK=0; WHY="$WHY tg_unhealthy=$BAD"; }
+            fi
+            if [ "$OK" = 1 ]; then FAILS=0; echo "check $N ok"; else FAILS=$((FAILS+1)); echo "check $N FAIL ($WHY) $FAILS/$MAX_FAIL"; fi
+            [ "$FAILS" -ge "$MAX_FAIL" ] && { echo "::error::post-deploy watch failed"; exit 1; }
+            sleep "$INTERVAL"
+          done
+          echo "Watch passed ($N checks over ${WATCH_MIN}m)"
+
+      - name: Revert to previous release
+        if: ${{ failure() && !inputs.dry_run && steps.upload.outcome == 'success' }}
+        shell: bash
+        env:
+          PREV_SHA: ${{ steps.prev.outputs.sha }}
+          PREV_KEY: ${{ steps.prev.outputs.key }}
+          RF_ID: ${{ steps.rollout.outputs.refresh_id }}
+          CMD_ID: ${{ steps.rollout.outputs.ssm_command_id }}
+          SSM_DOC: ${{ inputs.ssm_document }}
+          SSM_CONC: ${{ inputs.ssm_max_concurrency }}
+          SSM_TIMEOUT: ${{ inputs.ssm_timeout_seconds }}
+          RF_MIN_HEALTHY: ${{ inputs.refresh_min_healthy_pct }}
+          RF_WARMUP: ${{ inputs.refresh_warmup_seconds }}
+          RF_TIMEOUT: ${{ inputs.refresh_timeout_seconds }}
+        run: |
+          set -euo pipefail
+          if [ -z "$PREV_SHA" ] || [ -z "$PREV_KEY" ] || [ "$PREV_SHA" = "$SHA" ]; then
+            echo "::error::No previous release to revert to for $SERVICE — fleet left as is; investigate manually"
+            exit 1
+          fi
+          echo "Reverting $SERVICE to ${PREV_SHA:0:12} ($PREV_KEY)"
+          [ -n "$CMD_ID" ] && aws ssm cancel-command --command-id "$CMD_ID" 2>/dev/null || true
+          if [ -n "$RF_ID" ]; then aws autoscaling cancel-instance-refresh --auto-scaling-group-name "$ASG" 2>/dev/null || true; fi
+          printf '{"sha":"%s","key":"%s","prev":"","prev_key":"","run_id":"%s","reverted_from":"%s","updated_at":"%s"}\n' \
+            "$PREV_SHA" "$PREV_KEY" "$GITHUB_RUN_ID" "$SHA" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "${RUNNER_TEMP}/nb-revert.json"
+          aws s3 cp "${RUNNER_TEMP}/nb-revert.json" "s3://$BUCKET/$SERVICE/current.json" --only-show-errors --content-type application/json
+          if [ "$MODE" = "ssm" ]; then
+            # shellcheck disable=SC2016  # JMESPath backtick literals
+            IDS=$(aws autoscaling describe-auto-scaling-groups --auto-scaling-group-names "$ASG" \
+              --query 'AutoScalingGroups[0].Instances[?LifecycleState==`InService`].InstanceId' --output text)
+            [ -n "$IDS" ] && [ "$IDS" != "None" ] || { echo "::error::no InService instances to revert"; exit 1; }
+            PARAMS=$(printf '{"service":["%s"],"sha":["%s"],"bucket":["%s"],"key":["%s"]}' "$SERVICE" "$PREV_SHA" "$BUCKET" "$PREV_KEY")
+            # Revert tolerates per-node errors so one dead node can't block the rest.
+            # shellcheck disable=SC2086
+            RID=$(aws ssm send-command --document-name "$SSM_DOC" --instance-ids $IDS --parameters "$PARAMS" \
+              --max-concurrency "$SSM_CONC" --max-errors "100%" \
+              --comment "nb-revert $SERVICE ${PREV_SHA:0:12} run $GITHUB_RUN_ID" --query Command.CommandId --output text)
+            DEADLINE=$(( $(date +%s) + SSM_TIMEOUT ))
+            while :; do
+              ST=$(aws ssm list-commands --command-id "$RID" --query 'Commands[0].Status' --output text)
+              case "$ST" in Pending|InProgress|Cancelling) ;; *) break ;; esac
+              [ "$(date +%s)" -lt "$DEADLINE" ] || { ST=TimedOut; break; }
+              sleep 10
+            done
+            aws ssm list-command-invocations --command-id "$RID" --query 'CommandInvocations[].[InstanceId,Status]' --output text || true
+            echo "Revert SSM status: $ST"
+          else
+            # Wait for the cancel to settle, then refresh again onto the restored pointer.
+            for _ in $(seq 1 30); do
+              S=$(aws autoscaling describe-instance-refreshes --auto-scaling-group-name "$ASG" --max-records 1 \
+                --query 'InstanceRefreshes[0].Status' --output text)
+              case "$S" in Pending|InProgress|Cancelling|Baking|RollbackInProgress) sleep 10 ;; *) break ;; esac
+            done
+            PREFS=$(printf '{"MinHealthyPercentage":%s,"InstanceWarmup":%s,"SkipMatching":false}' "$RF_MIN_HEALTHY" "$RF_WARMUP")
+            RID=$(aws autoscaling start-instance-refresh --auto-scaling-group-name "$ASG" --preferences "$PREFS" \
+              --query InstanceRefreshId --output text)
+            DEADLINE=$(( $(date +%s) + RF_TIMEOUT ))
+            while :; do
+              ST=$(aws autoscaling describe-instance-refreshes --auto-scaling-group-name "$ASG" \
+                --instance-refresh-ids "$RID" --query 'InstanceRefreshes[0].Status' --output text)
+              case "$ST" in Successful|Failed|Cancelled|RollbackSuccessful|RollbackFailed) break ;; esac
+              [ "$(date +%s)" -lt "$DEADLINE" ] || { ST=TimedOut; break; }
+              sleep 20
+            done
+            echo "Revert instance refresh status: $ST"
+          fi
+          echo "::error::Deploy of ${SHA:0:12} failed and was reverted to ${PREV_SHA:0:12}"
+          exit 1
+
+      - name: Clean up local bundle
+        if: always()
+        shell: bash
+        run: rm -rf "${{ steps.pkg.outputs.dir }}" "${RUNNER_TEMP}"/nb-*.json 2>/dev/null || true

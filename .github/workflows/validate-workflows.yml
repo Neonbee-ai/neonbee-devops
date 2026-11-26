@@ -37,6 +37,15 @@ jobs:
         run: |
           pip3 install pyyaml -q --break-system-packages 2>/dev/null || pip3 install pyyaml -q 2>/dev/null || true
           python3 -m unittest discover -s tests -p 'test_*.py' -v
+      - name: AWS node tests (fresh node TLS + serving EIP claim)
+        run: |
+          cd infra/aws/tests
+          python3 -m unittest -v test_fresh_node_tls_and_eip test_vm_agent_runtime 2>&1 | tee "$RUNNER_TEMP/aws-node-tests.log"
+          rc=${PIPESTATUS[0]}
+          [ "$rc" -eq 0 ] || exit "$rc"
+          if grep -E "^test_.*\(test_fresh_node_tls_and_eip\..*skipped" "$RUNNER_TEMP/aws-node-tests.log"; then
+            echo "::error::fresh-node TLS/EIP tests were skipped (jq/openssl missing on the runner)"; exit 1
+          fi
       - name: Burst VM tests (plain bash)
         run: for t in tests/burst_*_test.sh; do bash "$t" || exit 1; done
 

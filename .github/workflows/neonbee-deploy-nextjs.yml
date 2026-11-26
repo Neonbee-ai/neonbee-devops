@@ -875,7 +875,7 @@ jobs:
     name: Notify Teams
     needs: [gate, security, build-deploy]
     if: always()
-    runs-on: [self-hosted, runner-vm]
+    runs-on: [self-hosted, nb-route]
     steps:
       - name: Post pipeline result to Teams
         env:
