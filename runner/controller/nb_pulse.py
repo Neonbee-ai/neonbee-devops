@@ -22,6 +22,10 @@ import glob, json, os, re, time, urllib.request
 E = os.environ.get
 SPOOL_DIR = E('PULSE_SPOOL_DIR', '/var/lib/nbci/pulse-spool')
 FIXING, FIXED_NEXT, DONE = E('PULSE_FIXING_STATUS', 'fixing'), E('PULSE_REVERIFY_STATUS', 'reverify'), E('PULSE_BUG_DONE', 'done')
+# Pulse task id of a commit/PR: ONLY the `Pulse:` trailer (last paragraph of the commit message),
+# else the branch name <type>/<8hex>-..., else `Pulse:` lines in the PR body. Never loose hex.
+TRAILER_RE = re.compile(r'^Pulse:[ \t]*(none|[0-9a-f]{8}(?:-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})?)[ \t]*$', re.I)
+BRANCH_RE = re.compile(r'^[a-z]+/([0-9a-f]{8})(?:-|$)', re.I)
 ID_RE = re.compile(r'\b([0-9a-f]{8}(?:-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})?)\b')
 PERMANENT = ('not found', 'ACCESS_DENIED', 'access denied')
 
@@ -164,6 +168,51 @@ class PulseQueue:
             if not any(b.get('open') for kk, b in self.st['bugs'].items() if kk.startswith(op['task'] + '|')):
                 self.c.call('add_comment', {'task_id': op['task'], 'message': op['text']})
                 self.c.call('update_task_status', {'task_id': op['task'], 'status': FIXED_NEXT})
+
+
+def trailer(msg):
+    """'none', an 8-hex id or a uuid (lowercased) from the message's trailer block (its last paragraph,
+    not the subject), or None. Comment lines (#) are ignored, as git does."""
+    text = '\n'.join(l for l in (msg or '').splitlines() if not l.startswith('#')).strip()
+    paras = [p for p in re.split(r'\n[ \t]*\n', text) if p.strip()]
+    if len(paras) < 2:
+        return None
+    for line in paras[-1].splitlines():
+        m = TRAILER_RE.match(line.strip())
+        if m:
+            return m.group(1).lower()
+    return None
+
+
+def exempt(msg):
+    """Git-generated messages (merge, revert, fixup/squash) need no trailer."""
+    s = (msg or '').lstrip()
+    return s.startswith(('Merge ', 'Revert "', 'fixup! ', 'squash! ', 'amend! '))
+
+
+def missing_trailers(msgs):
+    """Indexes of the commit messages that carry no `Pulse:` trailer and are not exempt."""
+    return [i for i, m in enumerate(msgs or []) if not exempt(m) and trailer(m) is None]
+
+
+def task_ids(msgs, branch='', body=''):
+    """Pulse task ids of a PR: commit trailers, else the branch fix/<8hex>-..., else `Pulse:` lines in
+    the PR body. `Pulse: none` is a valid trailer that names no task."""
+    ids = []
+
+    def add(i):
+        if i and i != 'none' and all(x[:8] != i[:8] for x in ids):
+            ids.append(i)
+    for m in msgs or []:
+        add(trailer(m))
+    if not ids:
+        b = BRANCH_RE.match(branch or '')
+        add(b.group(1).lower() if b else None)
+    if not ids:
+        for line in (body or '').splitlines():
+            m = TRAILER_RE.match(line.strip())
+            add(m.group(1).lower() if m else None)
+    return ids
 
 
 def match_test_cases(text, check):

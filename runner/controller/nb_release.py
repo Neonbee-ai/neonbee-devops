@@ -14,6 +14,7 @@ task -> 'released'.
 """
 import os, time
 import nbci_logic as L
+import nb_pulse as P
 from nbci_io import job_log
 
 E = os.environ.get
@@ -28,6 +29,7 @@ def _ts(s):
 class Release:
     def __init__(self, gh, org, manifest, log, alert, state, pulse, dry, repos):
         self.gh, self.org, self.m, self.log, self.alert, self.st, self.pq, self.dry = gh, org, manifest, log, alert, state, pulse, dry
+        self._refs = {}
         self.repo_list = repos
         for k in ('announced', 'red', 'labelled', 'train_shas'):
             self.st.setdefault(k, [])
@@ -87,18 +89,34 @@ class Release:
         return True
 
     def report(self, repo, pr, fails, severity):
-        for tid in L.pulse_ids(pr.get('title'), pr.get('body')):
+        for tid in self.ids(repo, pr):
             for c, job, kind, exc in fails:
                 url = (job or {}).get('html_url') or c.get('html_url', '')
                 self.pq.report_failure(tid, c['name'], repo, pr.get('number', 0), url, exc, severity)
 
     def fixed(self, repo, pr, runs):
         green = {c['name'] for c in runs if c['status'] == 'completed' and c['conclusion'] in L.OK}
-        for tid in L.pulse_ids(pr.get('title'), pr.get('body')):
+        for tid in self.ids(repo, pr):
             for key, bug in list(self.pq.st['bugs'].items()):
                 t, chk = key.split('|', 1)
                 if t == tid and bug.get('open') and chk in green:
                     self.pq.report_fixed(tid, chk, repo, pr.get('number', 0), pr.get('html_url', ''))
+
+    def refs(self, repo, pr):
+        """(Pulse task ids, every commit has a trailer) for a PR, cached per head sha."""
+        key = '%s#%s@%s' % (repo, pr.get('number'), (pr.get('head') or {}).get('sha', ''))
+        if key not in self._refs:
+            try:
+                r = self.gh('repos/%s/%s/pulls/%s/commits?per_page=100' % (self.org, repo, pr.get('number')))
+                msgs = [c['commit']['message'] for c in r] if isinstance(r, list) else []
+            except Exception:
+                msgs = []
+            ids = P.task_ids(msgs, (pr.get('head') or {}).get('ref', ''), pr.get('body'))
+            self._refs[key] = (ids, bool(ids) or bool(msgs and not P.missing_trailers(msgs)))
+        return self._refs[key]
+
+    def ids(self, repo, pr):
+        return self.refs(repo, pr)[0]
 
     # ── one repo+base train ───────────────────────────────────────────────────────────────────────
     def evaluate(self, repo, pr, open_grp, now):
@@ -110,6 +128,7 @@ class Release:
         grp_ok = True
         if base == 'main' and branch.startswith('release/') and open_grp is not None:
             grp_ok = L.group_of(repo, self.m) <= open_grp
+        pr['_pulse_ok'] = self.refs(repo, pr)[1]
         act = L.train_action(pr, behind, verdict, grp_ok)
         fails = []
         if act.startswith('eject:a check failed'):
@@ -186,7 +205,7 @@ class Release:
                 continue
             for d in self.gh('repos/%s/%s/pulls?state=open&base=develop&head=%s:%s' % (self.org, repo, self.org, pr['head']['ref'])):
                 self._do('label develop', 'repos/%s/%s/issues/%s/labels' % (self.org, repo, d['number']), 'POST', {'labels': [LABEL]})
-            for tid in L.pulse_ids(pr.get('title'), pr.get('body')):
+            for tid in self.ids(repo, pr):
                 pulse_released(tid, 'Released to production: %s/%s PR #%s (%s), main runs green.'
                                % (self.org, repo, pr['number'], pr['merge_commit_sha'][:9]))
             self.st['announced'] = (self.st['announced'] + [key])[-500:]

@@ -118,18 +118,10 @@ def percentile(xs, p):
 
 
 # ── release train ──────────────────────────────────────────────────────────────────────────────────
-PULSE_RE = re.compile(r'PULSE-([0-9a-f]{8})\b', re.I)
 OK = {'success', 'skipped', 'neutral'}
 GATE_CHECK = re.compile(r'(^|/ )Gate$')
 
 
-def pulse_ids(*texts):
-    seen = []
-    for t in texts:
-        for m in PULSE_RE.findall(t or ''):
-            if m.lower() not in seen:
-                seen.append(m.lower())
-    return seen
 
 
 def checks_verdict(check_runs):
@@ -152,8 +144,8 @@ def train_action(pr, behind_by, verdict, group_open=True):
     labels = {l['name'] for l in pr.get('labels', [])}
     if pr.get('draft'):
         return 'eject:draft'
-    if not pulse_ids(pr.get('title')):
-        return 'eject:title needs a Pulse id (PULSE-xxxxxxxx)'
+    if not pr.get('_pulse_ok'):     # set by nb_release from nb_pulse.task_ids / missing_trailers
+        return 'eject:every commit needs a "Pulse: <id>" trailer ("Pulse: none" for chore/docs/ci)'
     if 'needs-migration' in labels and 'migration-applied' not in labels:
         return 'hold:needs-migration (add migration-applied once the migration is applied)'
     if not group_open:

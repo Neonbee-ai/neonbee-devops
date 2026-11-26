@@ -142,13 +142,13 @@ class Fallback(unittest.TestCase):
 
 
 class Train(unittest.TestCase):
-    pr = {'title': 'fix(crm): import PULSE-1a2b3c4d', 'draft': False, 'mergeable': True, 'mergeable_state': 'clean', 'labels': []}
+    pr = {'title': 'fix(crm): import', '_pulse_ok': True, 'draft': False, 'mergeable': True, 'mergeable_state': 'clean', 'labels': []}
 
     def runs(self, *spec):
         return [{'id': i, 'name': n, 'status': st, 'conclusion': c} for i, (n, st, c) in enumerate(spec)]
 
     def test_title_without_pulse_id_is_ejected(self):
-        self.assertTrue(L.train_action(dict(self.pr, title='fix: x'), 0, 'green').startswith('eject:'))
+        self.assertTrue(L.train_action(dict(self.pr, _pulse_ok=False), 0, 'green').startswith('eject:'))
 
     def test_needs_migration_holds_until_migration_applied(self):
         held = dict(self.pr, labels=[{'name': 'needs-migration'}])
@@ -180,7 +180,6 @@ class Train(unittest.TestCase):
         self.assertEqual(L.open_group({'so360-shell-fe', 'so360-crm-be'}, MAN), g('so360-crm-be'))
 
     def test_pulse_ids_and_main_green(self):
-        self.assertEqual(L.pulse_ids('x PULSE-1a2b3c4d', 'PULSE-1A2B3C4D PULSE-deadbeef'), ['1a2b3c4d', 'deadbeef'])
         self.assertTrue(L.main_green([{'status': 'completed', 'conclusion': 'success'}]))
         self.assertFalse(L.main_green([{'status': 'completed', 'conclusion': 'failure'}]))
         self.assertFalse(L.main_green([]))
@@ -231,10 +230,15 @@ class Workflows(unittest.TestCase):
         self.assertIn("vars.NB_CI_MODE == 'auto'", t)
         self.assertLess(t.index('name: Revert to previous release'), t.index('name: Verify served artifact is this release'))
 
-    def test_pr_title_needs_a_pulse_id_unless_legacy(self):
+    def test_given_an_auto_repo_pr_then_the_gate_checks_every_commit_for_a_pulse_trailer(self):
         t = wf('neonbee-pr-gate.yml')
-        self.assertIn('PULSE-[0-9a-f]{8}', t)
-        self.assertIn("vars.NB_CI_MODE == 'auto'", t)
+        step = t[t.index('- name: Every commit has a Pulse trailer'):]
+        step = step[:step.index('PY\n', step.index("<<'PY'") + 6)]
+        self.assertIn("vars.NB_CI_MODE == 'auto'", step.splitlines()[1])
+        self.assertIn(nb_pulse.TRAILER_RE.pattern, step)          # parity with nb_pulse.py
+        self.assertIn('get_task', step)
+        self.assertIn('sys.exit(1 if bad or missing else 0)', step)
+        self.assertNotIn('PULSE-[0-9a-f]{8}', t)                   # the PR-title rule is gone
 
 
 class Image(unittest.TestCase):
@@ -300,8 +304,8 @@ class FakeMCP:
         return 'ok'
 
 
-def pr(n, title='fix PULSE-1a2b3c4d', base='main', head='feat/x', labels=('nb-merge',)):
-    return {'number': n, 'title': title, 'body': '', 'draft': False, 'mergeable': True, 'mergeable_state': 'clean',
+def pr(n, title='fix: x', base='main', head='feat/x', labels=('nb-merge',), pulse=('1a2b3c4d',)):
+    return {'number': n, 'title': title, 'body': '\n'.join('Pulse: ' + i for i in pulse), 'draft': False, 'mergeable': True, 'mergeable_state': 'clean',
             'labels': [{'name': l} for l in labels], 'base': {'ref': base}, 'head': {'ref': head, 'sha': 'sha%d' % n},
             'html_url': 'https://github.com/x/pull/%d' % n}
 
@@ -464,8 +468,8 @@ class PulseOnFailure(unittest.TestCase):
         self.assertTrue(all(op['next_at'] > 0 and op['tries'] == 1 for op in pq.st['q'][:1]))
 
     def test_the_train_reports_a_code_failure_to_every_pulse_id(self):
-        routes = {'repos/org/r1/pulls?state=open': [pr(1, title='fix PULSE-1a2b3c4d PULSE-deadbeef')],
-                  'repos/org/r1/pulls/1': pr(1, title='fix PULSE-1a2b3c4d PULSE-deadbeef'), 'repos/org/r1/compare/': {'behind_by': 0},
+        routes = {'repos/org/r1/pulls?state=open': [pr(1, pulse=('1a2b3c4d', 'deadbeef'))],
+                  'repos/org/r1/pulls/1': pr(1, pulse=('1a2b3c4d', 'deadbeef')), 'repos/org/r1/compare/': {'behind_by': 0},
                   'repos/org/r1/commits/sha1/check-runs': checks('failure'), 'repos/org/r1/pulls?state=closed': []}
         pq = nb_pulse.PulseQueue({}, FakeMCP(), lambda *a: None)
         nb_release.job_log = lambda *a, **k: 'FAIL src/x.spec.ts'
@@ -485,6 +489,47 @@ class PulseOnFailure(unittest.TestCase):
         self.assertLessEqual(len(ex.splitlines()), 20)
         self.assertIn('FAIL src/a.spec.ts', ex)
 
+
+
+class PulseTrailer(unittest.TestCase):
+    def test_given_a_trailer_in_the_last_paragraph_then_its_id_is_read(self):
+        self.assertEqual(nb_pulse.trailer('fix(crm): x\n\nbody 1a2b3c4d\n\nPulse: 1A2B3C4D'), '1a2b3c4d')
+
+    def test_given_a_uuid_or_none_trailer_then_it_is_read(self):
+        u = '1a2b3c4d-1111-2222-3333-444455556666'
+        self.assertEqual(nb_pulse.trailer('feat: y\n\nPulse: ' + u), u)
+        self.assertEqual(nb_pulse.trailer('chore: z\n\nPulse: none'), 'none')
+
+    def test_given_loose_hex_or_a_subject_only_trailer_then_no_id_is_read(self):
+        self.assertIsNone(nb_pulse.trailer('fix: deadbeef in 1a2b3c4d\n\nsha cafebabe'))
+        self.assertIsNone(nb_pulse.trailer('Pulse: 1a2b3c4d'))
+        self.assertIsNone(nb_pulse.trailer('fix: x\n\nPulse: 1a2b3c4\n'))          # 7 hex
+        self.assertIsNone(nb_pulse.trailer('fix: x\n\nPulse: 1a2b3c4d\n\nmore text'))  # not the last paragraph
+
+    def test_given_git_comment_lines_then_they_are_ignored(self):
+        self.assertEqual(nb_pulse.trailer('fix: x\n\nPulse: 1a2b3c4d\n# Please enter the commit message'), '1a2b3c4d')
+
+    def test_given_merge_or_fixup_commits_then_they_need_no_trailer(self):
+        msgs = ["Merge branch 'develop'", 'fixup! fix: x', 'fix: y', 'fix: z\n\nPulse: none']
+        self.assertEqual(nb_pulse.missing_trailers(msgs), [2])
+
+    def test_given_commit_trailers_then_they_win_over_branch_and_body(self):
+        ids = nb_pulse.task_ids(['a\n\nPulse: 1a2b3c4d', 'b\n\nPulse: deadbeef', 'c\n\nPulse: 1A2B3C4D'],
+                                'fix/cafebabe-x', 'Pulse: 0badf00d')
+        self.assertEqual(ids, ['1a2b3c4d', 'deadbeef'])
+
+    def test_given_no_trailer_then_the_branch_then_the_pr_body_is_used(self):
+        self.assertEqual(nb_pulse.task_ids(['a'], 'fix/cafebabe-login', 'Pulse: 0badf00d'), ['cafebabe'])
+        self.assertEqual(nb_pulse.task_ids(['a'], 'feat/login', 'Pulse: 0badf00d\nsee deadbeef'), ['0badf00d'])
+        self.assertEqual(nb_pulse.task_ids(['a\n\nPulse: none'], 'feat/login', 'fixes deadbeef'), [])
+
+    def test_given_only_pulse_none_commits_then_the_train_accepts_the_pr(self):
+        gh = FakeGH({'repos/org/r1/pulls/7/commits': [{'commit': {'message': 'ci: x\n\nPulse: none'}}]})
+        rel = nb_release.Release(gh, 'org', MAN, lambda *a: None, lambda t: None, {}, None, True, ['r1'])
+        p = pr(7, pulse=())
+        self.assertEqual(rel.refs('r1', p), ([], True))
+        p2 = pr(8, pulse=())
+        self.assertEqual(rel.refs('r1', p2), ([], False))      # commits unreadable, no branch/body id
 
 
 class RunnerBoot(unittest.TestCase):

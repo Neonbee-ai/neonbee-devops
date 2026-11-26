@@ -62,6 +62,7 @@ on:
         default: false
     secrets:
       NB_BURST_DISPATCH_TOKEN:      { required: false }  # neonbee-devops actions:write; burst-label VM request
+      NB_PULSE_TOKEN:               { required: false }  # Pulse MCP token: the Pulse-trailer step checks ids exist
       # All optional: a fork PR receives no secrets, and a gate that fails on
       # provenance rather than on the code trains people to ignore it. The
       # integration tier warns and skips when its environment is absent.
@@ -152,17 +153,66 @@ jobs:
       # backend, contract + integration) in a develop push run. See step 'prior'.
       prior_pass: ${{ steps.prior.outputs.prior_pass || 'false' }}
     steps:
-      # ── Pulse task id (zero-agent release: the merge train and the Pulse 'released' update read it) ──
-      # The title must carry PULSE-<8 hex> (the Pulse task's short id). Bots (dependabot) are exempt.
-      # Kill switch: org/repo variable NB_PULSE_TITLE=off (enforced only when NB_CI_MODE=auto).
-      - name: PR title has a Pulse task id
-        if: github.event_name == 'pull_request' && vars.NB_PULSE_TITLE != 'off' && vars.NB_CI_MODE == 'auto' && !endsWith(github.event.pull_request.user.login, '[bot]')
+      # ── Pulse trailer (zero-agent release: the merge train and the Pulse 'released' update read it) ──
+      # Every commit needs a `Pulse: <8-hex|uuid>` trailer in its last paragraph, or `Pulse: none` for
+      # chore/docs/ci; merge/revert/fixup commits and bots are exempt. Ids must exist in Pulse when
+      # secret NB_PULSE_TOKEN + variable PULSE_MCP_URL are set (a Pulse outage only warns). Same regex as
+      # runner/controller/nb_pulse.py (tests/test_nbci.py holds them in parity). Enforced only when
+      # NB_CI_MODE=auto, so legacy repos are unaffected. Kill switch: variable NB_PULSE_TRAILER=off.
+      - name: Every commit has a Pulse trailer
+        if: github.event_name == 'pull_request' && vars.NB_PULSE_TRAILER != 'off' && vars.NB_CI_MODE == 'auto' && !endsWith(github.event.pull_request.user.login, '[bot]')
         env:
-          TITLE: ${{ github.event.pull_request.title }}
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          PULSE_MCP_URL: ${{ vars.PULSE_MCP_URL }}
+          PULSE_TOKEN: ${{ secrets.NB_PULSE_TOKEN }}
         run: |
-          if printf '%s' "$TITLE" | grep -qiE 'PULSE-[0-9a-f]{8}([^0-9a-f]|$)'; then echo "Pulse id found"; exit 0; fi
-          echo "::error::PR title needs a Pulse task id, e.g. 'fix(crm): lead import PULSE-1a2b3c4d'. Edit the title, then re-run this job."
-          exit 1
+          gh api --paginate "repos/$REPO/pulls/$PR/commits?per_page=100" --jq '.[] | {sha: .sha, msg: .commit.message}' > "$RUNNER_TEMP/pr-commits.jsonl"
+          python3 - "$RUNNER_TEMP/pr-commits.jsonl" <<'PY'
+          import json, os, re, sys, urllib.request
+          TRAILER_RE = re.compile(r'^Pulse:[ \t]*(none|[0-9a-f]{8}(?:-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})?)[ \t]*$', re.I)
+          EXEMPT = ('Merge ', 'Revert "', 'fixup! ', 'squash! ', 'amend! ')
+          def trailer(msg):
+              text = '\n'.join(l for l in msg.splitlines() if not l.startswith('#')).strip()
+              paras = [p for p in re.split(r'\n[ \t]*\n', text) if p.strip()]
+              for line in (paras[-1].splitlines() if len(paras) > 1 else []):
+                  m = TRAILER_RE.match(line.strip())
+                  if m: return m.group(1).lower()
+          commits = [json.loads(l) for l in open(sys.argv[1]) if l.strip()]
+          bad, ids = [], set()
+          for c in commits:
+              t = trailer(c['msg'])
+              if t is None and not c['msg'].lstrip().startswith(EXEMPT): bad.append(c)
+              elif t and t != 'none': ids.add(t)
+          for c in bad:
+              print('::error::commit %s has no "Pulse: <id>" trailer (use "Pulse: none" for chore/docs/ci): %s' % (c['sha'][:9], c['msg'].splitlines()[0][:80]))
+          url, tok, sid, missing = os.environ.get('PULSE_MCP_URL'), os.environ.get('PULSE_TOKEN'), None, []
+          def rpc(method, params):
+              global sid
+              h = {'Content-Type': 'application/json', 'Accept': 'application/json, text/event-stream', 'Authorization': 'Bearer ' + tok}
+              if sid: h['Mcp-Session-Id'] = sid
+              body = json.dumps({'jsonrpc': '2.0', 'id': 1, 'method': method, 'params': params}).encode()
+              with urllib.request.urlopen(urllib.request.Request(url, data=body, headers=h, method='POST'), timeout=20) as f:
+                  sid = f.headers.get('Mcp-Session-Id') or sid
+                  for line in f.read().decode().splitlines():
+                      line = line[5:].strip() if line.startswith('data:') else line.strip()
+                      if line.startswith('{'): return json.loads(line)
+              return {}
+          if ids and url and tok:
+              try:
+                  rpc('initialize', {'protocolVersion': '2025-03-26', 'capabilities': {}, 'clientInfo': {'name': 'nb-pr-gate', 'version': '1'}})
+                  for i in sorted(ids):
+                      r = rpc('tools/call', {'name': 'get_task', 'arguments': {'task_id': i}})
+                      if 'error' in r or r.get('result', {}).get('isError'): missing.append(i)
+              except Exception as e:
+                  print('::warning::Pulse not reachable, task ids not verified: %s' % str(e)[:120]); missing = []
+          elif ids:
+              print('::warning::NB_PULSE_TOKEN / PULSE_MCP_URL not set: Pulse ids not verified')
+          for i in missing:
+              print('::error::Pulse task %s does not exist (or is not visible to the CI token)' % i)
+          sys.exit(1 if bad or missing else 0)
+          PY
       # ── Gate reuse on develop -> main promotion ─────────────────────────
       # Main's tree is usually byte-identical to a develop commit whose push
       # run already passed the same unit/contract/integration tiers. Reuse that
