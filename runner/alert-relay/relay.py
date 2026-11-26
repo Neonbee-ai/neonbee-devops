@@ -11,7 +11,7 @@ BUCKET = os.environ.get('BUCKET', '')
 
 
 def _post(url, body, headers):
-    r = urllib.request.Request(url, data=json.dumps(body).encode(), headers=dict(headers, **{'Content-Type': 'application/json'}), method='POST')
+    r = urllib.request.Request(url, data=json.dumps(body).encode(), headers=dict(headers, **{'Content-Type': 'application/json', 'User-Agent': 'nbci-alert-relay/1'}), method='POST')
     with urllib.request.urlopen(r, timeout=20) as f:
         return f.headers.get('Mcp-Session-Id'), f.read().decode()
 

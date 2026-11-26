@@ -409,13 +409,18 @@ def alert_key(text):
     return re.sub(r'[0-9a-f]{7,40}|\d+(\.\d+)?', '#', text.lower())[:120]
 
 
+# workflow_job: the queued-job poll is the truth (old 'queued' events would look like live demand); push: old pushes
+# would raise false BYPASS alerts. Redelivered workflow_run older than 2 h is ignored by the receiver.
+REDELIVER_EVENTS = ('workflow_run', 'pull_request', 'check_suite', 'check_run')
+
+
 def redeliver_ids(deliveries, now, seen, max_age_s=86400):
     """Webhook deliveries to redeliver: failed (status_code not 2xx), not a redelivery itself, younger than
     max_age_s, one attempt per GUID (seen = GUIDs already retried). deliveries: GitHub /app/hook/deliveries."""
     ok_guids = {d['guid'] for d in deliveries if 200 <= int(d.get('status_code') or 0) < 300}
     out = []
     for d in deliveries:
-        if d.get('redelivery') or d['guid'] in ok_guids or d['guid'] in seen:
+        if d.get('redelivery') or d['guid'] in ok_guids or d['guid'] in seen or d.get('event') not in REDELIVER_EVENTS:
             continue
         if now - ts(d['delivered_at']) > max_age_s:
             continue

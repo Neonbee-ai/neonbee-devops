@@ -210,13 +210,39 @@ class Webhook(unittest.TestCase):
 
     def test_given_failed_deliveries_then_each_guid_is_redelivered_once(self):
         d = [{'id': 1, 'guid': 'a', 'status_code': 502, 'redelivery': False, 'delivered_at': iso(NOW - 60)},
+             {'id': 6, 'guid': 'e', 'status_code': 502, 'redelivery': False, 'delivered_at': iso(NOW - 60), 'event': 'workflow_job'},
+             {'id': 7, 'guid': 'f', 'status_code': 502, 'redelivery': False, 'delivered_at': iso(NOW - 60), 'event': 'push'},
              {'id': 2, 'guid': 'b', 'status_code': 200, 'redelivery': False, 'delivered_at': iso(NOW - 60)},
              {'id': 3, 'guid': 'c', 'status_code': 0, 'redelivery': False, 'delivered_at': iso(NOW - 90000)},
              {'id': 4, 'guid': 'd', 'status_code': 500, 'redelivery': False, 'delivered_at': iso(NOW - 60)},
              {'id': 5, 'guid': 'd', 'status_code': 200, 'redelivery': True, 'delivered_at': iso(NOW - 30)}]
+        for x in d:
+            x.setdefault('event', 'workflow_run')
         seen = set()
-        self.assertEqual(L.redeliver_ids(d, NOW, seen), [1])
+        self.assertEqual(L.redeliver_ids(d, NOW, seen), [1])      # workflow_job and push are never redelivered
         self.assertEqual(L.redeliver_ids(d, NOW, seen), [])
+
+    def test_given_a_late_queued_job_event_then_it_is_not_taken_as_live_demand(self):
+        nbci.EVENTS['jobs'] = {}
+        nbci.on_event('workflow_job', {'action': 'queued', 'repository': {'name': 'r'}, 'workflow_job': {
+            'id': 11, 'name': 'UT', 'labels': ['self-hosted', 'nb-auto'], 'created_at': iso(time.time() - 3600)}})
+        self.assertNotIn(11, nbci.EVENTS['jobs'])
+
+    def test_given_a_fresh_queued_job_event_then_it_is_live_demand(self):
+        nbci.EVENTS['jobs'] = {}
+        nbci.on_event('workflow_job', {'action': 'queued', 'repository': {'name': 'r'}, 'workflow_job': {
+            'id': 12, 'name': 'UT', 'labels': ['self-hosted', 'nb-auto'], 'created_at': iso(time.time() - 5)}})
+        self.assertIn(12, nbci.EVENTS['jobs'])
+
+    def test_given_a_redelivered_old_deploy_success_then_no_aqa_event(self):
+        nbci.EVENTS['aqa'] = []
+        nbci.on_event('workflow_run', {'action': 'completed', 'repository': {'name': 'r'}, 'workflow_run': {
+            'id': 1, 'conclusion': 'success', 'updated_at': iso(time.time() - 3 * 3600), 'head_sha': 'a'}})
+        self.assertEqual(nbci.EVENTS['aqa'], [])
+
+    def test_given_pulse_calls_then_a_non_default_user_agent_is_sent(self):
+        self.assertIn("'User-Agent': 'nb-ci/3.1'", read('runner', 'controller', 'nb_pulse.py'))
+        self.assertIn("'User-Agent': 'nbci-alert-relay/1'", read('runner', 'alert-relay', 'relay.py'))
 
     def test_given_a_get_request_then_healthz_reflects_the_heartbeat(self):
         self.assertTrue(hasattr(nbci.Hook, 'do_GET'))

@@ -37,7 +37,7 @@ class MCP:
     def rpc(self, method, params):
         self.n += 1
         h = {'Content-Type': 'application/json', 'Accept': 'application/json, text/event-stream',
-             'Authorization': 'Bearer ' + self.token}
+             'Authorization': 'Bearer ' + self.token, 'User-Agent': 'nb-ci/3.1'}   # the edge 403s the default Python-urllib agent
         if self.sid:
             h['Mcp-Session-Id'] = self.sid
         body = json.dumps({'jsonrpc': '2.0', 'id': self.n, 'method': method, 'params': params}).encode()

@@ -60,6 +60,7 @@ BOT_LOGINS = set(E('BOT_LOGINS', 'nb-ci[bot]').split(','))
 ALLOWED_PUSHERS = set(filter(None, E('ALLOWED_PUSHERS', '').split(',')))
 DRY = E('DRY_RUN', '1') == '1'
 HEALTH_MAX_S = int(E('HEALTH_MAX_S', '600'))
+STALE_EVENT_S = int(E('STALE_EVENT_S', '600'))
 PULSE_URL = E('PULSE_MCP_URL') or 'https://pulse.moonhive.in/mcp'   # an empty value in /etc/nbci.env used to switch Pulse off silently
 # Stable webhook host (DNS-only A record, updated on every boot by the ops/nbci-dns workflow); sslip.io is the fallback
 NBCI_HOST = E('NBCI_HOST', 'nbci.moonhive.in')
@@ -110,6 +111,8 @@ def on_event(kind, ev):
         if kind == 'workflow_job':
             j = ev['workflow_job']
             if ev['action'] in ('queued', 'waiting'):
+                if time.time() - ts(j['created_at']) > STALE_EVENT_S:
+                    return              # a redelivered/late event: the queued-job poll is the truth for old jobs
                 EVENTS['jobs'][j['id']] = {'id': j['id'], 'repo': repo, 'name': j['name'], 'labels': j['labels'],
                                            'created': ts(j['created_at'])}
             else:
@@ -130,7 +133,8 @@ def on_event(kind, ev):
         elif kind in ('pull_request', 'check_suite', 'workflow_run', 'check_run'):
             EVENTS['dirty_repos'].add(repo)
             wr = ev.get('workflow_run') or {}
-            if kind == 'workflow_run' and ev.get('action') == 'completed' and wr.get('conclusion') == 'success':
+            if kind == 'workflow_run' and ev.get('action') == 'completed' and wr.get('conclusion') == 'success' \
+                    and time.time() - ts(wr.get('updated_at') or wr.get('created_at') or '1970-01-01T00:00:00Z') < 7200:
                 EVENTS['aqa'] = (EVENTS['aqa'] + [{'repo': repo, 'run': {k: wr.get(k) for k in (
                     'id', 'name', 'event', 'conclusion', 'head_branch', 'head_sha', 'workflow_id', 'html_url')}}])[-50:]
         elif kind == 'push':
@@ -700,6 +704,9 @@ def tick(gh, gcp, st, mode='scale'):
     # alerts: Mini fallback offline while needed, long queue, bypass
     for j in jobs:
         k = 'q%s' % j['id']
+        c = L.class_for(j['labels'], classes)
+        if not c or c.get('host') == 'controller' and repo_mode(gh, st, j['repo'], ci_mode, now) != 'auto':
+            continue            # legacy-lane jobs are not ours to alert on
         if now - j['created'] > 900 and k not in st['alerted']:
             st['alerted'][k] = now; alert('job %s / %s queued %d min (labels %s)' % (j['repo'], j['name'], (now - j['created']) // 60, j['labels']))
     for p in pushes:
