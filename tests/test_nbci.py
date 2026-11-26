@@ -814,12 +814,37 @@ class Aqa(unittest.TestCase):
 
     def test_given_an_aqa_vm_without_a_runner_then_it_is_not_deleted_as_no_job_but_is_when_stopped(self):
         vm = {'status': 'RUNNING', 'created': 0, 'cls': 'aqa'}
-        self.assertIsNone(L.vm_verdict(vm, None, False, 100000))
+        self.assertIsNone(L.vm_verdict(vm, None, False, 100))
         self.assertIn('stopped', L.vm_verdict(dict(vm, status='TERMINATED'), None, False, 100000))
 
     def test_given_the_controller_then_the_trigger_is_held_until_the_contract_is_ready(self):
         with open(os.path.join(os.path.dirname(__file__), '..', 'ci', 'aqa.json')) as f:
-            self.assertFalse(json.load(f)['contract_ready'])
+            c = json.load(f)
+        self.assertTrue(c['contract_ready'])
+        self.assertEqual(c['service_account'], 'aqa-runner@gen-lang-client-0521938031.iam.gserviceaccount.com')
+
+    def test_given_a_preview_then_aqa_env_is_dev_with_a_pr_base_host_and_pass_stage_pr_main(self):
+        import nbci_aqa as A
+        m = {i['key']: i['value'] for i in A.metadata('pr-feat-x', 's', 'b', ['t'], [], 'e', 'pr_main', 'r')}
+        self.assertEqual((m['aqa-env'], m['aqa-base'], m['aqa-pass-stage']), ('dev', 'https://pr-feat-x.skyoffice360.com', 'pr_main'))
+        self.assertNotIn('aqa-base', {i['key'] for i in A.metadata('dev', 's', 'b', [], [], 'e', '')})
+
+    def test_given_task_counts_then_the_vm_is_sized_2_4_8_with_workers(self):
+        import nbci_aqa as A
+        self.assertEqual(A.sizing(1), ('e2-standard-2', None))
+        self.assertEqual(A.sizing(5), ('e2-standard-2', None))
+        self.assertEqual(A.sizing(6), ('e2-standard-4', 4))
+        self.assertEqual(A.sizing(20), ('e2-standard-8', 8))
+
+    def test_given_an_env_and_sha_then_the_vm_name_follows_the_contract(self):
+        import nbci_aqa as A
+        self.assertEqual(A.vm_name('pr-feat-x', '0123456789abcdef'), 'aqa-dev-01234567-1')
+        self.assertEqual(A.vm_name('prod', 'abcdef0123'), 'aqa-prod-abcdef01-1')
+
+    def test_given_an_aqa_vm_older_than_30_minutes_then_the_reaper_deletes_it(self):
+        vm = {'status': 'RUNNING', 'created': 0, 'cls': 'aqa'}
+        self.assertIsNone(L.vm_verdict(vm, None, False, 1799))
+        self.assertIn('30 min', L.vm_verdict(vm, None, False, 1800))
 
 
 if __name__ == '__main__':

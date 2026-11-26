@@ -26,7 +26,7 @@ GitHub API budget (App: 5,000 + 50 x (54-20) = 6,700 calls/h; 304 answers are fr
 
 Modes: loop | once | status | drain | build-image | set-hook. DRY_RUN=1 (default) changes nothing.
 """
-import hashlib, hmac, http.server, json, os, sys, threading, time
+import base64, hashlib, hmac, http.server, json, os, sys, threading, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -356,27 +356,51 @@ def aqa_trigger(gh, gcp, st, now, today, failures):
             prev = [r for r in gh('repos/%s/%s/actions/workflows/%s/runs?branch=%s&status=success&per_page=5' % (
                 ORG, repo, run['workflow_id'], run['head_branch']))['workflow_runs'] if r['head_sha'] != run['head_sha']]
             base = prev[0]['head_sha'] if prev else None
+            if run['head_branch'].startswith(('feat/', 'fix/')):
+                base = 'develop'        # a preview's deployed range = the branch's commits not yet on develop
             cm = gh('repos/%s/%s/compare/%s...%s' % (ORG, repo, base, run['head_sha']))['commits'] if base else \
                 [gh('repos/%s/%s/commits/%s' % (ORG, repo, run['head_sha']))]
+            cm = cm[-100:]
             shas, msgs = [c['sha'] for c in cm], [c['commit']['message'] for c in cm]
         except RuntimeError as e:
             log('aqa range lookup failed', key, str(e)[:120])
-        name = 'nbci-aqa-%s' % time.strftime('%m%d%H%M%S', time.gmtime(now))
-        items = A.metadata(env, run['head_sha'], cfg.get('bundle_template', 'aqa-bundle-{sha}').format(sha=run['head_sha']),
-                           A.pulse_ids(msgs), shas, (cfg.get('evidence_template') or run['html_url']).format(repo=repo, sha=run['head_sha']),
-                           cfg.get('pass_stage', 'done'), repo)
+        ids = A.pulse_ids(msgs)
+        try:
+            qa_sha = gh('repos/%s/%s/commits/%s' % (ORG, cfg['qa_repo'], cfg['qa_ref']))['sha']
+            script = base64.b64decode(gh('repos/%s/%s/contents/%s?ref=%s' % (ORG, cfg['qa_repo'], cfg['startup_path'], qa_sha))['content']).decode()
+        except (RuntimeError, KeyError) as e:
+            log('aqa held: cannot read %s@%s' % (cfg.get('qa_repo'), cfg.get('qa_ref')), str(e)[:120]); continue
+        machine, workers = A.sizing(len(ids))
+        name = A.vm_name(env, run['head_sha'])
+        commits = json.dumps([{'message': m[:500], 'branch': run['head_branch'], 'prBody': ''} for m in msgs])
+        items = A.metadata(env, run['head_sha'], cfg['bundle_template'].format(qa_sha=qa_sha), ids, commits,
+                           cfg['evidence_template'].format(env=A.aqa_env(env), sha=run['head_sha'], repo=repo),
+                           A.pass_stage(env, cfg), repo, workers)
+        vm_cfg = dict(cfg, machine=machine, startup_script=script)
         if DRY:
             log('DRY aqa create', name, env, key); A.record(ast, key, today, now); continue
         made = False
         for z in ZONES:
             try:
-                gcp.wait_op(gcp.compute('/zones/%s/instances' % z, 'POST', A.vm_body(cfg, name, z, items, STEM, MAX_RUN_S)), z, 120)
-                log('aqa created', name, env, key, 'tasks=%s' % ','.join(A.pulse_ids(msgs))); made = True; break
+                gcp.wait_op(gcp.compute('/zones/%s/instances' % z, 'POST', A.vm_body(vm_cfg, name, z, items, STEM, MAX_RUN_S)), z, 120)
+                log('aqa created', name, env, key, 'tasks=%s' % ','.join(ids)); made = True; break
             except Exception as e:
                 k = L.classify_gce_error(str(e)); failures.append((z, k)); log('aqa create failed', z, k, str(e)[:160])
                 if k in ('billing', 'quota'): break
         if made:
             A.record(ast, key, today, now)
+
+
+def reap_aqa(gcp):
+    """AQA VMs we did not label (the AQA agent's own aqa-* smoke VMs) are touched only when TERMINATED: a stopped VM's
+    disk still bills. Ours (label nbci, class aqa) are deleted by the verdict when TERMINATED or older than 30 min."""
+    for z in ZONES:
+        for v in gcp.compute('/zones/%s/instances?filter=name%%3Daqa-*%%20AND%%20status%%3DTERMINATED' % z).get('items', []):
+            if v.get('labels', {}).get(STEM) == '1':
+                continue
+            log('reap stopped aqa VM', v['name'])
+            if not DRY:
+                gcp.compute('/zones/%s/instances/%s' % (z, v['name']), 'DELETE')
 
 
 def alert_once(st, now, text):
@@ -478,6 +502,9 @@ def tick(gh, gcp, st, mode='scale'):
                     day['create_fail'] += 1
             elif spend != 'capped' and room < c['vcpu'] and not any(v['status'] == 'RUNNING' for v in live):
                 failures.append(('-', 'quota'))          # nothing of ours running, yet no room: someone else holds it
+    if gce_ok and every(st, 'aqa-reap', 120, now):
+        try: reap_aqa(gcp)
+        except Exception as e: log('aqa reap', str(e)[:160])
     try: aqa_trigger(gh, gcp, st, now, today, failures)
     except Exception as e: log('aqa trigger error', str(e)[:200])
     # AutoQA share of the one quota

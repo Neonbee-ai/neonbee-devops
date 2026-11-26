@@ -65,26 +65,50 @@ def record(state, key, today, now):
         del days[d]
 
 
-def metadata(env, sha, bundle, ids, commits, evidence, pass_stage, repo=''):
-    items = {'aqa-env': env, 'aqa-sha': sha, 'aqa-bundle': bundle, 'aqa-tasks': ','.join(ids), 'aqa-commits': ','.join(commits),
-             'aqa-evidence': evidence, 'aqa-pass-stage': pass_stage}
-    if repo:
-        items['aqa-repo'] = repo
-    return [{'key': k, 'value': v} for k, v in items.items()]
+def aqa_env(env):
+    """The AQA VM knows dev|prod only: a preview (pr-<slug>) counts as dev with its own base host."""
+    return 'prod' if env == 'prod' else 'dev'
+
+
+def base_url(env, domain='skyoffice360.com'):
+    return 'https://%s.%s' % (env, domain) if env.startswith('pr-') else ''
+
+
+def sizing(n_tasks):
+    """(machine, workers): e2-standard-2 up to 5 tasks, then 4 and 8 vCPU with aqa-workers = nproc."""
+    if n_tasks <= 5:
+        return 'e2-standard-2', None
+    return ('e2-standard-4', 4) if n_tasks <= 15 else ('e2-standard-8', 8)
+
+
+def vm_name(env, sha, n=1):
+    return 'aqa-%s-%s-%d' % (aqa_env(env), sha[:8], n)
+
+
+def pass_stage(env, cfg):
+    return (cfg.get('pass_stage') or {}).get('pr' if env.startswith('pr-') else aqa_env(env), '')
+
+
+def metadata(env, sha, bundle, ids, commits, evidence, stage, repo='', workers=None, shard='', dry=False):
+    items = {'aqa-env': aqa_env(env), 'aqa-sha': sha, 'aqa-bundle': bundle, 'aqa-tasks': ','.join(ids), 'aqa-commits': commits if isinstance(commits, str) else ','.join(commits),
+             'aqa-evidence': evidence, 'aqa-pass-stage': stage, 'aqa-repo': repo, 'aqa-base': base_url(env),
+             'aqa-workers': str(workers) if workers else '', 'aqa-shard': shard, 'aqa-dry': '1' if dry else ''}
+    return [{'key': k, 'value': v} for k, v in items.items() if v != '']
 
 
 def vm_body(cfg, name, zone, items, stem, max_run_s):
     """Instance body from the AQA contract in ci/aqa.json: Spot, no static IP, boot disk deleted with the VM."""
     sa = cfg.get('service_account')
     meta = list(items)
+    machine = cfg.get('machine', 'e2-standard-2')
     if cfg.get('startup_script'):
         meta.append({'key': 'startup-script', 'value': cfg['startup_script']})
-    return {'name': name, 'machineType': 'zones/%s/machineTypes/%s' % (zone, cfg.get('machine', 'e2-standard-4')),
+    return {'name': name, 'machineType': 'zones/%s/machineTypes/%s' % (zone, machine),
             'labels': {stem: '1', 'nb-class': 'aqa'},
             'scheduling': {'provisioningModel': 'SPOT', 'instanceTerminationAction': 'DELETE', 'automaticRestart': False,
-                           'onHostMaintenance': 'TERMINATE', 'maxRunDuration': {'seconds': cfg.get('max_run_s', max_run_s)}},
+                           'onHostMaintenance': 'TERMINATE', 'maxRunDuration': {'seconds': cfg.get('max_run_s', 5400)}},
             'disks': [{'boot': True, 'autoDelete': True, 'initializeParams': {
-                'sourceImage': cfg.get('image', 'projects/ubuntu-os-cloud/global/images/family/ubuntu-2404-lts-amd64'),
+                'sourceImage': cfg.get('image', 'projects/ubuntu-os-cloud/global/images/family/ubuntu-2404-lts-amd64'),   # stock Ubuntu: vm-startup.sh is written for it; the nb-ci-runner image powers off when it finds no JIT config
                 'diskSizeGb': str(cfg.get('disk_gb', 30)), 'diskType': 'zones/%s/diskTypes/pd-balanced' % zone, 'labels': {stem: '1'}}}],
             'networkInterfaces': [{'network': 'global/networks/default', 'accessConfigs': [{'type': 'ONE_TO_ONE_NAT', 'name': 'External NAT'}]}],
             'serviceAccounts': [{'email': sa, 'scopes': cfg.get('scopes', ['https://www.googleapis.com/auth/cloud-platform'])}] if sa else [],

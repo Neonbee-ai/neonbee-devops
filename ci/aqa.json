@@ -1,7 +1,7 @@
 {
-  "_doc": "Deploy->AQA trigger. Held until contract_ready is true; fill service_account / startup_script / machine from the AQA agent's VM create contract.",
+  "_doc": "Deploy->AQA trigger. Contract from neonbee-qa feat/aqa-replay @4d7c9a7: Spot e2-standard-2 (more tasks: 4/8 vCPU), stock ubuntu-2404 (NOT nb-ci-runner: its nb-runner.service powers off without a JIT config), SA aqa-runner, startup script fetched from neonbee-qa at the resolved sha. pass_stage: previews (pr-*) move the Pulse task to pr_main.",
   "enabled": true,
-  "contract_ready": false,
+  "contract_ready": true,
   "daily_cap": 8,
   "deploy_workflows": [
     "deploy"
@@ -10,12 +10,18 @@
     "teardown",
     "rollback"
   ],
-  "machine": "e2-standard-4",
+  "machine": "e2-standard-2",
   "disk_gb": 30,
-  "service_account": null,
-  "scopes": [],
-  "startup_script": null,
-  "pass_stage": "done",
-  "evidence_template": null,
-  "bundle_template": "aqa-bundle-{sha}"
+  "service_account": "aqa-runner@gen-lang-client-0521938031.iam.gserviceaccount.com",
+  "scopes": [
+    "https://www.googleapis.com/auth/cloud-platform"
+  ],
+  "pass_stage": {
+    "pr": "pr_main"
+  },
+  "evidence_template": "gs://neonbee-aqa-0521938031/replay/{env}/{sha}",
+  "bundle_template": "gs://neonbee-aqa-0521938031/aqa/{qa_sha}.tgz",
+  "qa_repo": "neonbee-qa",
+  "qa_ref": "feat/aqa-replay",
+  "startup_path": "aqa/vm-startup.sh"
 }
