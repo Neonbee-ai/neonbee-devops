@@ -54,6 +54,15 @@ Every alert is one comment on Pulse `71b8be5b` starting with `[nbci]`. Deduped p
 CI failures of a PR (not infra) go to the PR's Pulse task(s) from the commit trailers: comment, status `fixing`,
 one bug per task+check; the same check green again closes the bug and moves the task to `reverify`.
 
+## Night train
+
+`night-train.timer` (every 15 min) -> `night-train.service` (oneshot, user nbci) -> `night-train-run.py` (GitHub App token +
+`nbci-pulse-token` into the child env) -> `night-train.mjs`. State `/var/lib/night-train/state-<night>.json`, logs
+`sudo journalctl -u night-train -n 100`. Arm a night: `gcloud compute instances add-metadata nbci-controller --zone us-central1-a
+--metadata nbci-night-train=live,nbci-nt-deadline=2026-11-28T06:00:00Z` then `sudo /opt/nbci/src/runner/controller/bootstrap.sh`.
+Stop now: `sudo -u nbci touch /var/lib/night-train/STOP` (final summary next tick) or `sudo systemctl disable --now night-train.timer`.
+Merges are `gh pr merge --merge --match-head-commit` as the nb-ci App (never --admin); PRs with SQL/migrations and neonbee-devops are skipped.
+
 ## Rotate secrets (Secret Manager, project gen-lang-client-0521938031)
 
 | Secret | Rotate | Then |

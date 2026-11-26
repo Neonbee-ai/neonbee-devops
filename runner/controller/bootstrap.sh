@@ -23,6 +23,8 @@ if [ ! -f /var/lib/nbci/.base ]; then
 fi
 # route job's Pulse-trailer step calls `gh api` (Ubuntu 24.04 universe package); idempotent for old VMs
 command -v gh >/dev/null 2>&1 || apt-get install -yq gh
+# night train (night-train.mjs) runs on node; Ubuntu 24.04 nodejs 18 has fetch + AbortSignal.timeout
+command -v node >/dev/null 2>&1 || apt-get install -yq nodejs
 # OS security patches: unattended-upgrades (security pocket), reboot at 04:40 UTC when a kernel/libc patch needs it
 dpkg -s unattended-upgrades >/dev/null 2>&1 || apt-get install -yq unattended-upgrades
 printf 'APT::Periodic::Update-Package-Lists "1";\nAPT::Periodic::Unattended-Upgrade "1";\n' > /etc/apt/apt.conf.d/20auto-upgrades
@@ -94,6 +96,41 @@ MemoryMax=300M
 WantedBy=multi-user.target
 U
 install -m 644 /opt/nbci/src/runner/controller/nbci-guard.service /etc/systemd/system/nbci-guard.service
+# Night train (overnight develop->main release train; was a LaunchAgent on the Mac Mini). Metadata nbci-night-train
+# off|dry|live (default off), nbci-nt-deadline (ISO UTC; the train stops after it), nbci-nt-aqa-repos (comma list).
+cat > /etc/night-train.env <<ENV
+NT_MODE=$(attr nbci-night-train || echo off)
+NT_DEADLINE=$(attr nbci-nt-deadline || true)
+NT_AQA_REPOS=$(attr nbci-nt-aqa-repos || true)
+NT_HOME=/var/lib/night-train
+HOME=/var/lib/night-train
+ENV
+cat > /etc/systemd/system/night-train.service <<'U'
+[Unit]
+Description=night train: one release tick (merges night-train PRs, develop->main, failures -> Pulse)
+After=network-online.target
+Wants=network-online.target
+[Service]
+Type=oneshot
+User=nbci
+EnvironmentFile=/etc/nbci.env
+EnvironmentFile=/etc/night-train.env
+StateDirectory=night-train
+RuntimeDirectory=night-train
+ExecStart=/usr/bin/python3 /opt/nbci/src/runner/controller/night-train-run.py
+TimeoutStartSec=840
+MemoryMax=250M
+Nice=5
+U
+cat > /etc/systemd/system/night-train.timer <<'U'
+[Unit]
+Description=night train every 15 min (the script stops itself after NT_DEADLINE)
+[Timer]
+OnCalendar=*:0/15
+AccuracySec=30s
+[Install]
+WantedBy=timers.target
+U
 IP=$(md instance/network-interfaces/0/access-configs/0/external-ip)
 HOST=$(attr nbci-host || echo nbci.moonhive.in)
 # Fixed host (DNS-only A record kept current by the ops/nbci-dns workflow) + the sslip.io name of today's IP as the
@@ -123,6 +160,7 @@ cat > /etc/cron.d/nbci <<'CRON'
 CRON
 systemctl daemon-reload
 systemctl enable --now caddy nbci nbci-guard
+if grep -qE "^NT_MODE=(dry|live)$" /etc/night-train.env; then systemctl enable --now night-train.timer; else systemctl disable --now night-train.timer 2>/dev/null || true; fi
 caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null 2>&1 &&
   { systemctl reload caddy || systemctl restart caddy; } || echo 'nbci: Caddyfile invalid - webhook down, polling only'
 systemctl restart nbci nbci-guard
