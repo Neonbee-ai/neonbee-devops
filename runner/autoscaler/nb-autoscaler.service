@@ -1,0 +1,16 @@
+# systemd unit for the Internal Tools VM (167.114.98.177). Installed by install-itvm.sh.
+[Unit]
+Description=Neonbee CI autoscaler (GCP Spot runners for Neonbee-ai GitHub Actions)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=nbci
+EnvironmentFile=/etc/nb-autoscaler.env
+ExecStart=/usr/bin/python3 /opt/nb-autoscaler/runner/autoscaler/nb_autoscaler.py loop
+Restart=always
+RestartSec=10
+# On stop, VMs keep running; the controller picks them up on start. `nb_autoscaler.py drain` deletes all.
+
+[Install]
+WantedBy=multi-user.target

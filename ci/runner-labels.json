@@ -1,0 +1,21 @@
+{
+  "_doc": "THE canonical runner label list. Read by runner/autoscaler/nb_autoscaler.py (burst VMs), scripts/gcp-burst.sh restore_mini_labels and tests/test_autoscaler.py. Change labels here only. A job is served by a pool when its runs-on labels are a subset of the pool's labels (case-insensitive).",
+  "ci_labels": ["runner-vm", "nb-route", "nb-pool", "lane-burst", "lane-dev", "lane-prod", "contabo", "browsers"],
+  "pools": {
+    "burst": {
+      "base": ["self-hosted", "Linux", "X64"],
+      "include_ci_labels": true,
+      "extra": []
+    },
+    "macmini": {
+      "base": ["self-hosted", "macOS", "ARM64"],
+      "include_ci_labels": true,
+      "extra": []
+    },
+    "aqa-coord": {
+      "base": ["self-hosted", "macOS", "ARM64"],
+      "include_ci_labels": false,
+      "extra": ["aqa-coord"]
+    }
+  }
+}

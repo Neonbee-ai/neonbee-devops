@@ -136,6 +136,16 @@ on:
         required: false
         type: boolean
         default: false
+      verify_url:
+        description: 'Optional public URL of one released file (e.g. https://cdn.neonbee.app/accounting/index.html). After rollout it must serve the bytes of verify_file, or the job fails (no revert).'
+        required: false
+        type: string
+        default: ''
+      verify_file:
+        description: 'Path of that file inside the downloaded artifact (relative to dist_path), e.g. index.html'
+        required: false
+        type: string
+        default: ''
       runs_on:
         description: 'JSON runner label list (self-hosted only)'
         required: false
@@ -487,6 +497,33 @@ jobs:
           fi
           echo "::error::Deploy of ${SHA:0:12} failed and was reverted to ${PREV_SHA:0:12}"
           exit 1
+
+      # Post-deploy artifact check (2026-11-26: deploy-aws skipped, CDN kept old accounting/folio files).
+      # Runs after the revert step on purpose: a stale edge cache must fail the job loudly, never roll back.
+      # Origin check uses a cache-busting query (a separate cache key), then the plain URL = what users get.
+      - name: Verify served artifact is this release
+        if: ${{ success() && !inputs.dry_run && inputs.verify_url != '' && inputs.verify_file != '' }}
+        shell: bash
+        env:
+          VURL: ${{ inputs.verify_url }}
+          VFILE: ${{ inputs.dist_path }}/${{ inputs.verify_file }}
+        run: |
+          set -uo pipefail
+          [ -f "$VFILE" ] || { echo "::error::verify_file $VFILE not in the artifact"; exit 1; }
+          want=$(sha256sum "$VFILE" | cut -d' ' -f1)
+          fetch() { curl -fsS --max-time 15 -H 'Cache-Control: no-cache' "$1" | sha256sum | cut -d' ' -f1; }
+          sep='?'; case "$VURL" in *\?*) sep='&' ;; esac
+          for i in 1 2 3 4 5 6; do
+            got=$(fetch "${VURL}${sep}nbv=${SHA:0:12}-$i" || echo fetch-failed)
+            [ "$got" = "$want" ] && break
+            echo "origin check $i: got ${got:0:12}, want ${want:0:12}"; sleep 20
+          done
+          [ "$got" = "$want" ] || { echo "::error::$VURL (cache-busted) does not serve release ${SHA:0:12}: the rollout did not land"; exit 1; }
+          edge=$(fetch "$VURL" || echo fetch-failed)
+          if [ "$edge" != "$want" ]; then
+            echo "::warning::origin serves ${SHA:0:12} but the edge cache for $VURL is stale (${edge:0:12}); purge it"
+          fi
+          echo "verified: $VURL serves ${SHA:0:12} (sha256 ${want:0:12})" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Clean up local bundle
         if: always()
