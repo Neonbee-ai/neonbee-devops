@@ -1,0 +1,84 @@
+# Cloudflare side of the HA -> AWS prod cut-over, one hostname at a time.
+# Script + safety rules: infra/aws/cloudflare/cf_cutover.py (tests: tests/test_cf_cutover.py).
+# Tokens come from the org secrets and are only passed as env, never echoed.
+# Option D actions (dns-only-upsert, monitor-ensure, pool-*, monitor-delete) only touch pool neonbee-ha-failover,
+# aws-origin.<zone> records and the nb-aws-lb-health monitor.
+# Output (inventory JSON, before/after record state, signed origin cert = public) is uploaded as an artifact.
+name: Cloudflare cut-over (HA -> AWS)
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'inventory | origin-cert | dns-switch | dns-revert | lb-inventory | lb-pools | lb-switch | lb-revert | verify | dns-only-upsert | monitor-ensure | pool-origin-swap | pool-restore | pool-health | monitor-delete | cache-rule | cache-rule-revert'
+        type: choice
+        options: [inventory, origin-cert, dns-switch, dns-revert, lb-inventory, lb-pools, lb-switch, lb-revert, verify, dns-only-upsert, monitor-ensure, pool-origin-swap, pool-restore, pool-health, monitor-delete, pool-aws-nodes, dns-only-delete, zone-audit, ssl-mode, ssl-keep-full, cache-rule, cache-rule-revert]
+        default: inventory
+      hostname:
+        description: 'Host for dns-switch/dns-revert (e.g. sso.neonbee.app); zone for origin-cert (neonbee.app) and cache-rule/cache-rule-revert (neonbee.store)'
+        type: string
+        default: ''
+      dry_run:
+        description: 'Dry run - print the plan, write nothing'
+        type: boolean
+        default: true
+      csr_b64:
+        description: 'origin-cert only: base64 of a PEM CSR made locally (never a private key)'
+        type: string
+        default: ''
+      prior_b64:
+        description: 'pool-restore only: base64 of the prior pool JSON from a pool-origin-swap result'
+        type: string
+        default: ''
+      ssl_mode:
+        description: 'ssl-mode only: full | strict (hostname = zone)'
+        type: choice
+        options: [strict, full]
+        default: full
+      hosts:
+        description: 'ssl-keep-full only: comma-separated hosts kept on SSL Full (hostname = zone)'
+        type: string
+        default: ''
+      eips:
+        description: 'AWS EIPs (comma separated)'
+        type: string
+        default: '3.110.17.10,13.233.75.233'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: neonbee-cf-cutover
+  cancel-in-progress: false
+
+jobs:
+  cf:
+    runs-on: [self-hosted, nb-route]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run ${{ inputs.action }}
+        env:
+          CF_LB_API_TOKEN: ${{ secrets.CF_LB_API_TOKEN }}
+          CF_SAAS_API_TOKEN: ${{ secrets.CF_SAAS_API_TOKEN }}
+          CF_PREVIEW_API_TOKEN: ${{ secrets.CF_PREVIEW_API_TOKEN }}
+          ACTION: ${{ inputs.action }}
+          HOST: ${{ inputs.hostname }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          CSR_B64: ${{ inputs.csr_b64 }}
+          EIPS: ${{ inputs.eips }}
+          PRIOR_B64: ${{ inputs.prior_b64 }}
+          SSL_MODE: ${{ inputs.ssl_mode }}
+          HOSTS: ${{ inputs.hosts }}
+        run: |
+          set -euo pipefail
+          APPLY=""; [ "$DRY_RUN" = "false" ] && APPLY="--apply"
+          python3 -I infra/aws/cloudflare/cf_cutover.py "$ACTION" --host "$HOST" --eips "$EIPS" --ssl-mode "$SSL_MODE" --hosts "$HOSTS" --out cf-out $APPLY
+      - name: Upload result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cf-cutover-${{ inputs.action }}-${{ github.run_id }}
+          path: cf-out/
+          if-no-files-found: ignore
+          retention-days: 30

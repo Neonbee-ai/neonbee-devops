@@ -1,0 +1,525 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  Neonbee prod - off-Supabase nightly DB backup bucket (versioned, Object Lock
+  GOVERNANCE 90 d, private, SSE-S3) plus a least-privilege writer: a GitHub OIDC
+  role for neonbee-devops@main and an optional IAM user (access-key fallback).
+  Deploy with infra/deploy-db-backup-bucket.sh. Workflow: .github/workflows/nightly-db-backup.yml.
+  Runtime (no runner, no laptop): EventBridge Scheduler -> ECS Fargate tasks nb-db-backup
+  (nightly pg_dump) and nb-db-log-export (daily log-month archive). Job scripts in
+  infra/db-backup-task/, uploaded to s3://<bucket>/ops/db-backup-task/ by the deploy script.
+
+Parameters:
+  BucketName:
+    Type: String
+    Default: neonbee-prod-db-backups
+    Description: Globally unique. Object Lock can only be enabled at creation.
+  GitHubOrg:
+    Type: String
+    Default: Neonbee-ai
+  GitHubRepo:
+    Type: String
+    Default: neonbee-devops
+  OidcProviderArn:
+    Type: String
+    Default: ''
+    Description: >-
+      ARN of the existing token.actions.githubusercontent.com provider (created by
+      templates/07-github-oidc.yaml). Empty = arn:aws:iam::<account>:oidc-provider/token.actions.githubusercontent.com
+  CreateAccessKeyUser:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: true = also create IAM user nb-db-backup (create its access key by hand; never via CFN).
+  RetentionDays:
+    Type: Number
+    Default: 90
+  VpcId:
+    Type: String
+    Default: vpc-072621a1fb56350b9
+    Description: VPC for the Fargate jobs (default VPC; egress only, no inbound).
+  SubnetIds:
+    Type: CommaDelimitedList
+    Default: subnet-02a7fb19b885a5b6e,subnet-05f9f5c40ec7a8e37,subnet-0f7eff9e4a1fa3ac1
+    Description: Public subnets (public IP for egress to Supabase / S3; no NAT cost).
+  AlertTopicArn:
+    Type: String
+    Default: arn:aws:sns:ap-south-1:557690624961:nb-prod-alerts
+    Description: SNS topic -> Teams (nb-prod-alerts stack).
+  JobImage:
+    Type: String
+    Default: public.ecr.aws/docker/library/postgres:17-bookworm
+  SupabaseCliVersion:
+    Type: String
+    Default: 2.75.0
+  BackupScheduleExpr:
+    Type: String
+    Default: cron(0 21 * * ? *)
+  LogExportScheduleExpr:
+    Type: String
+    Default: cron(30 1 * * ? *)
+  SchedulesEnabled:
+    Type: String
+    Default: ENABLED
+    AllowedValues: [ENABLED, DISABLED]
+
+Conditions:
+  MakeUser: !Equals [!Ref CreateAccessKeyUser, 'true']
+  DefaultProvider: !Equals [!Ref OidcProviderArn, '']
+
+Resources:
+  BackupBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Ref BucketName
+      ObjectLockEnabled: true
+      ObjectLockConfiguration:
+        ObjectLockEnabled: Enabled
+        Rule:
+          DefaultRetention:
+            Mode: GOVERNANCE
+            Days: !Ref RetentionDays
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+            BucketKeyEnabled: true
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      LifecycleConfiguration:
+        Rules:
+          - Id: daily-glacier-ir-30d-expire-90d
+            Status: Enabled
+            Prefix: daily/
+            Transitions:
+              - StorageClass: GLACIER_IR
+                TransitionInDays: 30
+            ExpirationInDays: 90
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 1
+          - Id: monthly-expire-365d
+            Status: Enabled
+            Prefix: monthly/
+            ExpirationInDays: 365
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 1
+          - Id: cleanup-delete-markers-and-uploads
+            Status: Enabled
+            ExpiredObjectDeleteMarker: true
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 2
+      Tags:
+        - { Key: Project, Value: neonbee }
+        - { Key: Purpose, Value: prod-db-backup }
+
+  BackupBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref BackupBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt BackupBucket.Arn
+              - !Sub '${BackupBucket.Arn}/*'
+            Condition:
+              Bool: { 'aws:SecureTransport': 'false' }
+
+  # Only Put/Get/List on this bucket. No Delete*, no BypassGovernanceRetention,
+  # no PutObjectRetention: the writer can never shorten or remove a backup.
+  BackupWriterPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: nb-db-backup-writer
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: ListBucket
+            Effect: Allow
+            Action: s3:ListBucket
+            Resource: !GetAtt BackupBucket.Arn
+          - Sid: PutGetObjects
+            Effect: Allow
+            Action: [s3:PutObject, s3:GetObject]
+            Resource: !Sub '${BackupBucket.Arn}/*'
+
+  BackupRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: nb-gh-db-backup
+      MaxSessionDuration: 10800
+      ManagedPolicyArns: [!Ref BackupWriterPolicy]
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action: sts:AssumeRoleWithWebIdentity
+            Principal:
+              Federated: !If
+                - DefaultProvider
+                - !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com'
+                - !Ref OidcProviderArn
+            Condition:
+              StringEquals:
+                'token.actions.githubusercontent.com:aud': sts.amazonaws.com
+              StringLike:
+                # this one repo, main only (schedule + dispatch run from main)
+                'token.actions.githubusercontent.com:sub':
+                  - !Sub 'repo:${GitHubOrg}/${GitHubRepo}:ref:refs/heads/main'
+                  - !Sub 'repo:${GitHubOrg}@*/${GitHubRepo}@*:ref:refs/heads/main'
+
+  BackupUser:
+    Type: AWS::IAM::User
+    Condition: MakeUser
+    Properties:
+      UserName: nb-db-backup
+      ManagedPolicyArns: [!Ref BackupWriterPolicy]
+
+  # ── Fargate jobs ─────────────────────────────────────────────────────────
+  # Supabase access token + project ref; the job mints short-lived DB creds from it.
+  # Value is set out of band (workflow nightly-db-backup.yml mode=sync-secret); CFN only creates it.
+  SupabaseSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: nb-prod-db-backup/supabase
+      Description: SUPABASE_BACKUP_ACCESS_TOKEN + PROD_SUPABASE_REF for the Fargate DB jobs
+      SecretString: '{"access_token":"","project_ref":""}'
+
+  JobLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /nb/prod/db-jobs
+      RetentionInDays: 30
+
+  JobCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: nb-prod-db-jobs
+      CapacityProviders: [FARGATE]
+
+  JobSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: nb db jobs - egress only
+      VpcId: !Ref VpcId
+      SecurityGroupEgress:
+        - { IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: 0.0.0.0/0 }
+        - { IpProtocol: tcp, FromPort: 5432, ToPort: 6543, CidrIp: 0.0.0.0/0 }
+        - { IpProtocol: tcp, FromPort: 80, ToPort: 80, CidrIp: 0.0.0.0/0 }
+        - { IpProtocol: udp, FromPort: 53, ToPort: 53, CidrIp: 0.0.0.0/0 }
+
+  JobExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: nb-db-jobs-execution
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - { Effect: Allow, Principal: { Service: ecs-tasks.amazonaws.com }, Action: sts:AssumeRole }
+      Policies:
+        - PolicyName: logs-and-secret
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [logs:CreateLogStream, logs:PutLogEvents]
+                Resource: !Sub '${JobLogGroup.Arn}:*'
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Ref SupabaseSecret
+
+  # Task role: read the job scripts, write backups/archives. No Delete*, no retention changes.
+  JobTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: nb-db-jobs-task
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - { Effect: Allow, Principal: { Service: ecs-tasks.amazonaws.com }, Action: sts:AssumeRole }
+      Policies:
+        - PolicyName: s3-prefixes
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub '${BackupBucket.Arn}/ops/db-backup-task/*'
+              - Effect: Allow
+                Action: s3:ListBucket
+                Resource: !GetAtt BackupBucket.Arn
+                Condition: { StringLike: { 's3:prefix': ['ops/db-backup-task/*', 'ops/db-backup-task/'] } }
+              - Effect: Allow
+                Action: [s3:PutObject, s3:GetObject]
+                Resource:
+                  - !Sub '${BackupBucket.Arn}/daily/*'
+                  - !Sub '${BackupBucket.Arn}/monthly/*'
+                  - !Sub '${BackupBucket.Arn}/archive/*'
+
+  BackupTaskDef:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: nb-db-backup
+      RequiresCompatibilities: [FARGATE]
+      NetworkMode: awsvpc
+      Cpu: '1024'
+      Memory: '4096'
+      EphemeralStorage: { SizeInGiB: 50 }
+      RuntimePlatform: { OperatingSystemFamily: LINUX, CpuArchitecture: X86_64 }
+      ExecutionRoleArn: !GetAtt JobExecutionRole.Arn
+      TaskRoleArn: !GetAtt JobTaskRole.Arn
+      ContainerDefinitions:
+        - Name: job
+          Image: !Ref JobImage
+          Essential: true
+          EntryPoint: [bash, -c]
+          Command:
+            - !Sub |
+              set -euo pipefail
+              apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends curl unzip jq ca-certificates >/dev/null
+              curl -fsSL https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip -o /tmp/awscli.zip
+              unzip -q /tmp/awscli.zip -d /tmp && /tmp/aws/install >/dev/null
+              curl -fsSL https://github.com/supabase/cli/releases/download/v${SupabaseCliVersion}/supabase_linux_amd64.tar.gz | tar -xz -C /usr/local/bin supabase
+              mkdir -p /opt/job && aws s3 cp --recursive --only-show-errors s3://${BackupBucket}/ops/db-backup-task/ /opt/job/
+              exec bash "/opt/job/$JOB_SCRIPT" $JOB_ARGS
+          Environment:
+            - { Name: BUCKET, Value: !Ref BackupBucket }
+            - { Name: JOB_SCRIPT, Value: backup.sh }
+            - { Name: JOB_ARGS, Value: '' }
+            - { Name: AWS_DEFAULT_REGION, Value: !Ref 'AWS::Region' }
+          Secrets:
+            - { Name: SUPABASE_ACCESS_TOKEN, ValueFrom: !Sub '${SupabaseSecret}:access_token::' }
+            - { Name: SB_REF, ValueFrom: !Sub '${SupabaseSecret}:project_ref::' }
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref JobLogGroup
+              awslogs-region: !Ref 'AWS::Region'
+              awslogs-stream-prefix: backup
+
+  LogExportTaskDef:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: nb-db-log-export
+      RequiresCompatibilities: [FARGATE]
+      NetworkMode: awsvpc
+      Cpu: '512'
+      Memory: '1024'
+      RuntimePlatform: { OperatingSystemFamily: LINUX, CpuArchitecture: X86_64 }
+      ExecutionRoleArn: !GetAtt JobExecutionRole.Arn
+      TaskRoleArn: !GetAtt JobTaskRole.Arn
+      ContainerDefinitions:
+        - Name: job
+          Image: !Ref JobImage
+          Essential: true
+          EntryPoint: [bash, -c]
+          Command:
+            - !Sub |
+              set -euo pipefail
+              apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends curl unzip jq ca-certificates >/dev/null
+              curl -fsSL https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip -o /tmp/awscli.zip
+              unzip -q /tmp/awscli.zip -d /tmp && /tmp/aws/install >/dev/null
+              curl -fsSL https://github.com/supabase/cli/releases/download/v${SupabaseCliVersion}/supabase_linux_amd64.tar.gz | tar -xz -C /usr/local/bin supabase
+              mkdir -p /opt/job && aws s3 cp --recursive --only-show-errors s3://${BackupBucket}/ops/db-backup-task/ /opt/job/
+              exec bash "/opt/job/$JOB_SCRIPT" $JOB_ARGS
+          Environment:
+            - { Name: BUCKET, Value: !Ref BackupBucket }
+            - { Name: JOB_SCRIPT, Value: export-log-months.sh }
+            - { Name: JOB_ARGS, Value: '' }
+            - { Name: AWS_DEFAULT_REGION, Value: !Ref 'AWS::Region' }
+          Secrets:
+            - { Name: SUPABASE_ACCESS_TOKEN, ValueFrom: !Sub '${SupabaseSecret}:access_token::' }
+            - { Name: SB_REF, ValueFrom: !Sub '${SupabaseSecret}:project_ref::' }
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref JobLogGroup
+              awslogs-region: !Ref 'AWS::Region'
+              awslogs-stream-prefix: log-export
+
+  SchedulerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: nb-db-jobs-scheduler
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: scheduler.amazonaws.com }
+            Action: sts:AssumeRole
+            Condition: { StringEquals: { 'aws:SourceAccount': !Ref 'AWS::AccountId' } }
+      Policies:
+        - PolicyName: run-db-jobs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: ecs:RunTask
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:task-definition/nb-db-backup:*'
+                  - !Sub 'arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:task-definition/nb-db-log-export:*'
+                Condition: { ArnEquals: { 'ecs:cluster': !GetAtt JobCluster.Arn } }
+              - Effect: Allow
+                Action: iam:PassRole
+                Resource: [!GetAtt JobExecutionRole.Arn, !GetAtt JobTaskRole.Arn]
+              - Effect: Allow
+                Action: ecs:TagResource
+                Resource: '*'
+
+  BackupSchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: nb-db-backup-nightly
+      Description: Nightly prod DB pg_dump to S3 (02:30 IST)
+      ScheduleExpression: !Ref BackupScheduleExpr
+      ScheduleExpressionTimezone: UTC
+      State: !Ref SchedulesEnabled
+      FlexibleTimeWindow: { Mode: 'OFF' }
+      Target:
+        Arn: !GetAtt JobCluster.Arn
+        RoleArn: !GetAtt SchedulerRole.Arn
+        RetryPolicy: { MaximumRetryAttempts: 2, MaximumEventAgeInSeconds: 3600 }
+        EcsParameters:
+          TaskDefinitionArn: !Ref BackupTaskDef
+          LaunchType: FARGATE
+          PlatformVersion: LATEST
+          TaskCount: 1
+          NetworkConfiguration:
+            AwsvpcConfiguration:
+              AssignPublicIp: ENABLED
+              Subnets: !Ref SubnetIds
+              SecurityGroups: [!Ref JobSecurityGroup]
+
+  LogExportSchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: nb-db-log-export-daily
+      Description: Daily log-month export to S3 before pg_cron nb-log-retention (02:30 UTC)
+      ScheduleExpression: !Ref LogExportScheduleExpr
+      ScheduleExpressionTimezone: UTC
+      State: !Ref SchedulesEnabled
+      FlexibleTimeWindow: { Mode: 'OFF' }
+      Target:
+        Arn: !GetAtt JobCluster.Arn
+        RoleArn: !GetAtt SchedulerRole.Arn
+        RetryPolicy: { MaximumRetryAttempts: 2, MaximumEventAgeInSeconds: 3600 }
+        EcsParameters:
+          TaskDefinitionArn: !Ref LogExportTaskDef
+          LaunchType: FARGATE
+          PlatformVersion: LATEST
+          TaskCount: 1
+          NetworkConfiguration:
+            AwsvpcConfiguration:
+              AssignPublicIp: ENABLED
+              Subnets: !Ref SubnetIds
+              SecurityGroups: [!Ref JobSecurityGroup]
+
+  # Success markers -> metrics; alarm (Teams via SNS) when a job has not succeeded in a day.
+  BackupOkMetric:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref JobLogGroup
+      FilterPattern: '"NB_JOB_OK job=backup"'
+      MetricTransformations:
+        - { MetricNamespace: Neonbee/DbJobs, MetricName: BackupOk, MetricValue: '1' }
+  LogExportOkMetric:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref JobLogGroup
+      FilterPattern: '"NB_JOB_OK job=log-export"'
+      MetricTransformations:
+        - { MetricNamespace: Neonbee/DbJobs, MetricName: LogExportOk, MetricValue: '1' }
+  JobFailedMetric:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref JobLogGroup
+      FilterPattern: '"NB_JOB_FAILED"'
+      MetricTransformations:
+        - { MetricNamespace: Neonbee/DbJobs, MetricName: JobFailed, MetricValue: '1' }
+
+  BackupMissingAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: nb-prod-db-backup-missing
+      AlarmDescription: No successful nightly prod DB backup to S3 in the last 24 h (ECS nb-db-backup, logs /nb/prod/db-jobs).
+      Namespace: Neonbee/DbJobs
+      MetricName: BackupOk
+      Statistic: Sum
+      Period: 86400
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+      AlarmActions: [!Ref AlertTopicArn]
+      OKActions: [!Ref AlertTopicArn]
+  LogExportMissingAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: nb-prod-db-log-export-missing
+      AlarmDescription: No successful log-month export in the last 24 h - nb-log-retention will skip deletes for unexported months.
+      Namespace: Neonbee/DbJobs
+      MetricName: LogExportOk
+      Statistic: Sum
+      Period: 86400
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+      AlarmActions: [!Ref AlertTopicArn]
+  JobFailedAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: nb-prod-db-job-failed
+      AlarmDescription: A Fargate DB job (backup / log export) logged NB_JOB_FAILED. See /nb/prod/db-jobs.
+      Namespace: Neonbee/DbJobs
+      MetricName: JobFailed
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertTopicArn]
+
+  # One-time CI hop: lets the main-branch workflow copy the GitHub secret into SupabaseSecret.
+  BackupRoleSecretSync:
+    Type: AWS::IAM::RolePolicy
+    Properties:
+      RoleName: !Ref BackupRole
+      PolicyName: sync-supabase-secret
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action: secretsmanager:PutSecretValue
+            Resource: !Ref SupabaseSecret
+
+Outputs:
+  BucketName:
+    Value: !Ref BackupBucket
+  BucketArn:
+    Value: !GetAtt BackupBucket.Arn
+  BackupRoleArn:
+    Value: !GetAtt BackupRole.Arn
+  JobCluster:
+    Value: !Ref JobCluster
+  JobSecurityGroup:
+    Value: !Ref JobSecurityGroup
+  SupabaseSecretArn:
+    Value: !Ref SupabaseSecret
+  BackupUserName:
+    Condition: MakeUser
+    Value: !Ref BackupUser

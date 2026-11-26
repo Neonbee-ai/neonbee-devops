@@ -45,6 +45,44 @@ on:
         required: false
         type: string
         default: '22'
+      # ── Opt-in zero-downtime PM2 (Stage 1.6). All default OFF = today's
+      #    stop/delete/start path is unchanged. Repo var NB_PM2_RELOAD=true
+      #    also turns pm2_reload on without editing the caller.
+      pm2_reload:
+        description: 'Use a generated per-service ecosystem file + pm2 reload <name> (zero downtime) instead of delete+start'
+        required: false
+        type: boolean
+        default: false
+      pm2_instances:
+        description: 'PM2 instances (both paths; default 1 = previous behaviour)'
+        required: false
+        type: number
+        default: 1
+      pm2_max_memory:
+        description: 'PM2 max_memory_restart (both paths; default 400M = previous behaviour)'
+        required: false
+        type: string
+        default: '400M'
+      pm2_exec_mode:
+        description: 'cluster (stateless NestJS) or fork (pm2_reload path only)'
+        required: false
+        type: string
+        default: 'cluster'
+      pm2_kill_timeout:
+        description: 'ms PM2 waits after SIGINT before SIGKILL (pm2_reload path only)'
+        required: false
+        type: number
+        default: 10000
+      pm2_listen_timeout:
+        description: 'ms PM2 waits for a new worker to listen/ready (pm2_reload path only)'
+        required: false
+        type: number
+        default: 15000
+      pm2_wait_ready:
+        description: 'Wait for process.send("ready") - only for apps that emit it (pm2_reload path only)'
+        required: false
+        type: boolean
+        default: false
       extra_env_dev:
         description: 'Extra env vars for dev (KEY=value lines, one per line)'
         required: false
@@ -134,6 +172,8 @@ on:
       BILLING_SELLER_TAX_ID: { required: false }
       MARKETING_INTERNAL_KEY:       { required: false }
       ANTHROPIC_API_KEY_DEV:        { required: false }  # Dev/Staging use a separate key so test spend is apart from prod
+      AWS_ACCESS_KEY_ID_DEV:        { required: false }  # Dev/Staging-only SES sender key (falls back to AWS_ACCESS_KEY_ID)
+      AWS_SECRET_ACCESS_KEY_DEV:    { required: false }
       MARKETING_TRACKING_SECRET:    { required: false }
       FLOW_INTERNAL_KEY:           { required: false }
       EMAIL_INTERNAL_KEY:           { required: false }
@@ -1185,12 +1225,6 @@ jobs:
           HEALTH: ${{ inputs.health_path }}
         run: |
           ssh-keyscan -H $SERVER_IP >> ~/.ssh/known_hosts 2>/dev/null
-          # ── Dev database ─────────────────────────────────────────────────
-          # There is no dev Supabase project: CI holds one set of credentials
-          # and they are production's. Dev therefore runs against the SAME
-          # database as prod (user decision, 2026-09-21) — SUPABASE_*_DEV
-          # overrides it the moment those secrets exist. Say so on every deploy
-          # so nobody discovers it from a support ticket.
           if [ -z "${{ secrets.SUPABASE_URL_DEV }}" ]; then
             echo "::warning title=Dev is on the PRODUCTION database::No SUPABASE_URL_DEV secret — ${{ inputs.service_name }} (dev) reads and writes production data. Anything you create while testing on dev is real."
             {
@@ -1202,12 +1236,6 @@ jobs:
             } >> "$GITHUB_STEP_SUMMARY"
           fi
 
-          # ── Directory isolation ──────────────────────────────────────────
-          # The dev tier MUST NOT deploy into the prod tree. On the Contabo VM
-          # /github/neonbee/so360-* is what the *-prod-ha PM2 apps serve from,
-          # so an rsync --delete + .env rewrite there would hand production a
-          # dev build (dev Supabase, SERVICE_PORT_BAND, CORS) at its next
-          # restart. Remap every path into /github/neonbee-dev/ instead.
           case "$SERVICE_DIR" in
             /github/neonbee/*) SERVICE_DIR="/github/neonbee-dev/${SERVICE_DIR#/github/neonbee/}" ;;
             *)                 SERVICE_DIR="${SERVICE_DIR%/}-dev" ;;
@@ -1218,13 +1246,11 @@ jobs:
           NEW_SLOT=$([[ "$CURRENT" == "blue" ]] && echo green || echo blue)
           echo "Slot: $CURRENT → $NEW_SLOT"
 
-          # Backup dist before overwriting (Blue/Green rollback target)
           ssh root@$SERVER_IP "
             mkdir -p '$SERVICE_DIR/dist-prev' '$SERVICE_DIR/dist'
             rsync -a --delete '$SERVICE_DIR/dist/' '$SERVICE_DIR/dist-prev/' 2>/dev/null || true
           "
 
-          # Rsync dist/ only — source never touches target VM
           ssh root@$SERVER_IP "mkdir -p '$SERVICE_DIR/dist'"
           rsync -avz --delete dist/ "root@$SERVER_IP:$SERVICE_DIR/dist/"
           rsync -avz package.json package-lock.json "root@$SERVER_IP:$SERVICE_DIR/"
@@ -1237,7 +1263,6 @@ jobs:
             nvm use 22
             npm install --omit=dev --legacy-peer-deps --prefer-offline --no-audit --no-fund
 
-            # ── Write CI-managed vars ────────────────────────────────────────
             {
               echo "NODE_ENV=development"
               echo "RELEASE_SHA=${{ github.sha }}"
@@ -1254,7 +1279,6 @@ jobs:
               echo "CORS_ORIGINS=${{ secrets.CORS_ORIGINS_DEV }}"
             } > .env.ci
 
-            # ── Append optional secrets (only when the GitHub secret is set) ─
             [ -n "${{ secrets.STOREFRONT_JWT_SECRET }}" ]       && echo "STOREFRONT_JWT_SECRET=${{ secrets.STOREFRONT_JWT_SECRET }}"             >> .env.ci
             [ -n "${{ secrets.BUNNY_STORAGE_HOSTNAME }}" ]      && echo "BUNNY_STORAGE_HOSTNAME=${{ secrets.BUNNY_STORAGE_HOSTNAME }}"           >> .env.ci
             [ -n "${{ secrets.BUNNY_STORAGE_ZONE }}" ]          && echo "BUNNY_STORAGE_ZONE=${{ secrets.BUNNY_STORAGE_ZONE }}"                   >> .env.ci
@@ -1317,16 +1341,11 @@ jobs:
             [ -n "${{ secrets.CRM_SYNC_INTERNAL_KEY }}" ]       && echo "CRM_SYNC_INTERNAL_KEY=${{ secrets.CRM_SYNC_INTERNAL_KEY }}"             >> .env.ci
             [ -n "${{ secrets.MAINTENANCE_INTERNAL_KEY }}" ]       && echo "MAINTENANCE_INTERNAL_KEY=${{ secrets.MAINTENANCE_INTERNAL_KEY }}"             >> .env.ci
             [ -n "${{ secrets.SUPPORT_INTERNAL_KEY }}" ]           && echo "SUPPORT_INTERNAL_KEY=${{ secrets.SUPPORT_INTERNAL_KEY }}"                     >> .env.ci
-            # Channel Program: HS256 secret Core signs partner delegated-access session tokens with. Absent = /access/session returns 503 and no partner can enter a client tenant.
             [ -n "${{ secrets.CHANNEL_DELEGATION_SECRET }}" ] && echo "CHANNEL_DELEGATION_SECRET=${{ secrets.CHANNEL_DELEGATION_SECRET }}" >> .env.ci
-            # Channel Program: AES-256-GCM key Subscription encrypts channel payout bank details with. Absent = payout-profile writes are refused (fail-closed).
             [ -n "${{ secrets.COMPENSATION_ENCRYPTION_KEY }}" ] && echo "COMPENSATION_ENCRYPTION_KEY=${{ secrets.COMPENSATION_ENCRYPTION_KEY }}" >> .env.ci
             [ -n "${{ secrets.VENDOR_BANK_ENC_KEY }}" ] && echo "VENDOR_BANK_ENC_KEY=${{ secrets.VENDOR_BANK_ENC_KEY }}" >> .env.ci
-            # AWS SES (Inbox email channel outbound + inbound S3 bodies). Mirrors the prod
-            # workflow; dev/staging carried no AWS block at all until 2026-09-12, so a
-            # SES-backed agent reply could not send there. Conditional like the rest.
-            [ -n "${{ secrets.AWS_ACCESS_KEY_ID }}" ]          && echo "AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}"                     >> .env.ci
-            [ -n "${{ secrets.AWS_SECRET_ACCESS_KEY }}" ]      && echo "AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}"             >> .env.ci
+            [ -n "${{ secrets.AWS_ACCESS_KEY_ID_DEV || secrets.AWS_ACCESS_KEY_ID }}" ]          && echo "AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID_DEV || secrets.AWS_ACCESS_KEY_ID }}"                     >> .env.ci
+            [ -n "${{ secrets.AWS_SECRET_ACCESS_KEY_DEV || secrets.AWS_SECRET_ACCESS_KEY }}" ]      && echo "AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY_DEV || secrets.AWS_SECRET_ACCESS_KEY }}"             >> .env.ci
             [ -n "${{ secrets.AWS_REGION }}" ]                 && echo "AWS_REGION=${{ secrets.AWS_REGION }}"                                   >> .env.ci
             [ -n "${{ secrets.INBOX_EMAIL_S3_BUCKET }}" ]      && echo "INBOX_EMAIL_S3_BUCKET=${{ secrets.INBOX_EMAIL_S3_BUCKET }}"             >> .env.ci
             [ -n "${{ secrets.PLATFORM_OPS_INTERNAL_KEY }}" ] && echo "PLATFORM_OPS_INTERNAL_KEY=${{ secrets.PLATFORM_OPS_INTERNAL_KEY }}" >> .env.ci
@@ -1349,38 +1368,80 @@ jobs:
             [ -n "${{ secrets.SLACK_CLIENT_SECRET }}" ] && echo "SLACK_CLIENT_SECRET=${{ secrets.SLACK_CLIENT_SECRET }}" >> .env.ci
             [ -n "${{ secrets.SLACK_SIGNING_SECRET }}" ] && echo "SLACK_SIGNING_SECRET=${{ secrets.SLACK_SIGNING_SECRET }}" >> .env.ci
 
-            # ── Caller-supplied extra env vars for dev ────────────────────────
             EXTRA_ENV_DEV='${{ inputs.extra_env_dev }}'
             [ -n "$EXTRA_ENV_DEV" ] && printf '%s\n' "$EXTRA_ENV_DEV" >> .env.ci
 
-            # Strip any KEY= lines where the secret wasn't set
             sed -i '/=$/d' .env.ci
 
-            # ── PERMANENT FIX: Merge server-side secrets CI doesn't own ─────
-            # Keys already on the server but absent from .env.ci are preserved.
-            # This prevents future deployments from silently wiping secrets
-            # that were added to the server after the workflow was last updated.
             if [ -f .env ]; then
               CI_KEYS=$(sed 's/=.*//' .env.ci | tr '\n' '|' | sed 's/|$//')
               [ -n "$CI_KEYS" ] && grep -vE "^(${CI_KEYS})=" .env >> .env.ci 2>/dev/null || true
             fi
             mv .env.ci .env
 
-            pm2 stop "$SERVICE_NAME" 2>/dev/null || true
-            pm2 delete "$SERVICE_NAME" 2>/dev/null || true
-            sleep 3
-            # Free the port, but never kill a PM2 daemon or PM2-managed process: in cluster mode the
-            # God daemon holds the listen socket, and killing it takes every app on the VM down.
-            SAFE_PIDS=" $(pgrep -f 'PM2 v.*God Daemon' | tr '\n' ' ') $(pm2 jlist 2>/dev/null | grep -oP '"pid":\K[0-9]+' | tr '\n' ' ') "
-            for PID in $( { lsof -ti :"$PORT" 2>/dev/null; ss -Hlptn "sport = :$PORT" 2>/dev/null | grep -oP '(?<=pid=)\d+'; } | sort -u); do
-              case "$SAFE_PIDS" in
-                *" $PID "*) echo "Port $PORT held by PM2 pid $PID - not killing" ;;
-                *) kill -9 "$PID" 2>/dev/null || true ;;
-              esac
-            done
-            sleep 2
-            MAIN_JS=$(find dist -name main.js | head -1)
-            PORT=$PORT pm2 start "$MAIN_JS" --name "$SERVICE_NAME" --cwd "$SERVICE_DIR" --instances 1 --max-memory-restart 400M --update-env
+            NB_PM2_RELOAD="${{ (inputs.pm2_reload || vars.NB_PM2_RELOAD == 'true') && 'true' || 'false' }}"
+            NB_PM2_EXEC_MODE="${{ inputs.pm2_exec_mode }}"
+            NB_PM2_KILL_TIMEOUT="${{ inputs.pm2_kill_timeout }}"
+            NB_PM2_LISTEN_TIMEOUT="${{ inputs.pm2_listen_timeout }}"
+            NB_PM2_WAIT_READY="${{ inputs.pm2_wait_ready }}"
+            if [ "$NB_PM2_RELOAD" = "true" ]; then
+              nb_pm2_reload() {
+                local NAME="$1" SCRIPT="$2" CWD="$3" INST="$4" MEM="$5" APP_PORT="$6"
+                local ECO="$CWD/.nb-ecosystem.$NAME.json" WANT CUR
+                WANT=$(NB_NAME="$NAME" NB_SCRIPT="$SCRIPT" NB_CWD="$CWD" NB_INST="$INST" NB_MEM="$MEM" \
+                  NB_PORT="$APP_PORT" NB_ECO="$ECO" NB_EXEC="$NB_PM2_EXEC_MODE" NB_KILL="$NB_PM2_KILL_TIMEOUT" \
+                  NB_LISTEN="$NB_PM2_LISTEN_TIMEOUT" NB_READY="$NB_PM2_WAIT_READY" node -e '
+                  const e = process.env, cluster = e.NB_EXEC !== "fork";
+                  const app = { name: e.NB_NAME, script: e.NB_SCRIPT, cwd: e.NB_CWD,
+                    exec_mode: cluster ? "cluster" : "fork",
+                    instances: cluster ? (Number(e.NB_INST) || 1) : 1,
+                    instance_var: "NODE_APP_INSTANCE",
+                    max_memory_restart: e.NB_MEM,
+                    kill_timeout: Number(e.NB_KILL) || 10000,
+                    listen_timeout: Number(e.NB_LISTEN) || 15000,
+                    wait_ready: e.NB_READY === "true",
+                    autorestart: true, merge_logs: true,
+                    env: { PORT: String(e.NB_PORT) } };
+                  require("fs").writeFileSync(e.NB_ECO, JSON.stringify({ apps: [app] }, null, 2) + "\n");
+                  console.log([app.exec_mode, app.instances, app.cwd, app.script].join("|"));
+                ') || { echo "FATAL: cannot write PM2 ecosystem $ECO"; return 1; }
+                CUR=$(pm2 jlist 2>/dev/null | NB_NAME="$NAME" node -e '
+                  let s = "";
+                  process.stdin.on("data", d => s += d).on("end", () => {
+                    let l;
+                    try { l = JSON.parse(s.slice(s.search(/^\[(\{|\])/m))); } catch (_) { console.log("unknown"); return; }
+                    const p = l.filter(x => x.name === process.env.NB_NAME);
+                    if (!p.length) { console.log("absent"); return; }
+                    const v = p[0].pm2_env || {};
+                    console.log([v.exec_mode === "cluster_mode" ? "cluster" : "fork", p.length, v.pm_cwd, v.pm_exec_path].join("|"));
+                  });
+                ') || CUR="unknown"
+                echo "PM2 $NAME: running=[$CUR] wanted=[$WANT]"
+                if [ "$CUR" = "$WANT" ]; then
+                  pm2 reload "$ECO" --only "$NAME" --update-env && { echo "pm2 reload $NAME: OK (zero-downtime)"; return 0; }
+                  echo "pm2 reload $NAME failed - falling back to delete+start of this app only"
+                fi
+                pm2 delete "$NAME" 2>/dev/null || true
+                pm2 start "$ECO" --only "$NAME" --update-env
+              }
+              MAIN_JS=$(find dist -name main.js | head -1)
+              [ -n "$MAIN_JS" ] || { echo "FATAL: no dist/**/main.js"; exit 1; }
+              nb_pm2_reload "$SERVICE_NAME" "$(pwd)/$MAIN_JS" "$(pwd)" "${{ inputs.pm2_instances }}" "${{ inputs.pm2_max_memory }}" "$PORT" || exit 1
+            else
+              pm2 stop "$SERVICE_NAME" 2>/dev/null || true
+              pm2 delete "$SERVICE_NAME" 2>/dev/null || true
+              sleep 3
+              SAFE_PIDS=" $(pgrep -f 'PM2 v.*God Daemon' | tr '\n' ' ') $(pm2 jlist 2>/dev/null | grep -oP '"pid":\K[0-9]+' | tr '\n' ' ') "
+              for PID in $( { lsof -ti :"$PORT" 2>/dev/null; ss -Hlptn "sport = :$PORT" 2>/dev/null | grep -oP '(?<=pid=)\d+'; } | sort -u); do
+                case "$SAFE_PIDS" in
+                  *" $PID "*) echo "Port $PORT held by PM2 pid $PID - not killing" ;;
+                  *) kill -9 "$PID" 2>/dev/null || true ;;
+                esac
+              done
+              sleep 2
+              MAIN_JS=$(find dist -name main.js | head -1)
+              PORT=$PORT pm2 start "$MAIN_JS" --name "$SERVICE_NAME" --cwd "$SERVICE_DIR" --instances "${{ inputs.pm2_instances }}" --max-memory-restart "${{ inputs.pm2_max_memory }}" --update-env
+            fi
             pm2 save
             HEALTH_PATH="${{ inputs.health_path }}"
             for i in {1..15}; do
@@ -1392,7 +1453,6 @@ jobs:
             echo "Deployed $SERVICE_NAME on port $PORT (slot: $NEW_SLOT)"
           DEPLOY_SCRIPT
 
-          # Push deploy metric to Pushgateway on Internal Tools VM (non-fatal)
           TOOLS=${{ secrets.INTERNAL_TOOLS_VM }}
           if [ -n "$TOOLS" ]; then
             ssh-keyscan -H $TOOLS >> ~/.ssh/known_hosts 2>/dev/null
@@ -1405,7 +1465,6 @@ jobs:
             " 2>/dev/null || true
           fi
 
-      # ── Staging ──────────────────────────────────────────────────────────
       - name: Deploy to Staging
         if: github.ref == 'refs/heads/qa'
         env:
@@ -1417,12 +1476,6 @@ jobs:
         run: |
           ssh-keyscan -H $SERVER_IP >> ~/.ssh/known_hosts 2>/dev/null
 
-          # ── Directory isolation ──────────────────────────────────────────
-          # The staging tier MUST NOT deploy into the prod tree. On the Contabo VM
-          # /github/neonbee/so360-* is what the *-prod-ha PM2 apps serve from,
-          # so an rsync --delete + .env rewrite there would hand production a
-          # staging build (dev Supabase, SERVICE_PORT_BAND, CORS) at its next
-          # restart. Remap every path into /github/neonbee-staging/ instead.
           case "$SERVICE_DIR" in
             /github/neonbee/*) SERVICE_DIR="/github/neonbee-staging/${SERVICE_DIR#/github/neonbee/}" ;;
             *)                 SERVICE_DIR="${SERVICE_DIR%/}-staging" ;;
@@ -1449,7 +1502,6 @@ jobs:
             nvm use 22
             npm install --omit=dev --legacy-peer-deps --prefer-offline --no-audit --no-fund
 
-            # ── Write CI-managed vars ────────────────────────────────────────
             {
               echo "NODE_ENV=staging"
               echo "RELEASE_SHA=${{ github.sha }}"
@@ -1466,7 +1518,6 @@ jobs:
               echo "CORS_ORIGINS=${{ secrets.CORS_ORIGINS_STAGING }}"
             } > .env.ci
 
-            # ── Append optional secrets (only when the GitHub secret is set) ─
             [ -n "${{ secrets.STOREFRONT_JWT_SECRET_STAGING }}" ] && echo "STOREFRONT_JWT_SECRET=${{ secrets.STOREFRONT_JWT_SECRET_STAGING }}"   >> .env.ci
             [ -n "${{ secrets.BUNNY_STORAGE_HOSTNAME }}" ]      && echo "BUNNY_STORAGE_HOSTNAME=${{ secrets.BUNNY_STORAGE_HOSTNAME }}"           >> .env.ci
             [ -n "${{ secrets.BUNNY_STORAGE_ZONE }}" ]          && echo "BUNNY_STORAGE_ZONE=${{ secrets.BUNNY_STORAGE_ZONE }}"                   >> .env.ci
@@ -1529,16 +1580,11 @@ jobs:
             [ -n "${{ secrets.CRM_SYNC_INTERNAL_KEY }}" ]       && echo "CRM_SYNC_INTERNAL_KEY=${{ secrets.CRM_SYNC_INTERNAL_KEY }}"             >> .env.ci
             [ -n "${{ secrets.MAINTENANCE_INTERNAL_KEY }}" ]       && echo "MAINTENANCE_INTERNAL_KEY=${{ secrets.MAINTENANCE_INTERNAL_KEY }}"             >> .env.ci
             [ -n "${{ secrets.SUPPORT_INTERNAL_KEY }}" ]           && echo "SUPPORT_INTERNAL_KEY=${{ secrets.SUPPORT_INTERNAL_KEY }}"                     >> .env.ci
-            # Channel Program: HS256 secret Core signs partner delegated-access session tokens with. Absent = /access/session returns 503 and no partner can enter a client tenant.
             [ -n "${{ secrets.CHANNEL_DELEGATION_SECRET }}" ] && echo "CHANNEL_DELEGATION_SECRET=${{ secrets.CHANNEL_DELEGATION_SECRET }}" >> .env.ci
-            # Channel Program: AES-256-GCM key Subscription encrypts channel payout bank details with. Absent = payout-profile writes are refused (fail-closed).
             [ -n "${{ secrets.COMPENSATION_ENCRYPTION_KEY }}" ] && echo "COMPENSATION_ENCRYPTION_KEY=${{ secrets.COMPENSATION_ENCRYPTION_KEY }}" >> .env.ci
             [ -n "${{ secrets.VENDOR_BANK_ENC_KEY }}" ] && echo "VENDOR_BANK_ENC_KEY=${{ secrets.VENDOR_BANK_ENC_KEY }}" >> .env.ci
-            # AWS SES (Inbox email channel outbound + inbound S3 bodies). Mirrors the prod
-            # workflow; dev/staging carried no AWS block at all until 2026-09-12, so a
-            # SES-backed agent reply could not send there. Conditional like the rest.
-            [ -n "${{ secrets.AWS_ACCESS_KEY_ID }}" ]          && echo "AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}"                     >> .env.ci
-            [ -n "${{ secrets.AWS_SECRET_ACCESS_KEY }}" ]      && echo "AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}"             >> .env.ci
+            [ -n "${{ secrets.AWS_ACCESS_KEY_ID_DEV || secrets.AWS_ACCESS_KEY_ID }}" ]          && echo "AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID_DEV || secrets.AWS_ACCESS_KEY_ID }}"                     >> .env.ci
+            [ -n "${{ secrets.AWS_SECRET_ACCESS_KEY_DEV || secrets.AWS_SECRET_ACCESS_KEY }}" ]      && echo "AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY_DEV || secrets.AWS_SECRET_ACCESS_KEY }}"             >> .env.ci
             [ -n "${{ secrets.AWS_REGION }}" ]                 && echo "AWS_REGION=${{ secrets.AWS_REGION }}"                                   >> .env.ci
             [ -n "${{ secrets.INBOX_EMAIL_S3_BUCKET }}" ]      && echo "INBOX_EMAIL_S3_BUCKET=${{ secrets.INBOX_EMAIL_S3_BUCKET }}"             >> .env.ci
             [ -n "${{ secrets.PLATFORM_OPS_INTERNAL_KEY }}" ] && echo "PLATFORM_OPS_INTERNAL_KEY=${{ secrets.PLATFORM_OPS_INTERNAL_KEY }}" >> .env.ci
@@ -1559,35 +1605,80 @@ jobs:
             [ -n "${{ secrets.SLACK_CLIENT_SECRET }}" ] && echo "SLACK_CLIENT_SECRET=${{ secrets.SLACK_CLIENT_SECRET }}" >> .env.ci
             [ -n "${{ secrets.SLACK_SIGNING_SECRET }}" ] && echo "SLACK_SIGNING_SECRET=${{ secrets.SLACK_SIGNING_SECRET }}" >> .env.ci
 
-            # ── Caller-supplied extra env vars for staging ────────────────────
             EXTRA_ENV_STAGING='${{ inputs.extra_env_staging }}'
             [ -n "$EXTRA_ENV_STAGING" ] && printf '%s\n' "$EXTRA_ENV_STAGING" >> .env.ci
 
-            # Strip any KEY= lines where the secret wasn't set
             sed -i '/=$/d' .env.ci
 
-            # ── PERMANENT FIX: Merge server-side secrets CI doesn't own ─────
             if [ -f .env ]; then
               CI_KEYS=$(sed 's/=.*//' .env.ci | tr '\n' '|' | sed 's/|$//')
               [ -n "$CI_KEYS" ] && grep -vE "^(${CI_KEYS})=" .env >> .env.ci 2>/dev/null || true
             fi
             mv .env.ci .env
 
-            pm2 stop "$SERVICE_NAME" 2>/dev/null || true
-            pm2 delete "$SERVICE_NAME" 2>/dev/null || true
-            sleep 3
-            # Free the port, but never kill a PM2 daemon or PM2-managed process: in cluster mode the
-            # God daemon holds the listen socket, and killing it takes every app on the VM down.
-            SAFE_PIDS=" $(pgrep -f 'PM2 v.*God Daemon' | tr '\n' ' ') $(pm2 jlist 2>/dev/null | grep -oP '"pid":\K[0-9]+' | tr '\n' ' ') "
-            for PID in $( { lsof -ti :"$PORT" 2>/dev/null; ss -Hlptn "sport = :$PORT" 2>/dev/null | grep -oP '(?<=pid=)\d+'; } | sort -u); do
-              case "$SAFE_PIDS" in
-                *" $PID "*) echo "Port $PORT held by PM2 pid $PID - not killing" ;;
-                *) kill -9 "$PID" 2>/dev/null || true ;;
-              esac
-            done
-            sleep 2
-            MAIN_JS=$(find dist -name main.js | head -1)
-            PORT=$PORT pm2 start "$MAIN_JS" --name "$SERVICE_NAME" --cwd "$SERVICE_DIR" --instances 1 --max-memory-restart 400M --update-env
+            NB_PM2_RELOAD="${{ (inputs.pm2_reload || vars.NB_PM2_RELOAD == 'true') && 'true' || 'false' }}"
+            NB_PM2_EXEC_MODE="${{ inputs.pm2_exec_mode }}"
+            NB_PM2_KILL_TIMEOUT="${{ inputs.pm2_kill_timeout }}"
+            NB_PM2_LISTEN_TIMEOUT="${{ inputs.pm2_listen_timeout }}"
+            NB_PM2_WAIT_READY="${{ inputs.pm2_wait_ready }}"
+            if [ "$NB_PM2_RELOAD" = "true" ]; then
+              nb_pm2_reload() {
+                local NAME="$1" SCRIPT="$2" CWD="$3" INST="$4" MEM="$5" APP_PORT="$6"
+                local ECO="$CWD/.nb-ecosystem.$NAME.json" WANT CUR
+                WANT=$(NB_NAME="$NAME" NB_SCRIPT="$SCRIPT" NB_CWD="$CWD" NB_INST="$INST" NB_MEM="$MEM" \
+                  NB_PORT="$APP_PORT" NB_ECO="$ECO" NB_EXEC="$NB_PM2_EXEC_MODE" NB_KILL="$NB_PM2_KILL_TIMEOUT" \
+                  NB_LISTEN="$NB_PM2_LISTEN_TIMEOUT" NB_READY="$NB_PM2_WAIT_READY" node -e '
+                  const e = process.env, cluster = e.NB_EXEC !== "fork";
+                  const app = { name: e.NB_NAME, script: e.NB_SCRIPT, cwd: e.NB_CWD,
+                    exec_mode: cluster ? "cluster" : "fork",
+                    instances: cluster ? (Number(e.NB_INST) || 1) : 1,
+                    instance_var: "NODE_APP_INSTANCE",
+                    max_memory_restart: e.NB_MEM,
+                    kill_timeout: Number(e.NB_KILL) || 10000,
+                    listen_timeout: Number(e.NB_LISTEN) || 15000,
+                    wait_ready: e.NB_READY === "true",
+                    autorestart: true, merge_logs: true,
+                    env: { PORT: String(e.NB_PORT) } };
+                  require("fs").writeFileSync(e.NB_ECO, JSON.stringify({ apps: [app] }, null, 2) + "\n");
+                  console.log([app.exec_mode, app.instances, app.cwd, app.script].join("|"));
+                ') || { echo "FATAL: cannot write PM2 ecosystem $ECO"; return 1; }
+                CUR=$(pm2 jlist 2>/dev/null | NB_NAME="$NAME" node -e '
+                  let s = "";
+                  process.stdin.on("data", d => s += d).on("end", () => {
+                    let l;
+                    try { l = JSON.parse(s.slice(s.search(/^\[(\{|\])/m))); } catch (_) { console.log("unknown"); return; }
+                    const p = l.filter(x => x.name === process.env.NB_NAME);
+                    if (!p.length) { console.log("absent"); return; }
+                    const v = p[0].pm2_env || {};
+                    console.log([v.exec_mode === "cluster_mode" ? "cluster" : "fork", p.length, v.pm_cwd, v.pm_exec_path].join("|"));
+                  });
+                ') || CUR="unknown"
+                echo "PM2 $NAME: running=[$CUR] wanted=[$WANT]"
+                if [ "$CUR" = "$WANT" ]; then
+                  pm2 reload "$ECO" --only "$NAME" --update-env && { echo "pm2 reload $NAME: OK (zero-downtime)"; return 0; }
+                  echo "pm2 reload $NAME failed - falling back to delete+start of this app only"
+                fi
+                pm2 delete "$NAME" 2>/dev/null || true
+                pm2 start "$ECO" --only "$NAME" --update-env
+              }
+              MAIN_JS=$(find dist -name main.js | head -1)
+              [ -n "$MAIN_JS" ] || { echo "FATAL: no dist/**/main.js"; exit 1; }
+              nb_pm2_reload "$SERVICE_NAME" "$(pwd)/$MAIN_JS" "$(pwd)" "${{ inputs.pm2_instances }}" "${{ inputs.pm2_max_memory }}" "$PORT" || exit 1
+            else
+              pm2 stop "$SERVICE_NAME" 2>/dev/null || true
+              pm2 delete "$SERVICE_NAME" 2>/dev/null || true
+              sleep 3
+              SAFE_PIDS=" $(pgrep -f 'PM2 v.*God Daemon' | tr '\n' ' ') $(pm2 jlist 2>/dev/null | grep -oP '"pid":\K[0-9]+' | tr '\n' ' ') "
+              for PID in $( { lsof -ti :"$PORT" 2>/dev/null; ss -Hlptn "sport = :$PORT" 2>/dev/null | grep -oP '(?<=pid=)\d+'; } | sort -u); do
+                case "$SAFE_PIDS" in
+                  *" $PID "*) echo "Port $PORT held by PM2 pid $PID - not killing" ;;
+                  *) kill -9 "$PID" 2>/dev/null || true ;;
+                esac
+              done
+              sleep 2
+              MAIN_JS=$(find dist -name main.js | head -1)
+              PORT=$PORT pm2 start "$MAIN_JS" --name "$SERVICE_NAME" --cwd "$SERVICE_DIR" --instances "${{ inputs.pm2_instances }}" --max-memory-restart "${{ inputs.pm2_max_memory }}" --update-env
+            fi
             pm2 save
             HEALTH_PATH="${{ inputs.health_path }}"
             for i in {1..15}; do
@@ -1637,7 +1728,7 @@ jobs:
     name: Notify Teams
     needs: [gate, security, contract-tests, integration-tests, build-deploy]
     if: always()
-    runs-on: [self-hosted, runner-vm]
+    runs-on: [self-hosted, nb-route]
     steps:
       - name: Post pipeline result to Teams
         env:
