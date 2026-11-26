@@ -164,11 +164,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          PR: ${{ github.event.pull_request.number }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
           PULSE_MCP_URL: ${{ vars.PULSE_MCP_URL }}
           PULSE_TOKEN: ${{ secrets.NB_PULSE_TOKEN }}
         run: |
-          gh api --paginate "repos/$REPO/pulls/$PR/commits?per_page=100" --jq '.[] | {sha: .sha, msg: .commit.message}' > "$RUNNER_TEMP/pr-commits.jsonl"
+          # compare (contents:read) not pulls/N/commits: callers' default token has no pull-requests scope (403)
+          gh api --paginate "repos/$REPO/compare/$BASE...$HEAD?per_page=100" --jq '.commits[] | {sha: .sha, msg: .commit.message}' > "$RUNNER_TEMP/pr-commits.jsonl"
           python3 - "$RUNNER_TEMP/pr-commits.jsonl" <<'PY'
           import json, os, re, sys, urllib.request
           TRAILER_RE = re.compile(r'^Pulse:[ \t]*(none|[0-9a-f]{8}(?:-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})?)[ \t]*$', re.I)
