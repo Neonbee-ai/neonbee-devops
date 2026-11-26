@@ -66,7 +66,7 @@ PULSE_URL = E('PULSE_MCP_URL') or 'https://pulse.moonhive.in/mcp'   # an empty v
 NBCI_HOST = E('NBCI_HOST', 'nbci.moonhive.in')
 DNS_BRANCH, DNS_REPO = E('NBCI_DNS_BRANCH', 'ops/nbci-dns'), E('NBCI_DNS_REPO', 'neonbee-devops')
 ALERT_TASK = E('NBCI_ALERT_TASK', '71b8be5b')       # Pulse "[nbci] alerts" (Neonbee project): one comment per incident
-DAILY_VM_MIN = float(E('NB_DAILY_VM_MIN', '1500'))   # all nbci + AQA VM-minutes per UTC day; at the cap no VM starts
+DAILY_VM_MIN = float(E('NB_DAILY_VM_MIN', '3000'))   # all nbci + AQA VM-minutes per UTC day; at the cap no VM starts
 AQA_MAX_S = int(E('AQA_MAX_S', '7200'))
 PULSE_SKIP_CHECKS = set(filter(None, E('PULSE_SKIP_CHECKS', 'Gate').split(',')))   # the aggregate Gate job repeats its parts' failure             # any aqa-* VM (ours or the AQA agent's) older than this is reaped
 
