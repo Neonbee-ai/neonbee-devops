@@ -1,5 +1,15 @@
 """Pure decision logic of the nb-ci controller (no I/O). Unit-tested in tests/test_nbci.py."""
-import json, re
+import json, re, time
+
+
+def ts(s):
+    """RFC 3339 -> unix seconds, honouring the offset. GCE creationTimestamp is local to the API
+    (e.g. 2026-11-26T11:41:13.922-08:00); reading it as UTC aged every new VM by 8 h, so the
+    controller deleted runner VMs ~30 s after creating them."""
+    import calendar
+    base = calendar.timegm(time.strptime(s[:19], '%Y-%m-%dT%H:%M:%S'))
+    m = re.search(r'([+-])(\d\d):?(\d\d)$', s[19:])
+    return base - (1 if m.group(1) == '+' else -1) * (int(m.group(2)) * 3600 + int(m.group(3)) * 60) if m else base
 
 DEAD = ('TERMINATED', 'STOPPED', 'SUSPENDED')
 NO_JOB_S = 300          # a VM whose runner has not started a job 5 min after boot is deleted

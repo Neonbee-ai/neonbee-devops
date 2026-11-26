@@ -63,9 +63,7 @@ LOCK = threading.Lock()
 EVENTS = {'jobs': {}, 'done_runners': set(), 'dirty_repos': set(), 'last_event': 0, 'waits': [], 'pushes': [], 'failed': []}
 
 
-def ts(s):
-    import calendar
-    return calendar.timegm(time.strptime(s[:19], '%Y-%m-%dT%H:%M:%S'))
+ts = L.ts   # offset-aware (GCE timestamps are -08:00)
 
 
 # ── webhook receiver (Caddy terminates TLS and proxies to 127.0.0.1:8787) ─────────────────────────

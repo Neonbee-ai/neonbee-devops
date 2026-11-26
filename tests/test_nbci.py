@@ -123,6 +123,17 @@ class Delete(unittest.TestCase):
     def test_a_booting_vm_is_kept(self):
         self.assertIsNone(L.vm_verdict(self.vm(age=60), None, False, NOW))
 
+    def test_gce_timestamp_offset_is_honoured(self):
+        # given the same instant as GCE (-08:00) and GitHub (Z) print it, then both give the same epoch
+        self.assertEqual(L.ts('2026-11-26T11:41:13.922-08:00'), L.ts('2026-11-26T19:41:13Z'))
+        self.assertEqual(L.ts('2026-11-26T21:11:13+01:30'), L.ts('2026-11-26T19:41:13Z'))
+
+    def test_vm_created_seconds_ago_in_gce_local_time_is_not_deleted(self):
+        # given a VM GCE reports as created 30 s ago in -08:00, when judged with no runner yet, then it is kept
+        now = L.ts('2026-11-26T19:41:43Z')
+        vm = {'status': 'RUNNING', 'created': L.ts('2026-11-26T11:41:13.922-08:00')}
+        self.assertIsNone(L.vm_verdict(vm, None, False, now, L.NO_JOB_STARTUP_S))
+
     def test_startup_boot_gets_a_longer_no_job_grace(self):
         # given a stock-ubuntu VM still running provision.sh 6 min after creation (no runner yet)
         # when the verdict uses the startup grace, then it is kept; past the grace it is deleted
