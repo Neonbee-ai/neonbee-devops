@@ -154,9 +154,9 @@ jobs:
     steps:
       # ── Pulse task id (zero-agent release: the merge train and the Pulse 'released' update read it) ──
       # The title must carry PULSE-<8 hex> (the Pulse task's short id). Bots (dependabot) are exempt.
-      # Kill switch: org/repo variable NB_PULSE_TITLE=off (or NB_CI_MODE=legacy).
+      # Kill switch: org/repo variable NB_PULSE_TITLE=off (enforced only when NB_CI_MODE=auto).
       - name: PR title has a Pulse task id
-        if: github.event_name == 'pull_request' && vars.NB_PULSE_TITLE != 'off' && vars.NB_CI_MODE != 'legacy' && !endsWith(github.event.pull_request.user.login, '[bot]')
+        if: github.event_name == 'pull_request' && vars.NB_PULSE_TITLE != 'off' && vars.NB_CI_MODE == 'auto' && !endsWith(github.event.pull_request.user.login, '[bot]')
         env:
           TITLE: ${{ github.event.pull_request.title }}
         run: |

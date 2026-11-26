@@ -223,13 +223,13 @@ class Workflows(unittest.TestCase):
         t = wf('neonbee-deploy-s3-release.yml')
         c = t[t.index('if [ "$CANARY" = "true" ]'):]
         self.assertLess(c.index('ssm_run "$FIRST"'), c.index('ssm_run $REST'))
-        self.assertIn("vars.NB_CI_MODE != 'legacy'", t)
+        self.assertIn("vars.NB_CI_MODE == 'auto'", t)
         self.assertLess(t.index('name: Revert to previous release'), t.index('name: Verify served artifact is this release'))
 
     def test_pr_title_needs_a_pulse_id_unless_legacy(self):
         t = wf('neonbee-pr-gate.yml')
         self.assertIn('PULSE-[0-9a-f]{8}', t)
-        self.assertIn("vars.NB_CI_MODE != 'legacy'", t)
+        self.assertIn("vars.NB_CI_MODE == 'auto'", t)
 
 
 class Image(unittest.TestCase):

@@ -351,7 +351,7 @@ jobs:
           RF_MIN_HEALTHY: ${{ inputs.refresh_min_healthy_pct }}
           RF_WARMUP: ${{ inputs.refresh_warmup_seconds }}
           RF_TIMEOUT: ${{ inputs.refresh_timeout_seconds }}
-          CANARY: ${{ inputs.canary && vars.NB_CI_MODE != 'legacy' }}
+          CANARY: ${{ inputs.canary && vars.NB_CI_MODE == 'auto' }}
           CANARY_CHECKS: ${{ inputs.canary_checks }}
           TG_ARN: ${{ inputs.target_group_arn }}
           HEALTH_URL: ${{ inputs.health_url }}
@@ -390,7 +390,7 @@ jobs:
                 --query 'CommandInvocations[].[InstanceId,Status,StatusDetails]' --output text || true
               [ "$ST" = "Success" ] || { echo "::error::SSM rollout ended with status $ST"; return 1; }
             }
-            # Canary (input canary, default on; off when NB_CI_MODE=legacy): the first InService node
+            # Canary (input canary, default on; active only when NB_CI_MODE=auto): the first InService node
             # alone, then CANARY_CHECKS consecutive healthy checks of THAT node (target group) or of the
             # health URL, then the rest. Any failure -> exit 1 -> "Revert to previous release" restores
             # the previous release on every node, so a bad build reaches one machine at most.
