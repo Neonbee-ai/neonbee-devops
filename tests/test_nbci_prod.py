@@ -330,3 +330,21 @@ class Relay(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class AqaBackfill(unittest.TestCase):
+    def test_given_a_spooled_deploy_run_then_the_loop_takes_it_once(self):
+        import tempfile
+        d = tempfile.mkdtemp(); old = nbci.AQA_BACKFILL; nbci.AQA_BACKFILL = os.path.join(d, 'b.json')
+        try:
+            json.dump([{'repo': 'so360-crm-fe', 'run': {'id': 1}}, {'bad': 1}], open(nbci.AQA_BACKFILL, 'w'))
+            got = nbci.take_backfill(NOW)
+            self.assertEqual([(e['repo'], e['seen']) for e in got], [('so360-crm-fe', NOW)])
+            self.assertEqual(nbci.take_backfill(NOW), [])
+        finally:
+            nbci.AQA_BACKFILL = old
+
+    def test_given_no_spool_then_nothing_is_taken(self):
+        old = nbci.AQA_BACKFILL; nbci.AQA_BACKFILL = '/nonexistent/x.json'
+        try: self.assertEqual(nbci.take_backfill(NOW), [])
+        finally: nbci.AQA_BACKFILL = old

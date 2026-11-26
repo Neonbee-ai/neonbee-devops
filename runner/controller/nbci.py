@@ -363,6 +363,33 @@ def every(st, key, seconds, now):
     return False
 
 
+AQA_BACKFILL = os.path.join(os.path.dirname(STATE_FILE), 'aqa-backfill.json')
+RUN_KEYS = ('id', 'name', 'event', 'conclusion', 'head_branch', 'head_sha', 'workflow_id', 'html_url')
+
+
+def take_backfill(now):
+    """Deploy runs queued by `nbci.py aqa <repo>:<run_id> ...` (spool file, so the loop owns state + results)."""
+    try:
+        evs = json.load(open(AQA_BACKFILL)); os.unlink(AQA_BACKFILL)
+    except (OSError, ValueError):
+        return []
+    return [dict(e, seen=now) for e in evs if isinstance(e, dict) and e.get('repo') and e.get('run')]
+
+
+def queue_backfill(gh, args):
+    """CLI: spool successful deploy runs (older than the 2 h webhook window) for one AQA replay each."""
+    evs = []
+    for a in args:
+        repo, rid = a.split(':', 1)
+        wr = gh('repos/%s/%s/actions/runs/%s' % (ORG, repo, rid))
+        evs.append({'repo': repo, 'run': {k: wr.get(k) for k in RUN_KEYS}})
+        log('aqa backfill', repo, rid, wr.get('name'), wr.get('head_branch'), (wr.get('head_sha') or '')[:9], wr.get('conclusion'))
+    try: evs = json.load(open(AQA_BACKFILL)) + evs
+    except (OSError, ValueError): pass
+    json.dump(evs, open(AQA_BACKFILL + '.tmp', 'w')); os.replace(AQA_BACKFILL + '.tmp', AQA_BACKFILL)
+    return evs
+
+
 def aqa_trigger(gh, gcp, st, now, today, failures, vm_room=True):
     """Deploy -> AQA: ONE Spot VM per successful deploy run (dedupe repo+sha, daily cap), deleted by the
     controller once it powers off. Held (events kept) until ci/aqa.json says contract_ready."""
@@ -370,6 +397,7 @@ def aqa_trigger(gh, gcp, st, now, today, failures, vm_room=True):
     with LOCK:
         pending = st.pop('aqa_pending', []) + [dict(e, seen=e.get('seen', now)) for e in EVENTS['aqa']]   # persisted: survives a restart
         EVENTS['aqa'] = []
+    pending += take_backfill(now)
     later = []
     try:
         if not pending or not cfg.get('enabled'):
@@ -896,6 +924,8 @@ def main():
         return set_hook(gh, st)
     if mode == 'redeliver':
         return redeliver(gh, st)
+    if mode == 'aqa':            # nbci.py aqa <repo>:<run_id> ... (manual AQA backfill; the loop creates the VMs)
+        queue_backfill(gh, sys.argv[2:]); return
     if mode in ('status', 'drain', 'once'):
         tick(gh, gcp, st, mode if mode != 'once' else 'reconcile'); st.pop('_pulse_token', None); save_state(st); return
     try:
