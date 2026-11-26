@@ -23,7 +23,7 @@ pip3 install -q --break-system-packages semgrep
 # Playwright Chromium (system deps as root, browsers into the runner's cache) + warm npm cache
 npx -y playwright@1 install-deps chromium
 sudo -u runner -H npx -y playwright@1 install chromium
-sudo -u runner -H npm cache add typescript@5 @nestjs/cli@11 vite@5 vite@7 jest@29 eslint@9 @swc/core@1 esbuild@0 \
+[ -n "${NB_STARTUP:-}" ] || sudo -u runner -H npm cache add typescript@5 @nestjs/cli@11 vite@5 vite@7 jest@29 eslint@9 @swc/core@1 esbuild@0 \
   vitest@2 ts-node@10 prettier@3 @vitejs/plugin-react@4 @originjs/vite-plugin-federation@1 tailwindcss@3 || true
 
 # One job per VM: read the JIT config from metadata (root only), run it as `runner`, power off.
@@ -57,7 +57,9 @@ PrivateTmp=yes
 WantedBy=multi-user.target
 U
 systemctl enable nb-runner.service
-# small image: drop caches and logs
-apt-get clean; rm -rf /var/lib/apt/lists/* /tmp/* /root/.npm/_logs
-journalctl --vacuum-time=1s || true
+# small image: drop caches and logs (image build only; a startup-script VM is deleted after one job)
+if [ -z "${NB_STARTUP:-}" ]; then
+  apt-get clean; rm -rf /var/lib/apt/lists/* /tmp/* /root/.npm/_logs
+  journalctl --vacuum-time=1s || true
+fi
 sync

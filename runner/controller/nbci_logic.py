@@ -278,3 +278,19 @@ def release_blocking(item, now, stale_s=7200):
     """Manifest order only couples PRs of the same release branch (release/*), and a stuck, held,
     ejected or red item stops blocking after stale_s, so one bad repo never freezes the release."""
     return item['branch'].startswith('release/') and item['state'] in ('queued', 'inflight') and now - item['since'] < stale_s
+
+
+STOCK_IMAGE = 'projects/ubuntu-os-cloud/global/images/family/ubuntu-2404-lts-amd64'
+
+
+def boot_plan(mode, family_link, provision_sh, jit):
+    """How a job VM boots. 'image': the prebuilt nb-ci-runner family, metadata = the JIT config only.
+    'startup': stock ubuntu-2404 (no custom image) that runs runner/image/provision.sh as its
+    startup-script, then starts the one-job runner; any provisioning error powers the VM off (the
+    controller deletes it). Returns (sourceImage, metadata items)."""
+    items = [{'key': 'jit', 'value': jit}]
+    if mode != 'startup':
+        return family_link, items
+    script = ('#!/bin/bash\nexport NB_STARTUP=1\ntrap poweroff ERR\n' + provision_sh +
+              '\nsystemctl start --no-block nb-runner.service\n')
+    return STOCK_IMAGE, items + [{'key': 'startup-script', 'value': script}]

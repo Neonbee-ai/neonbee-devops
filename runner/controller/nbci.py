@@ -46,6 +46,8 @@ HEARTBEAT_FILE = E('HEARTBEAT_FILE', '/var/lib/nbci/heartbeat')
 POLL_S, RECONCILE_S = int(E('POLL_S', '30')), int(E('RECONCILE_S', '300'))
 CAP_USD = float(E('NB_DAILY_CAP_USD', '2'))
 MAX_RUN_S = int(E('MAX_RUN_S', '5400'))
+# RUNNER_BOOT=image (prebuilt family) | startup (stock ubuntu + provision.sh as startup-script, no image)
+RUNNER_BOOT = E('RUNNER_BOOT', 'image')
 IMAGE_FAMILY, IMAGE_MAX_AGE_D = E('IMAGE_FAMILY', 'nb-ci-runner'), float(E('IMAGE_MAX_AGE_D', '7'))
 REPORT_HOUR = int(E('REPORT_HOUR_UTC', '3'))
 STEM = 'nbci'
@@ -155,6 +157,8 @@ def free_vcpu(gcp):
 
 
 def image_link(gcp):
+    if RUNNER_BOOT == 'startup':
+        return L.STOCK_IMAGE
     return gcp.compute('/global/images/family/' + IMAGE_FAMILY)['selfLink']
 
 
@@ -168,15 +172,17 @@ def create_vm(gh, gcp, c, failures, image):
              'automaticRestart': False, 'onHostMaintenance': 'TERMINATE'}
     if c['spot']:
         sched['provisioningModel'] = 'SPOT'
+    prov = open(os.path.join(HERE, '..', 'image', 'provision.sh')).read() if RUNNER_BOOT == 'startup' else ''
+    src, items = L.boot_plan(RUNNER_BOOT, image, prov, jit['encoded_jit_config'])
     for z in ZONES:
         body = {'name': name, 'machineType': 'zones/%s/machineTypes/%s' % (z, c['machine']),
                 'labels': {STEM: '1', 'nb-class': c['name']}, 'scheduling': sched,
                 'disks': [{'boot': True, 'autoDelete': True, 'initializeParams': {
-                    'sourceImage': image, 'diskSizeGb': str(c.get('disk_gb', 30)),
+                    'sourceImage': src, 'diskSizeGb': str(c.get('disk_gb', 30)),
                     'diskType': 'zones/%s/diskTypes/pd-balanced' % z, 'labels': {STEM: '1'}}}],
                 'networkInterfaces': [{'network': 'global/networks/default',
                                        'accessConfigs': [{'type': 'ONE_TO_ONE_NAT', 'name': 'External NAT'}]}],
-                'serviceAccounts': [], 'metadata': {'items': [{'key': 'jit', 'value': jit['encoded_jit_config']}]}}
+                'serviceAccounts': [], 'metadata': {'items': items}}
         try:
             gcp.wait_op(gcp.compute('/zones/%s/instances' % z, 'POST', body), z, 120)
             log('created', name, c['machine'], z, 'spot' if c['spot'] else 'standard'); return True
@@ -483,7 +489,7 @@ def tick(gh, gcp, st, mode='scale'):
     try: pq.drain()
     except Exception as e: log('pulse drain', e)
     # weekly image rebuild (background thread; the loop keeps serving)
-    if every(st, 'image_check', 3600, now):
+    if RUNNER_BOOT != 'startup' and every(st, 'image_check', 3600, now):
         try:
             age_d = (now - ts(gcp.compute('/global/images/family/' + IMAGE_FAMILY)['creationTimestamp'])) / 86400
         except Exception:
@@ -552,6 +558,8 @@ def main():
     try: st['_pulse_token'] = gcp.secret('nbci-pulse-token')
     except Exception: st['_pulse_token'] = ''
     if mode == 'build-image':
+        if RUNNER_BOOT == 'startup':
+            log('build-image refused: RUNNER_BOOT=startup (no custom images)'); return
         return build_image(gcp)
     if mode == 'set-hook':
         return set_hook(gh)

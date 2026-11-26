@@ -29,3 +29,5 @@ crash or GCP outage cannot touch them. The fallback Mini only gains/loses the au
 failing PRs are ejected, the rest carry on. Flaky infra (runner lost, preemption, network) is re-run once and never
 counted as a code failure. Pulse (`nb_pulse.py`): comment + `fixing` + one bug per task+check + failed test cases on
 failure; bug closed + `reverify` on the fix; queued and retried, never blocking CI; AutoQA hook = JSON spool files.
+Runner boot: `RUNNER_BOOT=image` (default, family nb-ci-runner) or `startup` (instance metadata `nbci-runner-boot=startup`):
+stock ubuntu-2404 runs `../image/provision.sh` as startup-script per job, no custom image, image build/check disabled.

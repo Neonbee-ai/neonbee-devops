@@ -486,5 +486,37 @@ class PulseOnFailure(unittest.TestCase):
         self.assertIn('FAIL src/a.spec.ts', ex)
 
 
+
+class RunnerBoot(unittest.TestCase):
+    PROV = open(os.path.join(ROOT, 'runner', 'image', 'provision.sh')).read()
+
+    def test_given_image_mode_then_the_family_image_and_only_the_jit_config_are_used(self):
+        src, items = L.boot_plan('image', 'fam-link', self.PROV, 'J')
+        self.assertEqual((src, items), ('fam-link', [{'key': 'jit', 'value': 'J'}]))
+
+    def test_given_startup_mode_then_stock_ubuntu_boots_with_provision_as_startup_script(self):
+        src, items = L.boot_plan('startup', 'fam-link', self.PROV, 'J')
+        self.assertEqual(src, 'projects/ubuntu-os-cloud/global/images/family/ubuntu-2404-lts-amd64')
+        md = {i['key']: i['value'] for i in items}
+        self.assertEqual(md['jit'], 'J')
+        self.assertIn('export NB_STARTUP=1', md['startup-script'])
+        self.assertIn('trap poweroff ERR', md['startup-script'])
+        self.assertTrue(md['startup-script'].rstrip().endswith('systemctl start --no-block nb-runner.service'))
+
+    def test_given_startup_mode_then_the_script_fits_gce_metadata_limits(self):
+        _, items = L.boot_plan('startup', 'f', self.PROV, 'J' * 4000)
+        self.assertLess(sum(len(i['value']) for i in items), 256 * 1024)
+
+    def test_given_startup_mode_then_provision_skips_image_only_steps(self):
+        self.assertIn('[ -n "${NB_STARTUP:-}" ] || sudo -u runner -H npm cache add', self.PROV)
+        self.assertIn('if [ -z "${NB_STARTUP:-}" ]; then', self.PROV)
+        self.assertNotIn('exit 0', self.PROV)   # an exit would skip the appended runner start
+
+    def test_given_startup_mode_then_the_controller_never_builds_an_image(self):
+        src = open(os.path.join(ROOT, 'runner', 'controller', 'nbci.py')).read()
+        self.assertIn("RUNNER_BOOT != 'startup' and every(st, 'image_check'", src)
+        self.assertIn("build-image refused: RUNNER_BOOT=startup", src)
+
+
 if __name__ == '__main__':
     unittest.main()

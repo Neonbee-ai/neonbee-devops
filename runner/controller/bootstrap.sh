@@ -58,6 +58,7 @@ DRY_RUN=$(attr nbci-dry-run || echo 1)
 TRAIN_REPOS=$(attr nbci-train-repos || true)
 PULSE_MCP_URL=$(attr nbci-pulse-url || true)
 NB_DAILY_CAP_USD=$(attr nbci-daily-cap || echo 2)
+RUNNER_BOOT=$(attr nbci-runner-boot || echo image)
 ENV
 cat > /etc/systemd/system/nbci.service <<'U'
 [Unit]
