@@ -29,10 +29,10 @@ class Classes(unittest.TestCase):
     def test_given_a_route_job_then_it_runs_on_the_controller_not_a_vm(self):
         self.assertEqual(L.class_for(['self-hosted', 'nb-ctl'], CLS)['host'], 'controller')
 
-    def test_given_size_labels_then_vms_are_sized_2_4_8(self):
+    def test_given_size_labels_then_vms_are_sized_2_8_8(self):
         self.assertEqual(L.class_for(['self-hosted', 'nb-auto', 'nb-size-l'], CLS)['vcpu'], 8)
         self.assertEqual(L.class_for(['self-hosted', 'nb-auto', 'nb-size-s'], CLS)['vcpu'], 2)
-        self.assertEqual(L.class_for(['self-hosted', 'nb-auto'], CLS)['vcpu'], 4)
+        self.assertEqual(L.class_for(['self-hosted', 'nb-auto'], CLS)['vcpu'], 8)
 
     def test_given_a_macos_job_then_no_class_serves_it(self):
         self.assertIsNone(L.class_for(['self-hosted', 'aqa-coord'], CLS))
@@ -69,10 +69,10 @@ class Minis(unittest.TestCase):
 class Cost(unittest.TestCase):
     def test_a_spot_gate_vm_costs_its_real_hourly_price(self):
         # 4 x 0.01309 + 16 x 0.001754 + IP 0.0025 + 40 GB x 0.10 / 730
-        self.assertAlmostEqual(L.hourly_usd(BY['gate'], PRICES), 0.0524 + 0.028064 + 0.0025 + 0.005479, places=4)
+        self.assertAlmostEqual(L.hourly_usd(BY['gate'], PRICES), 0.1132 + 0.03032 + 0.0025 + 0.005479, places=4)   # c2d-highcpu-8 spot, 40 GB pd-balanced
 
     def test_a_deploy_vm_is_dearer_than_spot(self):
-        self.assertGreater(L.hourly_usd(BY['deploy'], PRICES), L.hourly_usd(BY['gate'], PRICES))
+        self.assertGreater(L.hourly_usd(BY['deploy'], PRICES), L.hourly_usd(dict(BY['deploy'], spot=True), PRICES))
 
     def test_spend_levels(self):
         self.assertEqual([L.spend_state(x, 2) for x in (0.5, 1.0, 1.7, 2.0)], ['ok', 'warn50', 'warn80', 'capped'])
@@ -274,7 +274,7 @@ class Controller(unittest.TestCase):
     def test_every_vm_has_a_90_minute_delete_limit_and_no_service_account(self):
         self.assertIn("'instanceTerminationAction': 'DELETE', 'maxRunDuration': {'seconds': MAX_RUN_S}", self.src)
         self.assertIn("MAX_RUN_S = int(E('MAX_RUN_S', '5400'))", self.src)
-        self.assertIn("'serviceAccounts': []", self.src)
+        self.assertIn("'serviceAccounts': L.service_accounts(c, PROJECT)", self.src)
 
     def test_dry_run_is_the_default(self):
         self.assertIn("DRY = E('DRY_RUN', '1') == '1'", self.src)
@@ -674,6 +674,40 @@ class ImageProvision(unittest.TestCase):
     def test_given_an_image_build_then_only_the_newest_image_is_kept(self):
         with open(os.path.join(os.path.dirname(__file__), '..', 'runner', 'controller', 'nbci.py')) as f:
             self.assertIn('imgs[1:]', f.read())
+
+
+class Speed(unittest.TestCase):
+    def gate(self):
+        return L.class_for(['self-hosted', 'nb-auto'], CLS)
+
+    def test_given_the_gate_class_then_it_is_an_8_vcpu_spot_c2d_and_four_fit_in_32_vcpu(self):
+        g = self.gate()
+        self.assertEqual((g['machine'], g['vcpu'], g['spot']), ('c2d-highcpu-8', 8, True))
+        self.assertEqual(32 // g['vcpu'], 4)
+
+    def test_given_a_class_price_then_the_hourly_cost_uses_it(self):
+        g = self.gate(); prices = L.load(os.path.join(os.path.dirname(__file__), '..', 'ci', 'runner-labels.json'))['prices_usd']
+        self.assertAlmostEqual(L.hourly_usd(g, prices), 8 * 0.01415 + 16 * 0.001895 + prices['ip_spot'] + 40 * prices['pd_balanced_gb_month'] / 730, places=6)
+
+    def test_given_a_gate_vm_then_its_cache_token_is_read_only_and_a_deploy_vm_read_write(self):
+        self.assertTrue(L.service_accounts(self.gate(), 'p')[0]['email'].startswith('nbci-cache-ro@p.'))
+        self.assertIn('read_only', L.service_accounts(self.gate(), 'p')[0]['scopes'][0])
+        d = L.class_for(['self-hosted', 'nb-deploy'], CLS)
+        self.assertIn('read_write', L.service_accounts(d, 'p')[0]['scopes'][0])
+
+    def test_given_a_class_without_sa_then_no_service_account_is_attached(self):
+        self.assertEqual(L.service_accounts({'name': 'x'}, 'p'), [])
+
+    def test_given_the_job_vm_then_the_boot_disk_is_pd_balanced(self):
+        with open(os.path.join(os.path.dirname(__file__), '..', 'runner', 'controller', 'nbci.py')) as f:
+            self.assertIn("'diskType': 'zones/%s/diskTypes/pd-balanced' % z", f.read())
+
+    def test_given_the_image_then_node_is_in_the_tool_cache_and_the_cache_token_is_fetched_as_root(self):
+        with open(os.path.join(os.path.dirname(__file__), '..', 'runner', 'image', 'provision.sh')) as f:
+            b = f.read()
+        self.assertIn('/opt/hostedtoolcache/node/$NODEV/x64.complete', b)
+        self.assertIn('RUNNER_TOOLSDIRECTORY=/opt/hostedtoolcache', b)
+        self.assertIn('/run/nb-gcs-token', b)
 
 
 if __name__ == '__main__':

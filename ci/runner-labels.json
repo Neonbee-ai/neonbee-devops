@@ -36,12 +36,13 @@
         "X64",
         "nb-deploy"
       ],
-      "_doc": "build + rsync / S3 release: standard VM, a preemption can never leave a partial deploy"
+      "_doc": "build + rsync / S3 release: standard VM, a preemption can never leave a partial deploy",
+      "sa": "rw"
     },
     {
       "name": "gate",
-      "machine": "e2-standard-4",
-      "vcpu": 4,
+      "machine": "c2d-highcpu-8",
+      "vcpu": 8,
       "ram_gb": 16,
       "spot": true,
       "priority": 1,
@@ -51,7 +52,13 @@
         "Linux",
         "X64",
         "nb-auto"
-      ]
+      ],
+      "sa": "ro",
+      "price": {
+        "core": 0.01415,
+        "ram": 0.001895
+      },
+      "_doc": "fastest 8-vCPU Spot type the quota allows (us-central1 quotas 2026-11-27: C3 24, N2D 16, C2D 100): c2d-highcpu-8 so 32 vCPU = 4 concurrent jobs; change machine/vcpu/ram_gb/price here only. sa=ro: read-only npm-cache bucket token"
     },
     {
       "name": "large",

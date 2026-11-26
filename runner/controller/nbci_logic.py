@@ -38,6 +38,9 @@ def hourly_usd(c, prices):
     """Real per-hour price of one VM of class c (cores + RAM + external IPv4 + its disk)."""
     if c.get('host') == 'controller':
         return 0.0
+    if c.get('price'):
+        core_p, ram_p = c['price']['core'], c['price']['ram']
+        return c['vcpu'] * core_p + c['ram_gb'] * ram_p + prices['ip_spot' if c['spot'] else 'ip_std'] + c.get('disk_gb', 30) * prices['pd_balanced_gb_month'] / 730.0
     core, ram, ip = (('spot_core', 'spot_ram_gb', 'ip_spot') if c['spot'] else ('std_core', 'std_ram_gb', 'ip_std'))
     disk = c.get('disk_gb', 30) * prices['pd_balanced_gb_month'] / 730.0
     return c['vcpu'] * prices[core] + c['ram_gb'] * prices[ram] + prices[ip] + disk
@@ -326,3 +329,16 @@ def boot_plan(mode, family_link, provision_sh, jit):
     script = ('#!/bin/bash\nexport NB_STARTUP=1\ntrap poweroff ERR\n' + provision_sh +
               '\nsystemctl start --no-block nb-runner.service\n')
     return STOCK_IMAGE, items + [{'key': 'startup-script', 'value': script}]
+
+
+CACHE_SA = {'ro': 'https://www.googleapis.com/auth/devstorage.read_only',
+            'rw': 'https://www.googleapis.com/auth/devstorage.read_write'}
+
+
+def service_accounts(c, project):
+    """npm-cache bucket access for a job VM: class sa 'ro' (gate: PR code runs there, so it can never write the
+    cache) or 'rw' (deploy: runs only after the gate, on develop/main). No sa = no service account at all."""
+    k = c.get('sa')
+    if not k:
+        return []
+    return [{'email': 'nbci-cache-%s@%s.iam.gserviceaccount.com' % (k, project), 'scopes': [CACHE_SA[k]]}]

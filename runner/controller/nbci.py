@@ -183,7 +183,7 @@ def create_vm(gh, gcp, c, failures, image):
                     'diskType': 'zones/%s/diskTypes/pd-balanced' % z, 'labels': {STEM: '1'}}}],
                 'networkInterfaces': [{'network': 'global/networks/default',
                                        'accessConfigs': [{'type': 'ONE_TO_ONE_NAT', 'name': 'External NAT'}]}],
-                'serviceAccounts': [], 'metadata': {'items': items}}
+                'serviceAccounts': L.service_accounts(c, PROJECT), 'metadata': {'items': items}}
         try:
             gcp.wait_op(gcp.compute('/zones/%s/instances' % z, 'POST', body), z, 120)
             log('created', name, c['machine'], z, 'spot' if c['spot'] else 'standard'); return True
