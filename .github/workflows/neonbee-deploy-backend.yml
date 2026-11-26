@@ -172,6 +172,8 @@ on:
       BILLING_SELLER_TAX_ID: { required: false }
       MARKETING_INTERNAL_KEY:       { required: false }
       ANTHROPIC_API_KEY_DEV:        { required: false }  # Dev/Staging use a separate key so test spend is apart from prod
+      AWS_ACCESS_KEY_ID_DEV:        { required: false }  # Dev/Staging-only SES sender key (falls back to AWS_ACCESS_KEY_ID)
+      AWS_SECRET_ACCESS_KEY_DEV:    { required: false }
       MARKETING_TRACKING_SECRET:    { required: false }
       FLOW_INTERNAL_KEY:           { required: false }
       EMAIL_INTERNAL_KEY:           { required: false }
@@ -1342,8 +1344,8 @@ jobs:
             [ -n "${{ secrets.CHANNEL_DELEGATION_SECRET }}" ] && echo "CHANNEL_DELEGATION_SECRET=${{ secrets.CHANNEL_DELEGATION_SECRET }}" >> .env.ci
             [ -n "${{ secrets.COMPENSATION_ENCRYPTION_KEY }}" ] && echo "COMPENSATION_ENCRYPTION_KEY=${{ secrets.COMPENSATION_ENCRYPTION_KEY }}" >> .env.ci
             [ -n "${{ secrets.VENDOR_BANK_ENC_KEY }}" ] && echo "VENDOR_BANK_ENC_KEY=${{ secrets.VENDOR_BANK_ENC_KEY }}" >> .env.ci
-            [ -n "${{ secrets.AWS_ACCESS_KEY_ID }}" ]          && echo "AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}"                     >> .env.ci
-            [ -n "${{ secrets.AWS_SECRET_ACCESS_KEY }}" ]      && echo "AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}"             >> .env.ci
+            [ -n "${{ secrets.AWS_ACCESS_KEY_ID_DEV || secrets.AWS_ACCESS_KEY_ID }}" ]          && echo "AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID_DEV || secrets.AWS_ACCESS_KEY_ID }}"                     >> .env.ci
+            [ -n "${{ secrets.AWS_SECRET_ACCESS_KEY_DEV || secrets.AWS_SECRET_ACCESS_KEY }}" ]      && echo "AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY_DEV || secrets.AWS_SECRET_ACCESS_KEY }}"             >> .env.ci
             [ -n "${{ secrets.AWS_REGION }}" ]                 && echo "AWS_REGION=${{ secrets.AWS_REGION }}"                                   >> .env.ci
             [ -n "${{ secrets.INBOX_EMAIL_S3_BUCKET }}" ]      && echo "INBOX_EMAIL_S3_BUCKET=${{ secrets.INBOX_EMAIL_S3_BUCKET }}"             >> .env.ci
             [ -n "${{ secrets.PLATFORM_OPS_INTERNAL_KEY }}" ] && echo "PLATFORM_OPS_INTERNAL_KEY=${{ secrets.PLATFORM_OPS_INTERNAL_KEY }}" >> .env.ci
@@ -1581,8 +1583,8 @@ jobs:
             [ -n "${{ secrets.CHANNEL_DELEGATION_SECRET }}" ] && echo "CHANNEL_DELEGATION_SECRET=${{ secrets.CHANNEL_DELEGATION_SECRET }}" >> .env.ci
             [ -n "${{ secrets.COMPENSATION_ENCRYPTION_KEY }}" ] && echo "COMPENSATION_ENCRYPTION_KEY=${{ secrets.COMPENSATION_ENCRYPTION_KEY }}" >> .env.ci
             [ -n "${{ secrets.VENDOR_BANK_ENC_KEY }}" ] && echo "VENDOR_BANK_ENC_KEY=${{ secrets.VENDOR_BANK_ENC_KEY }}" >> .env.ci
-            [ -n "${{ secrets.AWS_ACCESS_KEY_ID }}" ]          && echo "AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}"                     >> .env.ci
-            [ -n "${{ secrets.AWS_SECRET_ACCESS_KEY }}" ]      && echo "AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}"             >> .env.ci
+            [ -n "${{ secrets.AWS_ACCESS_KEY_ID_DEV || secrets.AWS_ACCESS_KEY_ID }}" ]          && echo "AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID_DEV || secrets.AWS_ACCESS_KEY_ID }}"                     >> .env.ci
+            [ -n "${{ secrets.AWS_SECRET_ACCESS_KEY_DEV || secrets.AWS_SECRET_ACCESS_KEY }}" ]      && echo "AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY_DEV || secrets.AWS_SECRET_ACCESS_KEY }}"             >> .env.ci
             [ -n "${{ secrets.AWS_REGION }}" ]                 && echo "AWS_REGION=${{ secrets.AWS_REGION }}"                                   >> .env.ci
             [ -n "${{ secrets.INBOX_EMAIL_S3_BUCKET }}" ]      && echo "INBOX_EMAIL_S3_BUCKET=${{ secrets.INBOX_EMAIL_S3_BUCKET }}"             >> .env.ci
             [ -n "${{ secrets.PLATFORM_OPS_INTERNAL_KEY }}" ] && echo "PLATFORM_OPS_INTERNAL_KEY=${{ secrets.PLATFORM_OPS_INTERNAL_KEY }}" >> .env.ci
