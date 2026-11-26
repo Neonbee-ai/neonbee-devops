@@ -12,6 +12,8 @@ set -euo pipefail
 P=${GCP_PROJECT:-gen-lang-client-0521938031}; Z=${ZONE:-us-central1-a}
 G=${GCLOUD:-/opt/homebrew/share/google-cloud-sdk/bin/gcloud}
 SA=nbci-controller@$P.iam.gserviceaccount.com
+# nbci-ref: branch the controller checks out. feat/ci-autoscaler until the code is on main, then main.
+REF=${NBCI_REF:-feat/ci-autoscaler}
 MODE=${1:-plan}
 run() { echo "+ $*"; [ "$MODE" = apply ] && "$@" || true; }
 PERMS=compute.instances.create,compute.instances.delete,compute.instances.get,compute.instances.list,compute.instances.setMetadata,compute.instances.setLabels,compute.instances.setScheduling,compute.disks.create,compute.disks.delete,compute.disks.get,compute.disks.list,compute.disks.use,compute.disks.useReadOnly,compute.disks.setLabels,compute.images.create,compute.images.delete,compute.images.get,compute.images.list,compute.images.getFromFamily,compute.images.useReadOnly,compute.images.setLabels,compute.subnetworks.use,compute.subnetworks.useExternalIp,compute.networks.use,compute.zoneOperations.get,compute.globalOperations.get,compute.regions.get,compute.projects.get,compute.machineTypes.get
@@ -36,5 +38,5 @@ done
   run "$G" compute instances create nbci-controller --project "$P" --zone "$Z" --machine-type e2-micro \
     --image-family ubuntu-2404-lts-amd64 --image-project ubuntu-os-cloud --boot-disk-size 30GB --boot-disk-type pd-standard \
     --service-account "$SA" --scopes cloud-platform --tags nbci-controller --labels nb-role=controller \
-    --metadata-from-file startup-script="$(dirname "$0")/bootstrap.sh" --metadata nbci-ref=main
+    --metadata-from-file startup-script="$(dirname "$0")/bootstrap.sh" --metadata nbci-ref="$REF",nbci-dry-run=1
 echo "Then add secret values: gcloud secrets versions add <name> --data-file=- (App key PEM, webhook secret, Teams URL, Pulse token)."

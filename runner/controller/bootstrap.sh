@@ -9,6 +9,7 @@ attr() { md "instance/attributes/$1"; }
 P=$(md project/project-id); REF=$(attr nbci-ref || echo main)
 APP=$(attr nbci-app-id || true); INST=$(attr nbci-installation-id || true)
 export DEBIAN_FRONTEND=noninteractive
+[ "$0" = /opt/nbci-bootstrap.sh ] || { md instance/attributes/startup-script > /opt/nbci-bootstrap.sh && chmod 700 /opt/nbci-bootstrap.sh; } || true
 
 if [ ! -f /var/lib/nbci/.base ]; then
   fallocate -l 1G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile && echo '/swapfile none swap sw 0 0' >> /etc/fstab
@@ -34,14 +35,20 @@ gh_token() {
   curl -sf -X POST -H "Authorization: Bearer $h.$b.$s" -H 'Accept: application/vnd.github+json' \
     "https://api.github.com/app/installations/$INST/access_tokens" | jq -r .token
 }
-TOKEN=$(gh_token) || TOKEN=
+TOKEN=; [ -n "$APP" ] && [ -n "$INST" ] && { TOKEN=$(gh_token) || TOKEN=; }; [ "$TOKEN" = null ] && TOKEN=
 SRC=/opt/nbci/src
 if [ -n "$TOKEN" ]; then
   if [ -d $SRC/.git ]; then git -C $SRC fetch -q "https://x-access-token:$TOKEN@github.com/Neonbee-ai/neonbee-devops.git" "$REF" && git -C $SRC checkout -q -f FETCH_HEAD
   else mkdir -p /opt/nbci && git clone -q --depth 50 -b "$REF" "https://x-access-token:$TOKEN@github.com/Neonbee-ai/neonbee-devops.git" $SRC; fi
   git -C $SRC remote set-url origin https://github.com/Neonbee-ai/neonbee-devops.git
 fi
-[ -f $SRC/runner/controller/nbci.py ] || { echo "nbci source missing (App not configured?)"; exit 1; }
+if [ ! -f $SRC/runner/controller/nbci.py ]; then
+  # No App key / ids yet (or GitHub down): nothing to run. Retry every 15 min from cron, exit 0 so
+  # there is no crash loop and no spend; the first good run replaces this cron with the daily one.
+  echo "nbci source missing (GitHub App key/ids not configured?); retrying every 15 min"
+  echo '*/15 * * * * root flock -n /run/nbci-boot.lock /opt/nbci-bootstrap.sh >>/var/log/nbci-update.log 2>&1' > /etc/cron.d/nbci
+  exit 0
+fi
 
 cat > /etc/nbci.env <<ENV
 GCP_PROJECT=$P
