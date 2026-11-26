@@ -648,7 +648,10 @@ def tick(gh, gcp, st, mode='scale'):
             with LOCK: EVENTS['done_runners'].discard(v['name'])
             if why == 'job completed': day['jobs'] += 1
             continue
-        if v.get('jit') and r and gce_ok and mode == 'scale':     # runner registered: the one-time JIT config leaves metadata
+        # JIT config leaves metadata only once the runner is ONLINE: a JIT runner is listed (offline) the moment its
+        # config is generated, and a startup-mode VM reads the config ~10 min later, after provisioning. Scrubbing on
+        # "listed" powered every startup-mode VM off before it could register (2026-11-27).
+        if v.get('jit') and r and (r.get('status') == 'online' or r.get('busy')) and gce_ok and mode == 'scale':
             try: scrub_jit(gcp, v); log('jit scrubbed', v['name'])
             except Exception as e: log('jit scrub', v['name'], str(e)[:120])
         live.append(v)

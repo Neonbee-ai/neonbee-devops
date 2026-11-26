@@ -348,3 +348,9 @@ class AqaBackfill(unittest.TestCase):
         old = nbci.AQA_BACKFILL; nbci.AQA_BACKFILL = '/nonexistent/x.json'
         try: self.assertEqual(nbci.take_backfill(NOW), [])
         finally: nbci.AQA_BACKFILL = old
+
+
+class JitScrub(unittest.TestCase):
+    def test_given_a_listed_but_offline_runner_then_the_jit_config_stays_in_metadata(self):
+        src = read('runner', 'controller', 'nbci.py')
+        self.assertIn("if v.get('jit') and r and (r.get('status') == 'online' or r.get('busy'))", src)
