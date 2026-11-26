@@ -47,6 +47,12 @@ class NginxSitesTest(unittest.TestCase):
                           FILES["00-nb-http.conf"])
         self.assertEqual(len(re.findall(r"^    location /\w+/ \{", api, re.M)), len(gen_sites.GATEWAY))
 
+    def test_given_maintenance_backend_when_generated_then_api_gateway_routes_maintenance_to_8058(self):
+        api = FILES["api.neonbee.app.conf"]
+        self.assertIn("location /maintenance/ {", api)
+        self.assertIn("proxy_pass http://nb_maintenance_prod;", api)
+        self.assertIn("upstream nb_maintenance_prod { server 127.0.0.1:8058;", FILES["00-nb-http.conf"])
+
     def test_given_mobility_not_in_catalog_when_generated_then_no_mobility_route(self):
         self.assertNotIn("/mobility/", FILES["api.neonbee.app.conf"])
 
