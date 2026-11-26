@@ -87,7 +87,9 @@ U
 IP=$(md instance/network-interfaces/0/access-configs/0/external-ip)
 cat > /etc/caddy/Caddyfile <<C
 ${IP//./-}.sslip.io {
-  handle /gh { reverse_proxy 127.0.0.1:8787 }
+  handle /gh {
+    reverse_proxy 127.0.0.1:8787
+  }
   respond 404
 }
 C
@@ -97,7 +99,8 @@ cat > /etc/cron.d/nbci <<'CRON'
 CRON
 systemctl daemon-reload
 systemctl enable --now caddy nbci
-systemctl reload caddy || true
+caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null 2>&1 &&
+  { systemctl reload caddy || systemctl restart caddy; } || echo 'nbci: Caddyfile invalid - webhook down, polling only'
 systemctl restart nbci
 
 # 2 controller-local runners for nb-ctl jobs (auto repos only; legacy nb-route runners are never shared) (route/notify: seconds of curl/jq). User ghr cannot
