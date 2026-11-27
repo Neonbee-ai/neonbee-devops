@@ -118,6 +118,7 @@ def on_event(kind, ev):
     with LOCK:
         EVENTS['last_event'] = time.time()
         repo = (ev.get('repository') or {}).get('name', '')
+        if repo: EVENTS.setdefault('recent', {})[repo] = time.time()     # a re-run never moves pushed_at: the poll must still see it
         if kind == 'workflow_job':
             j = ev['workflow_job']
             if ev['action'] in ('queued', 'waiting'):
@@ -157,11 +158,14 @@ def on_event(kind, ev):
 
 
 # ── GitHub / GCE state ──────────────────────────────────────────────────────────────────────────────
-def queued_jobs(gh):
-    """Slow-poll truth for the job table (webhooks can be missed). Repos pushed in the last 2 h only."""
+def queued_jobs(gh, recent=None):
+    """Slow-poll truth for the job table (webhooks can be missed). Repos pushed in the last 2 h, plus repos with a
+    webhook event in the last 2 h (recent: {repo: unix time}): a re-run or workflow_dispatch never moves pushed_at,
+    and the poll used to drop such a queued job from the table (2026-11-27: help-fe build-deploy re-run waited, jobs=0)."""
     out, since = {}, time.time() - 2 * 3600
+    hot = {n for n, t in (recent or {}).items() if t >= since}
     for r in gh('orgs/%s/repos?sort=pushed&direction=desc&per_page=100' % ORG, cache=True):
-        if r['archived'] or not r['pushed_at'] or ts(r['pushed_at']) < since:
+        if r['archived'] or ((not r['pushed_at'] or ts(r['pushed_at']) < since) and r['name'] not in hot):
             continue
         runs = gh('repos/%s/actions/runs?status=queued&per_page=30' % r['full_name'], cache=True)['workflow_runs'] + \
             gh('repos/%s/actions/runs?status=in_progress&per_page=30' % r['full_name'], cache=True)['workflow_runs']
@@ -820,9 +824,12 @@ def tick(gh, gcp, st, mode='scale'):
     webhook_live = now - EVENTS['last_event'] < 900 and not EVENTS.get('need_full_poll', True)
     if every(st, 'reconcile', RECONCILE_S if webhook_live else 60, now) or mode != 'scale' or EVENTS.get('need_full_poll', True):
         EVENTS['need_full_poll'] = False   # first pass after a start: poll every queued job (webhook events sent while down are lost)
-        polled = queued_jobs(gh)
+        with LOCK: recent = dict(EVENTS.get('recent', {}))
+        polled = queued_jobs(gh, recent)
         with LOCK:
-            EVENTS['jobs'] = polled
+            fresh = {k: j for k, j in EVENTS['jobs'].items() if now - j['created'] < 120}   # listing lag: a just-queued webhook job survives
+            EVENTS['jobs'] = dict(fresh, **polled)
+            EVENTS['recent'] = {n: t for n, t in EVENTS.get('recent', {}).items() if now - t < 7200}
     with LOCK:
         jobs = list(EVENTS['jobs'].values()); done = set(EVENTS['done_runners'])
         waits, EVENTS['waits'] = EVENTS['waits'], []

@@ -535,3 +535,28 @@ class AqaIdempotentCreate(unittest.TestCase):
 
     def test_given_a_409_text_then_it_classifies_as_exists_not_api(self):
         self.assertEqual(L.classify_gce_error('POST x -> 409 {"reason": "alreadyExists"}'), 'exists')
+
+
+class PollSeesReruns(unittest.TestCase):
+    """Pulse 652ffcd8: a re-run on a repo not pushed for 2 h was dropped from the job table by the slow poll."""
+
+    def _gh(self, pushed):
+        iso = lambda t: time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(t))  # noqa: E731
+
+        def gh(path, method='GET', body=None, cache=False):
+            if path.startswith('orgs/'):
+                return [{'name': 'so360-help-fe', 'full_name': 'Neonbee-ai/so360-help-fe', 'archived': False, 'pushed_at': iso(pushed)}]
+            if 'status=queued' in path: return {'workflow_runs': [{'id': 7}]}
+            if 'status=in_progress' in path: return {'workflow_runs': []}
+            if '/jobs?' in path:
+                return {'jobs': [{'id': 1, 'status': 'queued', 'labels': ['self-hosted', 'nb-deploy'], 'name': 'build-deploy',
+                                  'created_at': iso(time.time() - 30)}]}
+            raise RuntimeError(path)
+        return gh
+
+    def test_given_a_rerun_on_a_repo_pushed_long_ago_with_a_recent_webhook_then_the_poll_keeps_its_job(self):
+        out = nbci.queued_jobs(self._gh(time.time() - 3 * 86400), {'so360-help-fe': time.time() - 60})
+        self.assertEqual(list(out), [1])
+
+    def test_given_no_recent_event_and_no_recent_push_then_the_repo_is_skipped(self):
+        self.assertEqual(nbci.queued_jobs(self._gh(time.time() - 3 * 86400), {}), {})
