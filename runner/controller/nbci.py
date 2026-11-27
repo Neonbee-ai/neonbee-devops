@@ -11,7 +11,7 @@ shutdown only STOPS a VM and its disk keeps billing). Orphan nb-ci disks are swe
 route/notify jobs (nb-route) run on 2 runners on this VM itself: no VM boot for 10-second jobs.
 
 Budget: one 32-vCPU quota for CI + AutoQA, priority deploy > gate > AutoQA (AutoQA's allowance is
-published as org variable NB_AUTOQA_VCPU_ALLOWANCE). Daily spend cap (NB_DAILY_CAP_USD, default 2)
+published as org variable NB_AUTOQA_VCPU_ALLOWANCE). Daily spend cap (NB_DAILY_CAP_USD, default 4)
 computed from real prices; Teams at 50/80/100 %; at 100 % only deploy VMs start.
 No fallback runner: while GCP cannot start VMs (billing, quota, API, stock-out in 2+ zones) jobs wait and
 Pulse is alerted; no Mac Mini ever gets CI labels. Off switch: org variable NB_CI_MODE=legacy -> no VMs,
@@ -45,7 +45,7 @@ CFG = os.path.join(HERE, '..', '..', 'ci')
 STATE_FILE = E('STATE_FILE', '/var/lib/nbci/state.json')
 HEARTBEAT_FILE = E('HEARTBEAT_FILE', '/var/lib/nbci/heartbeat')
 POLL_S, RECONCILE_S = int(E('POLL_S', '30')), int(E('RECONCILE_S', '300'))
-CAP_USD = float(E('NB_DAILY_CAP_USD', '2'))
+CAP_USD = float(E('NB_DAILY_CAP_USD', '4'))
 MAX_RUN_S = int(E('MAX_RUN_S', '5400'))
 # packed VMs (class "slots" > 1): reused while jobs flow, deleted after IDLE_S without a busy slot; hard lifetime
 # MAX_VM_S (GCE maxRunDuration = MAX_VM_S + 15 min as the backstop); no slot takes a new job after

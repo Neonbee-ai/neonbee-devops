@@ -70,7 +70,7 @@ PULSE_MCP_URL=$(attr nbci-pulse-url || echo https://pulse.moonhive.in/mcp)
 NBCI_ALERT_TASK=$(attr nbci-alert-task || echo 71b8be5b)
 NBCI_HOST=$(attr nbci-host || echo nbci.moonhive.in)
 NB_DAILY_VM_MIN=$(attr nbci-daily-vm-min || echo 3000)
-NB_DAILY_CAP_USD=$(attr nbci-daily-cap || echo 2)
+NB_DAILY_CAP_USD=$(attr nbci-daily-cap || echo 4)
 RUNNER_BOOT=$(attr nbci-runner-boot || echo image)
 HANDS_OFF_LEGACY=$(attr nbci-hands-off-legacy || echo 1)
 ENV
