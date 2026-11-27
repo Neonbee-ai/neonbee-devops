@@ -4,7 +4,9 @@
 # token and keeps taking jobs while the queue is non-empty; the controller deletes it after 3 min idle.
 # Co-tenancy: each slot is its own user nbs<i> (own HOME, npm cache, work dir _work under /opt/slots/<i>,
 # private /tmp), has no sudo and cannot reach the metadata server; its processes are killed and its work
-# dir, temp files and HOME (npm content cache and Playwright browsers kept) are wiped after every job.
+# dir, temp files and HOME (npm cache included: every job starts with an empty one) are wiped after every job, and
+# its crontab, at jobs, user systemd instance and lingering are removed. Playwright browsers are shared from the
+# root-owned read-only /opt/ms-playwright (PLAYWRIGHT_BROWSERS_PATH), so no job can poison the next one's cache.
 N=${NB_SLOTS:-1}
 # a slot user sees only its own processes (no neighbour's argv/environ in /proc)
 mount -o remount,hidepid=invisible /proc 2>/dev/null || mount -o remount,hidepid=2 /proc || echo 'nb-ci: no hidepid'
@@ -23,6 +25,20 @@ if ! id "$U" >/dev/null 2>&1; then
 fi
 iptables -C OUTPUT -m owner --uid-owner "$U" -d 169.254.169.254 -j REJECT 2>/dev/null ||
   iptables -A OUTPUT -m owner --uid-owner "$U" -d 169.254.169.254 -j REJECT
+# nb-reap-begin
+nb_reap_user() {
+  local u=$1 uid
+  uid=$(id -u "$u" 2>/dev/null) || return 0
+  crontab -r -u "$u" 2>/dev/null
+  if command -v atq >/dev/null 2>&1; then
+    atq 2>/dev/null | awk -v u="$u" '$NF==u{print $1}' | while read -r j; do atrm "$j" 2>/dev/null; done
+  fi
+  loginctl disable-linger "$u" 2>/dev/null
+  systemctl stop "user@$uid.service" 2>/dev/null
+  pkill -9 -u "$u" 2>/dev/null
+  return 0
+}
+# nb-reap-end
 last=
 while :; do
   J=$(md "attributes/jit-$i") || J=
@@ -32,10 +48,12 @@ while :; do
   # cache bucket token (only VMs with a service account); refreshed per job, a reused VM outlives one token
   T=$(md service-accounts/default/token | jq -r .access_token 2>/dev/null) && [ -n "$T" ] && [ "$T" != null ] &&
     { umask 022; printf %s "$T" > /run/nb-gcs-token; }
-  # Playwright installs in the background after boot: give this slot the browsers once they exist (kept across jobs)
-  if [ -f /opt/nb-ready.playwright ] && [ ! -d "/home/$U/.cache/ms-playwright" ] && [ -d /home/runner/.cache/ms-playwright ]; then
-    mkdir -p "/home/$U/.cache" && cp -a /home/runner/.cache/ms-playwright "/home/$U/.cache/" && chown -R "$U:" "/home/$U/.cache"
+  # Playwright installs in the background after boot: publish the browsers once, root-owned and read-only, shared by all slots
+  if [ -f /opt/nb-ready.playwright ] && [ ! -d /opt/ms-playwright ] && [ -d /home/runner/.cache/ms-playwright ]; then
+    cp -a /home/runner/.cache/ms-playwright /opt/ms-playwright.tmp && chown -R root:root /opt/ms-playwright.tmp &&
+      chmod -R go-w /opt/ms-playwright.tmp && mv /opt/ms-playwright.tmp /opt/ms-playwright
   fi
+  PW=; [ -d /opt/ms-playwright ] && PW=/opt/ms-playwright
   mkdir -p "$D" && rsync -a --delete /opt/runner/ "$D/" && chown -R "$U:" "$D"
   echo "== slot $i job start $(date -u +%FT%TZ)" >> "/var/log/nb-slot-$i.log"
   # npm "global" config/prefix per slot: the shared Node in /opt/hostedtoolcache belongs to `runner`, so
@@ -44,14 +62,12 @@ while :; do
   # runuser, not sudo: sudo logs the whole command line (the JIT config) to the journal.
   H=/home/$U
   runuser -u "$U" -- env HOME="$H" USER="$U" LOGNAME="$U" NPM_CONFIG_GLOBALCONFIG="$H/.npmrc-global" \
-    NPM_CONFIG_PREFIX="$H/.npm-global" PATH="$H/.npm-global/bin:$PATH" \
+    NPM_CONFIG_PREFIX="$H/.npm-global" ${PW:+PLAYWRIGHT_BROWSERS_PATH="$PW"} PATH="$H/.npm-global/bin:$PATH" \
     ACTIONS_RUNNER_HOOK_JOB_STARTED=/opt/nb-disk-guard.sh "$D/run.sh" --jitconfig "$J" >> "/var/log/nb-slot-$i.log" 2>&1
-  pkill -9 -u "$U" 2>/dev/null; sleep 1
+  nb_reap_user "$U"; sleep 1
   rm -rf "$D/_work"
   find /tmp /var/tmp /dev/shm -xdev -mindepth 1 -user "$U" -delete 2>/dev/null
-  find "/home/$U" -mindepth 1 -maxdepth 1 ! -name .npm ! -name .cache -exec rm -rf {} + 2>/dev/null
-  find "/home/$U/.npm" -mindepth 1 -maxdepth 1 ! -name _cacache -exec rm -rf {} + 2>/dev/null
-  find "/home/$U/.cache" -mindepth 1 -maxdepth 1 ! -name ms-playwright -exec rm -rf {} + 2>/dev/null
+  find "/home/$U" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null
   cp -a /etc/skel/. "/home/$U/" && chown -R "$U:" "/home/$U"
 done
 SLOT

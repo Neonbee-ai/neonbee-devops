@@ -958,3 +958,41 @@ class AqaLifetime(unittest.TestCase):
     def test_given_a_ci_vm_past_job_lifetime_when_judged_then_lifetime_reaps_it(self):
         vm = {'name': 'nbci-x', 'status': 'RUNNING', 'created': NOW - 2700, 'cls': 'gate'}
         self.assertIn(L.LIFETIME, L.vm_verdict(vm, {'busy': True}, False, NOW, max_s=1800))
+
+
+class SlotReap(unittest.TestCase):
+    def _run(self, with_at):
+        import subprocess, tempfile, stat
+        src = open(os.path.join(ROOT, 'runner', 'image', 'slots.sh')).read()
+        fn = src.split('# nb-reap-begin\n')[1].split('# nb-reap-end')[0]
+        with tempfile.TemporaryDirectory() as d:
+            log = os.path.join(d, 'calls.log')
+            tools = ['id', 'crontab', 'loginctl', 'systemctl', 'pkill', 'atrm'] + (['atq'] if with_at else [])
+            for t in tools:
+                body = '#!/bin/bash\n'
+                if t == 'id': body += 'echo 1234\n'
+                elif t == 'atq': body += 'printf "7\\tdate a nbs1\\n8\\tdate a other\\n9\\tdate a nbs1\\n"\n'
+                else: body += 'echo "%s $*" >> %s\n' % (t, log)
+                path = os.path.join(d, t); open(path, 'w').write(body); os.chmod(path, 0o755)
+            r = subprocess.run(['bash', '-c', fn + '\nnb_reap_user nbs1'], env={'PATH': d + ':/usr/bin:/bin'}, capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            return open(log).read().splitlines() if os.path.exists(log) else []
+
+    def test_given_a_finished_job_when_the_slot_user_is_reaped_then_every_persistence_route_is_cut(self):
+        calls = self._run(True)
+        for want in ['crontab -r -u nbs1', 'atrm 7', 'atrm 9', 'loginctl disable-linger nbs1',
+                     'systemctl stop user@1234.service', 'pkill -9 -u nbs1']:
+            self.assertIn(want, calls)
+        self.assertNotIn('atrm 8', calls)
+
+    def test_given_no_at_installed_when_reaped_then_the_rest_still_runs(self):
+        calls = self._run(False)
+        self.assertIn('pkill -9 -u nbs1', calls)
+        self.assertFalse([c for c in calls if c.startswith('atrm')])
+
+    def test_given_the_slot_script_then_home_is_wiped_whole_and_browsers_are_shared_read_only(self):
+        src = open(os.path.join(ROOT, 'runner', 'image', 'slots.sh')).read()
+        self.assertIn('PLAYWRIGHT_BROWSERS_PATH="$PW"', src)
+        self.assertIn('chmod -R go-w /opt/ms-playwright.tmp', src)
+        self.assertNotIn('! -name _cacache', src)
+        self.assertNotIn('! -name ms-playwright', src)

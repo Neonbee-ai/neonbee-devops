@@ -343,7 +343,8 @@ class BootScript(unittest.TestCase):
         self.assertIn('U=nbs$i; D=/opt/slots/$i', s)
         self.assertIn('--uid-owner "$U" -d 169.254.169.254 -j REJECT', s)
         self.assertIn('PrivateTmp=yes', s)
-        self.assertIn('pkill -9 -u "$U"', s)
+        self.assertIn('nb_reap_user "$U"', s)
+        self.assertIn('pkill -9 -u "$u"', s)
         self.assertIn('rm -rf "$D/_work"', s)
         self.assertNotIn('sudoers', s)
         self.assertNotRegex(s, r'(?i)(token|secret|password)=')
@@ -354,8 +355,8 @@ class BootScript(unittest.TestCase):
         self.assertIn('NPM_CONFIG_GLOBALCONFIG="$H/.npmrc-global"', s)
         self.assertIn('NPM_CONFIG_PREFIX="$H/.npm-global"', s)
         self.assertIn('PATH="$H/.npm-global/bin:$PATH"', s)
-        # wiped after each job: the HOME sweep keeps only .npm and .cache
-        self.assertIn("! -name .npm ! -name .cache -exec rm -rf {} +", s)
+        # wiped after each job: the whole HOME, npm cache included
+        self.assertIn('find "/home/$U" -mindepth 1 -maxdepth 1 -exec rm -rf {} +', s)
 
     def test_given_a_slot_starts_a_job_then_the_jit_config_is_not_logged_or_visible_to_neighbours(self):
         s = self.SLOTS
