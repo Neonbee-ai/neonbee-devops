@@ -120,13 +120,24 @@ Merges are `gh pr merge --merge --match-head-commit` as the nb-ci App (never --a
 
 * Resilience: `Restart=always` (nbci, nbci-guard), watchdog cron (heartbeat), full queued-job poll on every start,
   state on disk, failed webhook deliveries redelivered at start and every 30 min.
-* Packing (Pulse 652ffcd8): classes with `slots` > 1 (today `legacy`: 4 slots on e2-standard-4 Spot) boot stock ubuntu +
+* Right-sizing (Pulse 652ffcd8, 2026-11-27): a class with a `small` block also has a small variant `<class>-s` (same
+  labels, Spot policy, priority; never picked by `class_for`). Per pass, unmet jobs n = queued - free slots (big + small
+  VMs of the class): full big VMs for each complete big load, the remainder r on small VMs while r <= `small.max_jobs`
+  and live + new small VMs <= `small.max_vms`; otherwise one more big VM. Today: `legacy` 8 slots e2-standard-8 Spot
+  ($0.177/h) / `legacy-s` 2 slots e2-standard-2 Spot ($0.048/h), max_jobs 4, max_vms 2; `legacy-prod` and `deploy` 4 slots
+  e2-standard-8 standard ($0.280/h) / `-s` 2 slots e2-standard-4 standard ($0.143/h), max_jobs 2, max_vms 2. Every small
+  slot keeps the big VM's vCPU + RAM per slot (legacy 1 + 4 GB, deploy 2 + 8 GB). Small VMs at their caps hold 6 IPs + the
+  controller's = 7 of 8. Tune only in `ci/runner-labels.json`; tests: `tests/test_nbci_packing.py` class `Sizing`.
+  Check: `journalctl -u nbci | grep 'created nbci-.*-s-'` shows the machine type each VM got.
+* Packing (Pulse 652ffcd8): classes with `slots` > 1 (`legacy` 8, `legacy-prod` / `deploy` 4, small variants 2) boot stock ubuntu +
   `runner/image/provision.sh` + `runner/image/slots.sh` (no custom image). Each slot = user `nbs<i>`, own HOME / work dir /
   private /tmp, no sudo, no metadata access; the controller refills a slot after every job with a fresh one-job JIT
   config (metadata `jit-<i>`, runner name `slot-<i>`). The VM is reused while jobs flow, deleted after `IDLE_S` (180 s)
   with no busy slot, hard lifetime `MAX_VM_S` (4 h; no new job after 4 h - `JOB_MAX_S`). Scale-up = live quota
   (CPUS_ALL_REGIONS, CPUS, IN_USE_ADDRESSES, INSTANCES, SSD_TOTAL_GB) minus `quota.reserve_aqa` (1 VM: 4 vCPU + 1 IP) less
-  what live aqa-* VMs hold. Deploy lanes (`legacy-prod`) stay one job per fresh standard VM.
+  what live aqa-* VMs hold. Deploy lanes (`legacy-prod`, `deploy`) are packed standard (non-Spot) VMs that only carry
+  deploy-lane labels. A deleted VM stays listed (STOPPING) ~1 min and the delete re-fires each pass; its `vm` metric
+  record is written once (`vm_emitted`).
   Deploy / roll back the controller code: `runner/controller/nbci-set-ref.sh <sha|main>` (see its header).
 * Sweeper (every 2 min): nbci-* / aqa-* VMs no pool logic owns (never `nbci-controller` or MIG members): stopped, or a
   registered runner none busy past boot grace + idle window; unattached nbci-labelled or nbci-*/aqa-* disks > 10 min;
