@@ -277,7 +277,9 @@ class Controller(unittest.TestCase):
         self.assertIn("DRY = E('DRY_RUN', '1') == '1'", self.src)
 
     def test_controller_local_runners_are_never_deregistered(self):
-        self.assertIn("not r['name'].startswith('nbci-ctl-')", self.src)
+        r = {'name': 'nbci-ctl-1', 'status': 'offline', 'busy': False}
+        self.assertFalse(L.stale_runner(r, set()))
+        self.assertTrue(L.stale_runner(dict(r, name='nbci-gate-1-abc'), set()))
 
 
 import nb_pulse  # noqa: E402
@@ -679,8 +681,10 @@ class ImageProvision(unittest.TestCase):
             self.assertNotIn(bad, run)
 
     def test_given_an_image_build_then_only_the_newest_image_is_kept(self):
-        with open(os.path.join(os.path.dirname(__file__), '..', 'runner', 'controller', 'nbci.py')) as f:
-            self.assertIn('imgs[1:]', f.read())
+        imgs = [{'name': 'a', 'creationTimestamp': '2026-11-01T00:00:00Z'}, {'name': 'c', 'creationTimestamp': '2026-11-03T00:00:00Z'},
+                {'name': 'b', 'creationTimestamp': '2026-11-02T00:00:00Z'}]
+        self.assertEqual(L.images_to_delete(imgs), ['b', 'a'])
+        self.assertEqual(L.images_to_delete(imgs[:1]), [])
 
 
 class Speed(unittest.TestCase):
@@ -1079,3 +1083,16 @@ class UpdateGate(unittest.TestCase):
 
     def test_given_a_loop_pass_but_healthz_down_then_the_update_is_unhealthy(self):
         self.assertFalse(L.update_healthy(NOW - 10, NOW - 60, NOW, 503, True, '12:00:30 mode=scale jobs=0\n'))
+
+
+class LostVmsAqa(unittest.TestCase):
+    def test_given_an_aqa_vm_that_wrote_its_result_when_it_vanishes_then_it_is_not_lost(self):
+        known = {'aqa-dev-1': 1, 'nbci-a': 1}
+        self.assertEqual(L.lost_vms(known, set(), {}, set(), finished=lambda n: n == 'aqa-dev-1'), ['nbci-a'])
+
+    def test_given_an_aqa_vm_without_a_result_when_it_vanishes_then_it_is_lost(self):
+        self.assertEqual(L.lost_vms({'aqa-dev-1': 1}, set(), {}, set(), finished=lambda n: False), ['aqa-dev-1'])
+
+    def test_given_a_ci_vm_vanishing_then_finished_is_never_consulted(self):
+        def boom(n): raise AssertionError('no')
+        self.assertEqual(L.lost_vms({'nbci-a': 1}, set(), {}, set(), finished=boom), ['nbci-a'])

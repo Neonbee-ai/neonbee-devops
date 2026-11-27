@@ -396,7 +396,9 @@ class Image(unittest.TestCase):
         self.assertFalse(L.image_build_due(2, 7, None, NOW))
 
     def test_given_a_build_then_only_the_newest_image_of_the_family_is_kept(self):
-        self.assertIn('for old in imgs[1:]', read('runner', 'controller', 'nbci.py'))
+        import nbci_logic as L
+        imgs = [{'name': 'old', 'creationTimestamp': '2026-11-01'}, {'name': 'new', 'creationTimestamp': '2026-11-02'}]
+        self.assertEqual(L.images_to_delete(imgs), ['old'])
 
 
 class Boot(unittest.TestCase):
