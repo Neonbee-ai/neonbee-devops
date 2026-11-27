@@ -125,6 +125,17 @@ class RouteSpill(unittest.TestCase):
         self.assertIn('NBCI_REEXEC=1 exec "$SRC/runner/controller/bootstrap.sh"', b)
 
 
+class DevopsChecksOffController(unittest.TestCase):
+    def test_given_devops_lint_contract_notify_then_they_run_on_nb_route_not_only_the_controller(self):
+        w = open(os.path.join(ROOT, '.github', 'workflows', 'validate-workflows.yml')).read()
+        self.assertEqual(w.count('runs-on: [self-hosted, nb-route]'), 3)
+        self.assertNotIn('"self-hosted","nb-ctl"', w)
+
+    def test_given_an_nb_route_devops_job_waits_then_it_buys_a_packed_slot(self):
+        j = [{'id': 1, 'labels': ['self-hosted', 'nb-route'], 'created': NOW - 120}]
+        self.assertEqual([c['name'] for c in L.plan_packed(j, {}, CLS, NOW)], ['legacy'])
+
+
 class Supply(unittest.TestCase):
     def test_given_a_packed_vm_with_one_busy_slot_then_three_slots_are_supply(self):
         v = pvm(); rs = online(*v['slot_names'].values(), busy=(v['slot_names'][1],))
