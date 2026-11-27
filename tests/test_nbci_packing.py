@@ -676,3 +676,91 @@ class Sizing(unittest.TestCase):
         j = [dict(jobs(1)[0], created=NOW - 3000)]
         self.assertEqual(L.stuck_jobs(j, {'1': NOW - 2900}, {L.base_class('legacy-s', self.LB)}, self.LIVE, NOW), [])
         self.assertEqual(L.stuck_jobs(j, {'1': NOW - 2900}, {'legacy-s'}, self.LIVE, NOW), [1])   # unmapped: a needless re-buy
+
+
+class GuardDeletesNotStops(unittest.TestCase):
+    """Pulse 652ffcd8, 2026-11-27: a tripped guard used to stop the whole controller (~2 h of stuck CI)."""
+
+    def _idle(self, n, age=2000):
+        return [pvm('nbci-legacy-%d' % i, age=age - i) for i in range(1, n + 1)]
+
+    def test_given_idle_vms_beyond_queued_then_only_the_excess_is_picked_newest_first(self):
+        vs = self._idle(3)
+        got = L.excess_idle_vms(vs, {}, {'legacy': 1}, NOW)
+        self.assertEqual([v['name'] for v in got], ['nbci-legacy-3', 'nbci-legacy-2'])
+
+    def test_given_queued_jobs_cover_the_vms_then_nothing_is_picked(self):
+        self.assertEqual(L.excess_idle_vms(self._idle(2), {}, {'legacy': 2}, NOW), [])
+
+    def test_given_a_busy_vm_then_it_is_never_picked(self):
+        v = pvm(age=2000); n = v['slot_names']
+        self.assertEqual(L.excess_idle_vms([v], online(*n.values(), busy=(n[1],)), {}, NOW), [])
+
+    def test_given_a_booting_vm_then_it_is_never_picked(self):
+        self.assertEqual(L.excess_idle_vms([pvm(age=60)], {}, {}, NOW, 8, L.NO_JOB_STARTUP_S), [])
+
+    def test_given_builder_aqa_and_stopped_vms_then_they_are_never_picked(self):
+        vs = [dict(pvm('b', age=9999), builder=True), dict(pvm('a', age=9999), cls='aqa'), pvm('t', age=9999, status='TERMINATED')]
+        self.assertEqual(L.excess_idle_vms(vs, {}, {}, NOW), [])
+
+    def test_given_more_than_cap_vms_but_all_queued_then_idle_ones_are_trimmed_to_the_cap(self):
+        vs = self._idle(5)
+        got = L.excess_idle_vms(vs, {}, {'legacy': 5}, NOW, cap=3)
+        self.assertEqual(len(got), 2)
+
+    def test_given_fewer_than_max_trips_in_the_window_then_the_breaker_stays_closed(self):
+        t = [NOW, NOW + 60]
+        self.assertFalse(L.trips_exceeded(t, NOW + 120, 3, 1800))
+
+    def test_given_three_trips_in_thirty_minutes_then_the_breaker_opens(self):
+        t = [NOW, NOW + 600, NOW + 1200]
+        self.assertTrue(L.trips_exceeded(t, NOW + 1500, 3, 1800))
+
+    def test_given_old_trips_then_they_age_out_of_the_window(self):
+        t = [NOW, NOW + 100, NOW + 3000]
+        self.assertFalse(L.trips_exceeded(t, NOW + 3100, 3, 1800))
+        self.assertEqual(t, [NOW + 3000])
+
+    def _guard(self):
+        import nbci_guard as G
+        for o, a in ((G.nbci, 'delete_vm'), (G.nbci_alert, 'send')):
+            self.addCleanup(setattr, o, a, getattr(o, a))   # tests patch module globals: restore for the other suites
+        return G
+
+    def test_given_a_trip_then_handle_trip_deletes_the_excess_alerts_and_does_not_stop(self):
+        G = self._guard(); deleted, alerts = [], []
+        vs = [dict(v, zone='z') for v in self._idle(2)]
+        G.nbci.delete_vm = lambda gh, gcp, v, rs, why: deleted.append((v['name'], why)) or True
+        G.nbci_alert.send = lambda msg, gcp, dry: alerts.append(msg)
+        trips = []
+        stop = G.handle_trip(None, None, 'class legacy: 1 idle VM', vs, {}, {'legacy': 1}, trips, NOW)
+        self.assertFalse(stop)
+        self.assertEqual([d[0] for d in deleted], ['nbci-legacy-2'])
+        self.assertIn('churn guard', deleted[0][1])
+        self.assertEqual(len(trips), 1)
+        self.assertIn('nbci keeps running', alerts[0])
+
+    def test_given_a_failing_delete_then_the_guard_logs_and_still_counts_the_trip(self):
+        G = self._guard(); trips = []
+        def boom(*a): raise RuntimeError('gce 500')
+        G.nbci.delete_vm = boom
+        G.nbci_alert.send = lambda *a: None
+        self.assertFalse(G.handle_trip(None, None, 'x', [dict(v, zone='z') for v in self._idle(2)], {}, {}, trips, NOW))
+        self.assertEqual(len(trips), 1)
+
+    def test_given_the_third_trip_in_the_window_then_handle_trip_asks_to_stop(self):
+        G = self._guard(); trips = [NOW - 900, NOW - 300]
+        G.nbci.delete_vm = lambda *a: True
+        G.nbci_alert.send = lambda *a: None
+        self.assertTrue(G.handle_trip(None, None, 'x', [], {}, {}, trips, NOW))
+
+    def test_given_env_overrides_then_the_trip_limits_are_configurable(self):
+        env = dict(os.environ, GUARD_MAX_TRIPS='5', GUARD_TRIP_WINDOW_S='60')
+        out = subprocess.run([sys.executable, '-c', 'import nbci_guard as G; print(G.MAX_TRIPS, G.TRIP_WINDOW_S)'],
+                             cwd=os.path.join(ROOT, 'runner', 'controller'), env=env, capture_output=True, text=True)
+        self.assertEqual(out.stdout.split()[-2:], ['5', '60'], out.stderr[-300:])
+
+    def test_given_the_guard_source_then_a_single_trip_no_longer_stops_nbci(self):
+        src = open(os.path.join(ROOT, 'runner', 'controller', 'nbci_guard.py')).read()
+        self.assertIn('if handle_trip(', src)
+        self.assertEqual(src.count("'systemctl', 'stop', 'nbci'"), 1)

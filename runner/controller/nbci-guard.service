@@ -1,5 +1,5 @@
 [Unit]
-Description=nb-ci churn guard (stops nbci when VMs outnumber queued jobs)
+Description=nb-ci churn guard (deletes excess idle VMs; stops nbci only on repeated trips)
 After=network-online.target nbci.service
 Wants=network-online.target
 [Service]
