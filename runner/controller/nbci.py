@@ -177,6 +177,34 @@ def queued_jobs(gh, recent=None):
     return out
 
 
+POLL = {'thread': None}
+
+
+def full_poll(gh, recent):
+    """Replace the job table with the slow-poll truth. Webhook jobs queued after the poll started (less 120 s of
+    listing lag) survive, so a job that arrived during the ~2.5 min poll is never dropped. Job ids are ints."""
+    t0 = time.time()
+    try:
+        polled = queued_jobs(gh, recent)
+    except Exception as e:
+        log('full poll error', str(e)[:300])
+        with LOCK: EVENTS['need_full_poll'] = True       # retried next pass
+        return
+    with LOCK:
+        fresh = {k: j for k, j in EVENTS['jobs'].items() if j['created'] >= t0 - 120}
+        EVENTS['jobs'] = {**fresh, **polled}
+
+
+def start_full_poll(gh, recent):
+    """At most one background full poll at a time; returns True when one was started."""
+    t = POLL['thread']
+    if t is not None and t.is_alive():
+        return False
+    POLL['thread'] = threading.Thread(target=full_poll, args=(gh, recent), daemon=True, name='nbci-full-poll')
+    POLL['thread'].start()
+    return True
+
+
 def runners(gh):
     out, pg = [], 1
     while True:
@@ -825,10 +853,11 @@ def tick(gh, gcp, st, mode='scale'):
     if every(st, 'reconcile', RECONCILE_S if webhook_live else 60, now) or mode != 'scale' or EVENTS.get('need_full_poll', True):
         EVENTS['need_full_poll'] = False   # first pass after a start: poll every queued job (webhook events sent while down are lost)
         with LOCK: recent = dict(EVENTS.get('recent', {}))
-        polled = queued_jobs(gh, recent)
+        if mode == 'scale':
+            start_full_poll(gh, recent)     # background: the 30 s loop (slot refill, scale-up) never waits ~2.5 min on it
+        else:
+            full_poll(gh, recent)           # one-shot modes (status/drain/once) need the table now
         with LOCK:
-            fresh = {k: j for k, j in EVENTS['jobs'].items() if now - j['created'] < 120}   # listing lag: a just-queued webhook job survives
-            EVENTS['jobs'] = {**fresh, **polled}   # job ids are ints: dict(a, **b) raises 'keywords must be strings' and aborts the tick
             EVENTS['recent'] = {n: t for n, t in EVENTS.get('recent', {}).items() if now - t < 7200}
     with LOCK: st['recent'] = dict(EVENTS.get('recent', {}))         # survives a restart (the first full poll needs it)
     with LOCK:
