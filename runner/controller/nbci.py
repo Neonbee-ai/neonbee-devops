@@ -497,7 +497,7 @@ def queue_backfill(gh, args):
     return evs
 
 
-def aqa_trigger(gh, gcp, st, now, today, failures, vm_room=True):
+def aqa_trigger(gh, gcp, st, now, today, failures, vm_room=True, ci_waiting=0):
     """Deploy -> AQA: ONE Spot VM per successful deploy run (dedupe repo+sha, daily cap), deleted by the
     controller once it powers off. Held (events kept) until ci/aqa.json says contract_ready."""
     cfg = L.load(os.path.join(CFG, 'aqa.json'))
@@ -516,7 +516,7 @@ def aqa_trigger(gh, gcp, st, now, today, failures, vm_room=True):
             later = pending
             log('aqa trigger held: %s (%d deploy event(s) waiting)' % ('VM-minutes cap' if not vm_room else 'contract_ready=false', len(pending)))
             return
-        _aqa_events(gh, gcp, st, now, today, failures, cfg, pending, later)
+        _aqa_events(gh, gcp, st, now, today, failures, cfg, pending, later, ci_waiting)
     finally:
         st['aqa_pending'] = [e for e in later if now - e.get('seen', now) < 86400][-200:]   # queued behind caps: kept a day, never silently lost
 
@@ -541,7 +541,7 @@ def live_aqa(gcp):
     return n
 
 
-def _aqa_events(gh, gcp, st, now, today, failures, cfg, pending, later):
+def _aqa_events(gh, gcp, st, now, today, failures, cfg, pending, later, ci_waiting=0):
     ast = st.setdefault('aqa', {})
     live = None
     for ev in pending:
@@ -587,7 +587,7 @@ def _aqa_events(gh, gcp, st, now, today, failures, cfg, pending, later):
         if live is None:
             try: live = live_aqa(gcp)
             except Exception as e: live = 0; log('aqa live count', str(e)[:100])
-        if live >= cfg.get('max_live', 3):
+        if live >= L.aqa_max_live(cfg.get('max_live', 3), ci_waiting):
             later.append(ev); continue                  # IP / vCPU caps: queue, retried next pass
         machine, workers = A.sizing(len(ids))
         name = A.vm_name(env, run['head_sha'])
@@ -871,7 +871,7 @@ def tick(gh, gcp, st, mode='scale'):
             c_v = dict(byname.get(v['cls'], byname['gate']), slots=v['slots'])
             pending[v['cls']] = pending.get(v['cls'], 0) + L.free_slots(v, c_v, rby, now, MAX_VM_S, JOB_MAX_S)
     waiting = [j for j in jobs if now - j['created'] >= 3]
-    want = L.plan_packed(waiting, pending, classes)
+    want = L.plan_packed(waiting, pending, classes, now)
     served = st.setdefault('served', {})
     for k in [k for k, t in served.items() if now - t > 2 * L.SERVE_WINDOW_S]:
         del served[k]
@@ -915,7 +915,9 @@ def tick(gh, gcp, st, mode='scale'):
         except Exception as e: log('aqa reap', str(e)[:160])
         try: aqa_results(gcp, st, now)
         except Exception as e: log('aqa results', str(e)[:160])
-    try: aqa_trigger(gh, gcp, st, now, today, failures, vm_room)
+    ci_waiting = sum(1 for j in waiting if now - j['created'] >= 60 and (L.class_for(j['labels'], classes) or {}).get('host') != 'controller'
+                     and L.class_for(j['labels'], classes))
+    try: aqa_trigger(gh, gcp, st, now, today, failures, vm_room, ci_waiting)
     except Exception as e: log('aqa trigger error', str(e)[:200])
     # AutoQA share of the one quota
     if every(st, 'autoqa', 120, now) and gce_ok:

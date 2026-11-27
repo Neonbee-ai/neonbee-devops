@@ -94,6 +94,37 @@ class ControllerChoke(unittest.TestCase):
         self.assertNotIn('try-restart "actions.runner', b)   # never kill a running job to apply limits
 
 
+class RouteSpill(unittest.TestCase):
+    def rjobs(self, n, age):
+        return [{'id': i, 'labels': ['self-hosted', 'nb-route'], 'created': NOW - age} for i in range(n)]
+
+    def test_given_route_jobs_waiting_90s_then_a_packed_vm_is_bought_for_them(self):
+        self.assertEqual([c['name'] for c in L.plan_packed(self.rjobs(5, 120), {}, CLS, NOW)], ['legacy', 'legacy'])
+
+    def test_given_fresh_route_jobs_then_the_controller_runners_take_them_and_nothing_is_bought(self):
+        self.assertEqual(L.plan_packed(self.rjobs(5, 30), {}, CLS, NOW), [])
+
+    def test_given_free_slots_then_waiting_route_jobs_use_them_before_buying(self):
+        self.assertEqual(L.plan_packed(self.rjobs(3, 300), {'legacy': 4}, CLS, NOW), [])
+
+    def test_given_no_clock_then_the_old_behaviour_holds(self):
+        self.assertEqual(L.plan_packed(self.rjobs(5, 300), {}, CLS), [])
+
+    def test_given_an_nb_ctl_job_then_it_never_spills_to_a_vm(self):
+        j = [{'id': 1, 'labels': ['self-hosted', 'nb-ctl'], 'created': NOW - 600}]
+        self.assertEqual(L.plan_packed(j, {}, CLS, NOW), [])
+
+    def test_given_ci_jobs_waiting_then_aqa_keeps_only_its_reserved_vm(self):
+        self.assertEqual(L.aqa_max_live(3, 16), 1)
+
+    def test_given_no_ci_backlog_then_aqa_may_use_its_configured_maximum(self):
+        self.assertEqual(L.aqa_max_live(3, 0), 3)
+
+    def test_given_a_deploy_then_bootstrap_reexecs_the_new_copy_once(self):
+        b = open(os.path.join(ROOT, 'runner', 'controller', 'bootstrap.sh')).read()
+        self.assertIn('NBCI_REEXEC=1 exec "$SRC/runner/controller/bootstrap.sh"', b)
+
+
 class Supply(unittest.TestCase):
     def test_given_a_packed_vm_with_one_busy_slot_then_three_slots_are_supply(self):
         v = pvm(); rs = online(*v['slot_names'].values(), busy=(v['slot_names'][1],))

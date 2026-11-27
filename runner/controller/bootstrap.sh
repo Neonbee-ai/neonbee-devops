@@ -51,6 +51,9 @@ if [ -n "$TOKEN" ]; then
   if [ -d $SRC/.git ]; then git -C $SRC fetch -q "https://x-access-token:$TOKEN@github.com/Neonbee-ai/neonbee-devops.git" "$REF" && git -C $SRC checkout -q -f FETCH_HEAD
   else mkdir -p /opt/nbci && git clone -q --depth 50 -b "$REF" "https://x-access-token:$TOKEN@github.com/Neonbee-ai/neonbee-devops.git" $SRC; fi
   git -C $SRC remote set-url origin https://github.com/Neonbee-ai/neonbee-devops.git
+  # bash reads this file while it runs: after a checkout, re-run the NEW bootstrap once (2026-11-27 a deploy kept
+  # the old unit files until a second run)
+  [ -n "${NBCI_REEXEC:-}" ] || NBCI_REEXEC=1 exec "$SRC/runner/controller/bootstrap.sh" "$@"
 fi
 if [ ! -f $SRC/runner/controller/nbci.py ]; then
   # No App key / ids yet (or GitHub down): nothing to run. Retry every 15 min from cron, exit 0 so
