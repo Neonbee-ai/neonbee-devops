@@ -25,6 +25,13 @@ fi
 command -v gh >/dev/null 2>&1 || apt-get install -yq gh
 # night train (night-train.mjs) runs on node; Ubuntu 24.04 nodejs 18 has fetch + AbortSignal.timeout
 command -v node >/dev/null 2>&1 || apt-get install -yq nodejs
+# deploy-aws (S3 release -> nb-prod-asg) runs on the controller: official AWS CLI v2 (noble has no awscli deb and no python3-venv)
+if ! command -v aws >/dev/null 2>&1; then
+  command -v unzip >/dev/null 2>&1 || apt-get install -yq unzip
+  AT=$(mktemp -d) && curl -fsSL https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip -o "$AT/awscli.zip" &&
+    unzip -q "$AT/awscli.zip" -d "$AT" && "$AT/aws/install" --update && aws --version || echo "nbci: AWS CLI v2 install failed" >&2
+  rm -rf "$AT"
+fi
 # OS security patches: unattended-upgrades (security pocket), reboot at 04:40 UTC when a kernel/libc patch needs it
 dpkg -s unattended-upgrades >/dev/null 2>&1 || apt-get install -yq unattended-upgrades
 printf 'APT::Periodic::Update-Package-Lists "1";\nAPT::Periodic::Unattended-Upgrade "1";\n' > /etc/apt/apt.conf.d/20auto-upgrades
