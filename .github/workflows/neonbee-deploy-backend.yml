@@ -339,7 +339,7 @@ jobs:
     # non-cancelling group so an in-flight deploy is never cut off.
     concurrency:
       group: nb-${{ github.workflow }}-${{ inputs.service_name }}-${{ github.ref }}-gate
-      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}   # superseded PR runs free their slot; develop/main queue
     runs-on: ${{ fromJSON(needs.route.outputs.runs_on) }}
     steps:
       - uses: actions/checkout@v4.3.1
@@ -566,7 +566,7 @@ jobs:
     # non-cancelling group so an in-flight deploy is never cut off.
     concurrency:
       group: nb-${{ github.workflow }}-${{ inputs.service_name }}-${{ github.ref }}-security
-      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}   # superseded PR runs free their slot; develop/main queue
     steps:
       - uses: actions/checkout@v4.3.1
         with:
@@ -664,7 +664,7 @@ jobs:
     # non-cancelling group so an in-flight deploy is never cut off.
     concurrency:
       group: nb-${{ github.workflow }}-${{ inputs.service_name }}-${{ github.ref }}-contract-tests
-      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}   # superseded PR runs free their slot; develop/main queue
     steps:
       - uses: actions/checkout@v4.3.1
       - uses: actions/setup-node@v4.4.0
@@ -863,7 +863,7 @@ jobs:
     # non-cancelling group so an in-flight deploy is never cut off.
     concurrency:
       group: nb-${{ github.workflow }}-${{ inputs.service_name }}-${{ github.ref }}-integration-tests
-      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}   # superseded PR runs free their slot; develop/main queue
     steps:
       - uses: actions/checkout@v4.3.1
       - uses: actions/setup-node@v4.4.0

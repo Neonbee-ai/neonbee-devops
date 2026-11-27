@@ -13,6 +13,8 @@ at job end / 5 min without a job; stopped VMs and orphan disks swept. route/noti
 | `provision.sh` | one-time: custom role, SA (no keys), secrets, firewall, the e2-micro |
 | `bootstrap.sh` | VM boot: Caddy, code checkout via the App, systemd units, 2 local runners, daily self-update |
 | `watchdog.sh` | dead-man check, restarts only `nbci` |
+| `nbci-set-ref.sh` | one command: move the controller to a neonbee-devops ref/sha (deploy or roll back) |
+| `../image/slots.sh` | packed VM: N one-job runner slots, refilled by the controller, VM reused until 3 min idle |
 | `night-train.mjs` + `night-train-run.py` | overnight release train (systemd `night-train.timer`, 15 min, API-only); metadata `nbci-night-train=off\|dry\|live`, `nbci-nt-deadline` |
 | `../image/provision.sh` | runner image contents (Node 22, runner, Playwright Chromium, gitleaks, semgrep, npm cache) |
 

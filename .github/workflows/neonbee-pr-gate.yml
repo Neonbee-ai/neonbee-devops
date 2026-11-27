@@ -330,6 +330,9 @@ jobs:
     # The runner VM only: the Mac Minis are reserved for autonomous QA and the
     # Dev VM never builds.
     runs-on: ${{ fromJSON(needs.route.outputs.runs_on) }}
+    concurrency:
+      group: nb-prgate-${{ github.repository }}-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}-unit
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}   # a new push to the PR supersedes; develop/main runs queue
     # shell-fe's unit suite (~610 files) needs ~26 min; 20 cancelled it mid-run.
     timeout-minutes: 35
     steps:
@@ -619,6 +622,9 @@ jobs:
     # The runner VM only: the Mac Minis are reserved for autonomous QA and the
     # Dev VM never builds.
     runs-on: ${{ fromJSON(needs.route.outputs.runs_on) }}
+    concurrency:
+      group: nb-prgate-${{ github.repository }}-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}-security
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}   # a new push to the PR supersedes; develop/main runs queue
     # shell-fe's unit suite (~610 files) needs ~26 min; 20 cancelled it mid-run.
     timeout-minutes: 35
     steps:
@@ -1013,6 +1019,9 @@ jobs:
     if: inputs.deploy_type == 'backend' && needs.route.outputs.prior_pass != 'true'
     needs: [route, gate]
     runs-on: ${{ fromJSON(needs.route.outputs.runs_on) }}
+    concurrency:
+      group: nb-prgate-${{ github.repository }}-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}-contract-tests
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}   # a new push to the PR supersedes; develop/main runs queue
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4.3.1
@@ -1212,6 +1221,9 @@ jobs:
     if: inputs.deploy_type == 'backend' && needs.route.outputs.prior_pass != 'true'
     needs: [route, gate]
     runs-on: ${{ fromJSON(needs.route.outputs.runs_on) }}
+    concurrency:
+      group: nb-prgate-${{ github.repository }}-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}-integration-tests
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}   # a new push to the PR supersedes; develop/main runs queue
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4.3.1

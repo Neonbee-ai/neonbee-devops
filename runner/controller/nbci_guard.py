@@ -27,7 +27,7 @@ def once(gh, gcp, classes, since, now):
         c = class_of(j, classes)
         if c:
             queued[c] = queued.get(c, 0) + 1
-    return L.churn_verdict(vms, runners, queued, since, now, WINDOW_S, CAP)
+    return L.churn_verdict(vms, runners, queued, since, now, WINDOW_S, CAP, L.NO_JOB_STARTUP_S)  # booting VMs are not churn
 
 
 def main():
