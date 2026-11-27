@@ -265,6 +265,21 @@ class BootScript(unittest.TestCase):
         self.assertNotIn('sudoers', s)
         self.assertNotRegex(s, r'(?i)(token|secret|password)=')
 
+    def test_given_a_job_runs_npm_config_set_global_then_it_writes_the_slot_home_not_the_shared_node(self):
+        # 2026-11-27: every packed job failed with EACCES on /opt/hostedtoolcache/node/*/etc
+        s = self.SLOTS
+        self.assertIn('NPM_CONFIG_GLOBALCONFIG="$H/.npmrc-global"', s)
+        self.assertIn('NPM_CONFIG_PREFIX="$H/.npm-global"', s)
+        self.assertIn('PATH="$H/.npm-global/bin:$PATH"', s)
+        # wiped after each job: the HOME sweep keeps only .npm and .cache
+        self.assertIn("! -name .npm ! -name .cache -exec rm -rf {} +", s)
+
+    def test_given_a_slot_starts_a_job_then_the_jit_config_is_not_logged_or_visible_to_neighbours(self):
+        s = self.SLOTS
+        self.assertNotIn('sudo -u "$U"', s)          # sudo logs the full command line to the journal
+        self.assertIn('runuser -u "$U" --', s)
+        self.assertIn('hidepid=', s)
+
     def test_the_slot_script_parses(self):
         r = subprocess.run(['bash', '-n', '-c', self.SLOTS], capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)
