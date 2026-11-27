@@ -1192,31 +1192,6 @@ jobs:
             " 2>/dev/null || true
           fi
 
-      - name: AQA bundle
-        # Contract pending from the AQA agent: neonbee-qa aqa/bundle.sh builds the bundle for this sha; the nb-ci
-        # controller's deploy->AQA trigger names it in the AQA VM metadata (aqa-bundle = aqa-bundle-<sha>).
-        # Off until the org/repo variable NB_AQA_BUNDLE is 'true'; never fails the deploy.
-        if: success() && vars.NB_AQA_BUNDLE == 'true' && (github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main')
-        continue-on-error: true
-        env:
-          QA_TOKEN: ${{ secrets.PAT_TOKEN }}
-        run: |
-          rm -rf "$RUNNER_TEMP/neonbee-qa" "$RUNNER_TEMP/aqa-bundle"; mkdir -p "$RUNNER_TEMP/aqa-bundle"
-          git clone -q --depth=1 "https://x-access-token:${QA_TOKEN}@github.com/Neonbee-ai/neonbee-qa.git" "$RUNNER_TEMP/neonbee-qa"
-          if [ -f "$RUNNER_TEMP/neonbee-qa/aqa/bundle.sh" ]; then
-            bash "$RUNNER_TEMP/neonbee-qa/aqa/bundle.sh" "$GITHUB_SHA" "$RUNNER_TEMP/aqa-bundle"
-          else
-            echo "::warning::neonbee-qa aqa/bundle.sh not found - no AQA bundle for $GITHUB_SHA"
-          fi
-      - name: Upload AQA bundle
-        if: success() && vars.NB_AQA_BUNDLE == 'true' && hashFiles(format('{0}/aqa-bundle/**', runner.temp)) != ''
-        continue-on-error: true
-        uses: actions/upload-artifact@v4
-        with:
-          name: aqa-bundle-${{ github.sha }}
-          path: ${{ runner.temp }}/aqa-bundle
-          retention-days: 14
-
       - name: Push build metrics
         if: always()
         continue-on-error: true
