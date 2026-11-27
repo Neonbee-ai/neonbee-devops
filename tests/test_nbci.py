@@ -848,10 +848,10 @@ class Aqa(unittest.TestCase):
         self.assertEqual(A.vm_name('pr-feat-x', '0123456789abcdef'), 'aqa-dev-01234567-1')
         self.assertEqual(A.vm_name('prod', 'abcdef0123'), 'aqa-prod-abcdef01-1')
 
-    def test_given_an_aqa_vm_older_than_30_minutes_then_the_reaper_deletes_it(self):
+    def test_given_an_aqa_vm_older_than_aqa_max_then_the_reaper_deletes_it(self):
         vm = {'status': 'RUNNING', 'created': 0, 'cls': 'aqa'}
-        self.assertIsNone(L.vm_verdict(vm, None, False, 1799))
-        self.assertIn('30 min', L.vm_verdict(vm, None, False, 1800))
+        self.assertIsNone(L.vm_verdict(vm, None, False, 7199))
+        self.assertIn('120 min', L.vm_verdict(vm, None, False, 7200))
 
 
 class StandardVm(unittest.TestCase):
@@ -939,3 +939,22 @@ class GateBeforeAqa(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class AqaLifetime(unittest.TestCase):
+    def _vm(self, age, name='aqa-run1'):
+        return {'name': name, 'status': 'RUNNING', 'created': NOW - age, 'cls': 'aqa'}
+
+    def test_given_an_aqa_vm_45_min_old_when_judged_then_it_is_kept(self):
+        self.assertIsNone(L.vm_verdict(self._vm(2700), None, False, NOW, max_s=1800, aqa_max_s=7200))
+
+    def test_given_an_aqa_vm_past_aqa_max_when_judged_then_it_is_reaped(self):
+        self.assertIn('aqa VM older', L.vm_verdict(self._vm(7300), None, False, NOW, max_s=1800, aqa_max_s=7200))
+
+    def test_given_a_named_aqa_vm_without_class_label_when_judged_then_aqa_max_applies(self):
+        vm = dict(self._vm(2700), cls='gate')
+        self.assertIsNone(L.vm_verdict(vm, None, False, NOW, max_s=1800, aqa_max_s=7200))
+
+    def test_given_a_ci_vm_past_job_lifetime_when_judged_then_lifetime_reaps_it(self):
+        vm = {'name': 'nbci-x', 'status': 'RUNNING', 'created': NOW - 2700, 'cls': 'gate'}
+        self.assertIn(L.LIFETIME, L.vm_verdict(vm, {'busy': True}, False, NOW, max_s=1800))
