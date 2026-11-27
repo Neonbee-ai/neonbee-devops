@@ -10,8 +10,10 @@ CFG = json.load(open(os.path.join(ROOT, 'ci', 'runner-labels.json')))
 BY = {c['name']: c for c in CFG['classes']}
 LIVE_LEGACY = BY['legacy']; PROD = BY['legacy-prod']
 # slot math below is generic: it runs on a 4-slot class; the live class (8 slots) is pinned in Config/Quota
-LEGACY = dict(LIVE_LEGACY, machine='e2-standard-4', vcpu=4, ram_gb=16, slots=4)
-CLS = [LEGACY if c['name'] == 'legacy' else c for c in CFG['classes']]; BY = {c['name']: c for c in CLS}
+# and with right-sizing off (no 'small' block): the Sizing class below covers the live small variants
+LEGACY = {k: v for k, v in dict(LIVE_LEGACY, machine='e2-standard-4', vcpu=4, ram_gb=16, slots=4).items() if k != 'small'}
+CLS = [LEGACY if c['name'] == 'legacy' else {k: v for k, v in c.items() if k != 'small'} for c in CFG['classes']]
+BY = {c['name']: c for c in CLS}
 NOW = 1_800_000_000
 LJOB = ['self-hosted', 'runner-vm']
 PJOB = ['self-hosted', 'runner-vm', 'lane-prod']
@@ -36,11 +38,11 @@ def online(*names, busy=()):
 
 
 class Config(unittest.TestCase):
-    def test_given_ips_are_the_cap_then_legacy_vms_carry_eight_slots_on_e2_standard_8_and_deploy_lanes_one(self):
+    def test_given_ips_are_the_cap_then_legacy_vms_carry_eight_slots_on_e2_standard_8_and_deploy_lanes_four(self):
         self.assertEqual((LIVE_LEGACY['machine'], L.slots_of(LIVE_LEGACY)), ('e2-standard-8', 8))
         self.assertEqual(LIVE_LEGACY['ram_gb'] // L.slots_of(LIVE_LEGACY), 4)        # same 4 GB a slot as the measured 4-slot VM
-        self.assertEqual(L.slots_of(PROD), 1)
-        self.assertFalse(L.packed(PROD))
+        self.assertEqual((PROD['machine'], L.slots_of(PROD), PROD['spot']), ('e2-standard-8', 4, False))
+        self.assertEqual(PROD['ram_gb'] // L.slots_of(PROD), 8)                      # 2 vCPU + 8 GB a deploy slot
 
     def test_given_no_slots_key_then_a_class_keeps_one_job_per_vm(self):
         self.assertEqual(L.slots_of(BY['gate']), 1)
@@ -60,9 +62,9 @@ class SlotMath(unittest.TestCase):
         self.assertEqual(L.plan_packed(jobs(3), {'legacy': 3}, CLS), [])
         self.assertEqual(len(L.plan_packed(jobs(5), {'legacy': 3}, CLS)), 1)
 
-    def test_given_a_deploy_lane_job_then_its_standard_vm_is_bought_first_one_per_job(self):
+    def test_given_a_deploy_lane_job_then_its_standard_vm_is_bought_first(self):
         out = L.plan_packed(jobs(4) + jobs(2, PJOB, 10), {}, CLS)
-        self.assertEqual([c['name'] for c in out], ['legacy-prod', 'legacy-prod', 'legacy'])
+        self.assertEqual([c['name'] for c in out], ['legacy-prod', 'legacy'])    # 2 deploys share one 4-slot standard VM
 
     def test_given_a_packed_vm_then_one_create_serves_four_queued_jobs(self):
         want = L.plan_packed(jobs(8), {}, CLS)
@@ -159,7 +161,7 @@ class DeployIsolation(unittest.TestCase):
     def test_given_a_legacy_repo_deploy_then_it_gets_a_single_job_standard_vm(self):
         for f in self.FILES:
             c = L.class_for(self.legacy_lane(f)[1], CLS)
-            self.assertEqual((c['name'], c['spot'], L.slots_of(c)), ('legacy-prod', False, 1), f)
+            self.assertEqual((c['name'], c['spot'], L.slots_of(c)), ('legacy-prod', False, 4), f)
 
     def test_given_an_auto_repo_deploy_then_it_gets_the_standard_deploy_class(self):
         for f in self.FILES:
@@ -203,10 +205,13 @@ class Quota(unittest.TestCase):
         n = 0
         while L.fits(LIVE_LEGACY, room) and L.may_start(LIVE_LEGACY, 'ok', room['vcpu'], reserve):
             room = L.take(LIVE_LEGACY, room); n += 1
-        self.assertEqual(n, 2)                    # reserve 12: 2 legacy VMs (16 slots) leave room for 3 deploy VMs at once
-        d = 0
+        self.assertEqual(n, 1)                    # reserve 16: 1 big legacy VM (8 slots) leaves 22 vCPU for deploys
+        d, r2 = 0, dict(room)
         while L.fits(PROD, room): room = L.take(PROD, room); d += 1
-        self.assertEqual(d, 5)                    # 2-vCPU deploy VMs: 5 at once, capped by the 8 external IPs
+        self.assertEqual(d, 2)                    # 2 big deploy VMs = 8 deploy slots
+        small, s = L.size_variants([PROD])[0], 0
+        while L.fits(small, r2): r2 = L.take(small, r2); s += 1
+        self.assertEqual(s, 5)                    # or 5 small deploy VMs = 10 slots: vCPU 22 // 4, inside 6 free IPs
 
     def test_given_the_spend_cap_then_the_packed_legacy_lane_still_starts(self):
         self.assertTrue(L.may_start(LIVE_LEGACY, 'capped', 12, 4))
@@ -489,3 +494,102 @@ class FastBoot(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class Sizing(unittest.TestCase):
+    """Right-sizing (Pulse 652ffcd8, 2026-11-27): a trickle of 1-few jobs gets a small VM; big packed VMs are bought
+    only when the queue fills them. Runs on the LIVE config (ci/runner-labels.json)."""
+    LIVE = CFG['classes']
+    LB = {c['name']: c for c in CFG['classes'] + L.size_variants(CFG['classes'])}
+    P = CFG['prices_usd']
+
+    def names(self, waiting, supply=None, live=None):
+        return [c['name'] for c in L.plan_packed(waiting, supply or {}, self.LIVE, NOW, live_by_class=live)]
+
+    def usd(self, n):
+        return L.hourly_usd(self.LB[n], self.P)
+
+    def test_given_the_live_config_then_each_packed_class_has_a_small_variant_of_the_same_kind(self):
+        for b in ('legacy', 'legacy-prod', 'deploy'):
+            s, c = self.LB[b + '-s'], self.LB[b]
+            self.assertEqual((s['labels'], s['spot'], s['priority'], s['size_of']), (c['labels'], c['spot'], c['priority'], b))
+            self.assertEqual(s['ram_gb'] // L.slots_of(s), c['ram_gb'] // L.slots_of(c), b)   # same RAM a slot as the big VM
+            self.assertEqual(s['vcpu'] / float(L.slots_of(s)), c['vcpu'] / float(L.slots_of(c)), b)
+            self.assertNotIn('small', s)
+        self.assertEqual((self.LB['legacy-s']['machine'], self.LB['legacy-prod-s']['machine']), ('e2-standard-2', 'e2-standard-4'))
+
+    def test_given_a_job_then_class_for_never_picks_a_small_variant(self):
+        for labels in (LJOB, PJOB, ['self-hosted', 'nb-deploy']):
+            self.assertFalse(L.class_for(labels, self.LIVE)['name'].endswith('-s'))
+
+    def test_given_one_waiting_legacy_job_then_one_small_spot_vm_is_bought(self):
+        self.assertEqual(self.names(jobs(1)), ['legacy-s'])
+        self.assertTrue(self.LB['legacy-s']['spot'])
+
+    def test_given_four_waiting_legacy_jobs_then_two_small_vms_not_one_big(self):
+        self.assertEqual(self.names(jobs(4)), ['legacy-s', 'legacy-s'])
+
+    def test_given_five_waiting_legacy_jobs_then_one_big_packed_vm(self):
+        self.assertEqual(self.names(jobs(5)), ['legacy'])
+
+    def test_given_ten_waiting_jobs_then_a_full_big_vm_plus_a_small_one_for_the_remainder(self):
+        self.assertEqual(self.names(jobs(10)), ['legacy', 'legacy-s'])
+
+    def test_given_two_small_vms_already_live_then_the_next_job_buys_a_big_vm(self):
+        self.assertEqual(self.names(jobs(1), live={'legacy-s': 2}), ['legacy'])
+
+    def test_given_one_small_vm_live_and_two_jobs_then_the_second_small_vm_is_bought(self):
+        self.assertEqual(self.names(jobs(2), live={'legacy-s': 1}), ['legacy-s'])
+
+    def test_given_free_slots_on_a_small_vm_then_they_are_supply_for_its_base_class(self):
+        self.assertEqual(self.names(jobs(2), {'legacy-s': 2}), [])
+        self.assertEqual(self.names(jobs(3), {'legacy-s': 2, 'legacy': 0}), ['legacy-s'])
+
+    def test_given_a_lone_route_spill_then_it_gets_a_small_vm(self):
+        j = [{'id': 1, 'labels': ['self-hosted', 'nb-route'], 'created': NOW - 120}]
+        self.assertEqual(self.names(j), ['legacy-s'])
+
+    def test_given_one_or_two_deploys_then_a_small_standard_vm_and_three_buy_the_big_one(self):
+        self.assertEqual(self.names(jobs(1, PJOB)), ['legacy-prod-s'])
+        self.assertEqual(self.names(jobs(2, PJOB)), ['legacy-prod-s'])
+        self.assertEqual(self.names(jobs(3, PJOB)), ['legacy-prod'])
+        self.assertFalse(self.LB['legacy-prod-s']['spot'])
+        self.assertFalse(self.LB['deploy-s']['spot'])
+
+    def test_given_deploy_and_ci_jobs_then_deploy_vms_are_still_bought_first(self):
+        self.assertEqual(self.names(jobs(1) + jobs(1, PJOB, 10)), ['legacy-prod-s', 'legacy-s'])
+
+    def test_given_a_class_without_a_small_block_then_sizing_is_unchanged(self):
+        self.assertEqual(L.size_plan(LEGACY, 9), [LEGACY] * 3)
+        self.assertEqual(L.size_plan(LEGACY, 0), [])
+        self.assertEqual([c['name'] for c in L.size_plan(BY['gate'], 2)], ['gate', 'gate'])
+
+    def test_given_a_small_vm_then_one_create_serves_its_two_slots(self):
+        want = L.plan_packed(jobs(2), {}, self.LIVE, NOW)
+        out, ids = L.cap_creates(want, jobs(2), {}, NOW)
+        self.assertEqual(([c['name'] for c in out], ids), (['legacy-s'], [1, 2]))
+
+    def test_given_the_max_jobs_then_small_vms_cost_no_more_than_the_big_vm_they_replace(self):
+        for b in ('legacy', 'legacy-prod', 'deploy'):
+            c = self.LB[b]; s = c['small']
+            vms = -(-s['max_jobs'] // s['slots'])
+            self.assertLessEqual(vms * self.usd(b + '-s'), self.usd(b) + 1e-9, b)
+        for b in ('legacy-prod', 'deploy'):                                       # deploy: max_jobs IS the break-even
+            self.assertGreater(2 * self.usd(b + '-s'), self.usd(b), b)
+        # legacy: 3 small VMs ($0.145/h) would still undercut the big one ($0.177/h); max_jobs 4 stops at 2 to keep IPs
+        self.assertLess(3 * self.usd('legacy-s'), self.usd('legacy'))
+
+    def test_given_todays_prices_then_a_small_vm_is_a_quarter_to_half_the_hourly_cost(self):
+        self.assertEqual((round(self.usd('legacy'), 3), round(self.usd('legacy-s'), 3)), (0.177, 0.048))
+        self.assertEqual((round(self.usd('legacy-prod'), 3), round(self.usd('legacy-prod-s'), 3)), (0.28, 0.143))
+
+    def test_given_every_class_at_its_small_vm_cap_then_the_external_ips_still_fit(self):
+        small_ips = sum(c['small']['max_vms'] for c in self.LIVE if c.get('small'))
+        self.assertLessEqual(small_ips + 1, 8)     # + the controller's IP, inside IN_USE_ADDRESSES = 8
+
+    def test_given_a_small_vm_then_its_vm_class_maps_back_to_the_base_for_stuck_job_checks(self):
+        self.assertEqual((L.base_class('legacy-s', self.LB), L.base_class('legacy', self.LB), L.base_class('x', self.LB)),
+                         ('legacy', 'legacy', 'x'))
+        j = [dict(jobs(1)[0], created=NOW - 3000)]
+        self.assertEqual(L.stuck_jobs(j, {'1': NOW - 2900}, {L.base_class('legacy-s', self.LB)}, self.LIVE, NOW), [])
+        self.assertEqual(L.stuck_jobs(j, {'1': NOW - 2900}, {'legacy-s'}, self.LIVE, NOW), [1])   # unmapped: a needless re-buy

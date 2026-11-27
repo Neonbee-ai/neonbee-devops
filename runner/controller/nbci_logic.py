@@ -583,12 +583,60 @@ def spill_class(job_labels, classes):
     return next((c for c in classes if c.get('host') != 'controller' and want <= lower(c['labels'])), None)
 
 
-def plan_packed(waiting, supply_by_class, classes, now=None, spill_s=ROUTE_SPILL_S):
-    """VMs to buy: per class, ceil((waiting jobs - free slots) / slots). Deploy (priority 0, standard) first.
-    A controller job (route/notify) waiting >= spill_s counts as demand for the packed class that also carries
-    its label, so a backlog behind the 2 controller runners buys slots (2026-11-27: 16 queued, want=0)."""
+SMALL_SUFFIX = '-s'
+
+
+def size_variants(classes):
+    """The small-VM variant of every class with a 'small' block (Pulse 652ffcd8, right-sizing 2026-11-27): same labels,
+    priority, Spot policy and service account as its base; its own machine / vcpu / ram_gb / slots / disk_gb; name
+    <base>-s and size_of=<base>. Variants are NOT in the class list, so class_for never maps a job to one: only
+    size_plan buys them, and a VM of a variant serves exactly its base's jobs (same runner labels)."""
+    out = []
+    for c in classes:
+        s = c.get('small')
+        if s:
+            v = {k: x for k, x in c.items() if k not in ('small', '_doc')}
+            v.update({k: x for k, x in s.items() if k not in ('max_jobs', 'max_vms', '_doc')})
+            v.update(name=c['name'] + SMALL_SUFFIX, size_of=c['name'])
+            out.append(v)
+    return out
+
+
+def base_class(name, byname):
+    """Class a VM's jobs belong to: the base for a small variant (legacy-s -> legacy), else the name itself."""
+    return (byname.get(name) or {}).get('size_of', name)
+
+
+def size_plan(c, n, live_small=0):
+    """VMs to buy for n unmet jobs of class c. Without a 'small' block: ceil(n / slots) VMs of c (unchanged).
+    With one: full big VMs for every complete big-VM load, and the remainder r on small VMs while r <= small.max_jobs
+    and the class's live + new small VMs stay <= small.max_vms; a larger remainder (or too many small VMs already
+    live) buys one more big VM instead. Rule: pack onto big VMs only when the queue fills them; a trickle of 1-few
+    jobs (route/notify spill, lint, one Security / build-deploy) gets a VM a quarter of the size. max_jobs is the
+    cost break-even (USD/h of ceil(r / small slots) small VMs <= one big VM), max_vms bounds the external IPs
+    small VMs can hold (IN_USE_ADDRESSES = 8 is the real ceiling)."""
     import math
+    if n <= 0:
+        return []
+    big = slots_of(c)
+    s = c.get('small')
+    if not s:
+        return [c] * int(math.ceil(n / float(big)))
+    sv = size_variants([c])[0]
+    k, r = divmod(n, big)
+    ns = int(math.ceil(r / float(slots_of(sv)))) if r else 0
+    if r and r <= s.get('max_jobs', slots_of(sv)) and live_small + ns <= s.get('max_vms', 1):
+        return [c] * k + [sv] * ns
+    return [c] * int(math.ceil(n / float(big)))
+
+
+def plan_packed(waiting, supply_by_class, classes, now=None, spill_s=ROUTE_SPILL_S, live_by_class=None):
+    """VMs to buy: per class, size_plan(waiting jobs - free slots). Deploy (priority 0, standard) first.
+    A controller job (route/notify) waiting >= spill_s counts as demand for the packed class that also carries
+    its label, so a backlog behind the 2 controller runners buys slots (2026-11-27: 16 queued, want=0).
+    supply_by_class / live_by_class are keyed by VM class: a small variant's free slots are its base's supply."""
     need = {}
+    live_by_class = live_by_class or {}
     for j in waiting:
         c = class_for(j['labels'], classes)
         if c and c.get('host') == 'controller' and now is not None and now - j.get('created', now) >= spill_s:
@@ -597,8 +645,9 @@ def plan_packed(waiting, supply_by_class, classes, now=None, spill_s=ROUTE_SPILL
             need[c['name']] = need.get(c['name'], 0) + 1
     out = []
     for c in sorted(classes, key=lambda c: (c.get('priority', 9), bool(c.get('spot')))):
-        n = need.get(c['name'], 0) - supply_by_class.get(c['name'], 0)
-        out += [c] * max(0, int(math.ceil(n / float(slots_of(c)))))
+        sn = c['name'] + SMALL_SUFFIX
+        n = need.get(c['name'], 0) - supply_by_class.get(c['name'], 0) - supply_by_class.get(sn, 0)
+        out += size_plan(c, n, live_by_class.get(sn, 0))
     return out
 
 

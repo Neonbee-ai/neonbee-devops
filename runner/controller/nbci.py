@@ -817,6 +817,14 @@ def emit_vm(st, name, byname, prices, now, lost=False, jobs=None):
     vs = st.setdefault('vmstat', {}).pop(name, None)
     if not vs:
         return
+    # one record per VM: a deleted VM stays listed (STOPPING) for ~1 min and the idempotent delete re-fires each pass;
+    # re-emitting then counted one VM 2-3 times in the metrics (2026-11-27 13:47-13:49)
+    em = st.setdefault('vm_emitted', {})
+    for k in [k for k, t in em.items() if now - t > 3600]:
+        del em[k]
+    if name in em:
+        return
+    em[name] = now
     if jobs is not None: vs['jobs'] = max(vs.get('jobs', 0), jobs)
     METRICS.add(L.vm_metric(vs, name, byname.get(vs.get('cls'), byname['gate']), prices, now, lost), now)
 
@@ -845,7 +853,7 @@ def alert_once(st, now, text):
 def tick(gh, gcp, st, mode='scale'):
     now = time.time(); today = time.strftime('%Y-%m-%d', time.gmtime(now))
     cfg = L.load(os.path.join(CFG, 'runner-labels.json')); manifest = L.load(os.path.join(CFG, 'release-manifest.json'))
-    classes = cfg['classes']; byname = {c['name']: c for c in classes}; prices = cfg['prices_usd']
+    classes = cfg['classes']; byname = {c['name']: c for c in classes + L.size_variants(classes)}; prices = cfg['prices_usd']
     alert = lambda t: notify(st, t)  # noqa: E731
     ci_mode = org_var(gh, 'NB_CI_MODE') or 'legacy'        # org default; repo variables override it
     rs = runners(gh); rby = {r['name']: r for r in rs}
@@ -992,11 +1000,14 @@ def tick(gh, gcp, st, mode='scale'):
             c_v = dict(byname.get(v['cls'], byname['gate']), slots=v['slots'])
             pending[v['cls']] = pending.get(v['cls'], 0) + L.free_slots(v, c_v, rby, now, MAX_VM_S, JOB_MAX_S)
     waiting = [j for j in jobs if now - j['created'] >= 3]
-    want = L.plan_packed(waiting, pending, classes, now)
+    live_by = {}
+    for v in live:
+        if v['status'] in L.LIVE: live_by[v['cls']] = live_by.get(v['cls'], 0) + 1
+    want = L.plan_packed(waiting, pending, classes, now, live_by_class=live_by)
     served = st.setdefault('served', {})
     for k in [k for k, t in served.items() if now - t > 2 * L.SERVE_WINDOW_S]:
         del served[k]
-    live_cls = {v['cls'] for v in live if v['status'] in L.LIVE}
+    live_cls = {L.base_class(v['cls'], byname) for v in live if v['status'] in L.LIVE}     # a legacy-s VM serves legacy jobs
     stuck = L.stuck_jobs(waiting, served, live_cls, classes, now, STUCK_JOB_S)
     if stuck:
         for jid in stuck: served.pop(str(jid), None)

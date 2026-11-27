@@ -501,8 +501,10 @@ class AqaIdempotentCreate(unittest.TestCase):
         st['aqa_bundle'] = 'f' * 40
         dry, nbci.DRY = nbci.DRY, False
         saved, nbci.save_state = nbci.save_state, (lambda s: None)
+        load = nbci.L.load        # create path under test: independent of a release-time contract_ready=false hold
+        nbci.L.load = lambda p: dict(load(p), contract_ready=True) if p.endswith('aqa.json') else load(p)
         try: nbci.aqa_trigger(self._gh(), G, st, NOW, '2026-11-27', [])
-        finally: nbci.DRY = dry; nbci.save_state = saved
+        finally: nbci.DRY = dry; nbci.save_state = saved; nbci.L.load = load
 
     def test_given_a_vm_with_the_runs_name_already_exists_then_no_create_is_sent_and_the_run_is_recorded(self):
         posts = []
@@ -560,3 +562,27 @@ class PollSeesReruns(unittest.TestCase):
 
     def test_given_no_recent_event_and_no_recent_push_then_the_repo_is_skipped(self):
         self.assertEqual(nbci.queued_jobs(self._gh(time.time() - 3 * 86400), {}), {})
+
+
+class VmMetricOnce(unittest.TestCase):
+    """2026-11-27: a deleted VM stays listed (STOPPING) ~1 min and the idempotent delete re-fires, so one VM was
+    recorded 2-3 times in the vm metrics (nbci-legacy-112713115792920ae at 13:47:55, 13:48:25, 13:48:55)."""
+
+    def test_given_a_vm_deleted_on_two_passes_then_one_vm_record_is_written(self):
+        st = fresh_state(); by = {c['name']: c for c in nbci.L.load(os.path.join(nbci.CFG, 'runner-labels.json'))['classes']}
+        prices = nbci.L.load(os.path.join(nbci.CFG, 'runner-labels.json'))['prices_usd']
+        n0 = len(nbci.METRICS.recs)
+        for t in (NOW, NOW + 30):
+            st.setdefault('vmstat', {})['nbci-legacy-x'] = {'created': NOW - 600, 'slots': 8, 'vcpu': 8, 'cls': 'legacy', 'busy_s': 0, 'idle_s': 0, 'jobs': 0}
+            nbci.emit_vm(st, 'nbci-legacy-x', by, prices, t)
+        recs = [r for r in nbci.METRICS.recs[n0:] if r.get('vm') == 'nbci-legacy-x']
+        self.assertEqual(len(recs), 1)
+        self.assertNotIn('nbci-legacy-x', st['vmstat'])      # the re-created bookkeeping entry is still consumed
+
+    def test_given_an_hour_later_then_the_emitted_mark_is_pruned(self):
+        st = fresh_state(); st['vm_emitted'] = {'old': NOW - 7200}
+        nbci.emit_vm(dict(st, vmstat={}), 'none', {}, {}, NOW)    # no bookkeeping entry: nothing written
+        st['vmstat'] = {'nbci-y': {'created': NOW - 60, 'slots': 1, 'vcpu': 2, 'cls': 'gate', 'busy_s': 0, 'idle_s': 0, 'jobs': 0}}
+        by = {c['name']: c for c in nbci.L.load(os.path.join(nbci.CFG, 'runner-labels.json'))['classes']}
+        nbci.emit_vm(st, 'nbci-y', by, nbci.L.load(os.path.join(nbci.CFG, 'runner-labels.json'))['prices_usd'], NOW)
+        self.assertEqual(set(st['vm_emitted']), {'nbci-y'})
