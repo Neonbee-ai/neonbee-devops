@@ -26,7 +26,7 @@ GitHub API budget (App: 5,000 + 50 x (54-20) = 6,700 calls/h; 304 answers are fr
 
 Modes: loop | once | status | drain | build-image | set-hook. DRY_RUN=1 (default) changes nothing.
 """
-import base64, hashlib, hmac, http.server, json, os, sys, threading, time
+import base64, hashlib, hmac, http.server, json, os, subprocess, sys, threading, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -77,6 +77,10 @@ AQA_MAX_S = int(E('AQA_MAX_S', '7200'))
 PULSE_SKIP_CHECKS = set(filter(None, E('PULSE_SKIP_CHECKS', 'Gate').split(',')))   # the aggregate Gate job repeats its parts' failure             # any aqa-* VM (ours or the AQA agent's) older than this is reaped
 
 LOCK = threading.Lock()
+METRICS_BUCKET = E('NBCI_METRICS_BUCKET', 'neonbee-aqa-0521938031')
+STUCK_JOB_S = int(E('NBCI_STUCK_JOB_S', str(L.STUCK_JOB_S)))
+MEM_SAMPLE_S = 600
+METRICS = L.MetricsBuffer(lambda p, b: None)   # main() wires the GCS uploader
 EVENTS = {'jobs': {}, 'done_runners': set(), 'dirty_repos': set(), 'last_event': 0, 'waits': [], 'pushes': [], 'failed': [], 'aqa': []}
 
 
@@ -128,6 +132,11 @@ def on_event(kind, ev):
                 rn = j.get('runner_name') or ''
                 if ev['action'] == 'completed' and rn.startswith(STEM + '-') and not rn.startswith('nbci-ctl-'):
                     EVENTS['done_runners'].add(rn)
+                if ev['action'] == 'completed':
+                    EVENTS.setdefault('jobdone', []).append({
+                        'repo': repo, 'name': j['name'], 'labels': j['labels'], 'runner': rn, 'conclusion': j.get('conclusion'),
+                        'created': ts(j['created_at']), 'started': ts(j['started_at']) if j.get('started_at') else None,
+                        'completed': ts(j['completed_at']) if j.get('completed_at') else None})
                 if ev['action'] == 'completed' and j.get('conclusion') in ('failure', 'cancelled') and rn.startswith(STEM + '-'):
                     EVENTS['failed'].append({'repo': repo, 'job': j['id'], 'run': j['run_id'], 'attempt': j.get('run_attempt', 1),
                                              'name': j['name'], 'conclusion': j['conclusion'], 'runner': rn,
@@ -352,14 +361,16 @@ def refill_slots(gh, gcp, vm, c, refill, scrub, rby, issued):
 
 
 def sweep_disks(gcp):
-    """Unattached disks of ours (label nbci=1) or named nbci-* / aqa-* (any owner), older than 10 min."""
+    """Unattached disks of ours (label nbci=1) or named nbci-* / aqa-* (any owner), older than 10 min.
+    Returns [(name, sizeGb)] of the orphans found (the caller alerts on each)."""
+    found = []
     for z in ZONES:
         for d in gcp.compute('/zones/%s/disks' % z).get('items', []):
-            mine = d.get('labels', {}).get(STEM) == '1' or d['name'].startswith(('nbci-', 'aqa-'))
-            if mine and not d.get('users') and time.time() - ts(d['creationTimestamp']) > 600:
-                log('orphan disk', d['name'], d.get('sizeGb'), 'GB')
+            if L.orphan_disk(d, time.time(), STEM):
+                log('orphan disk', d['name'], d.get('sizeGb'), 'GB'); found.append((d['name'], d.get('sizeGb')))
                 if not DRY:
                     gcp.compute('/zones/%s/disks/%s' % (z, d['name']), 'DELETE')
+    return found
 
 
 def org_var(gh, name, value=None):
@@ -729,6 +740,25 @@ def scrub_jit(gcp, vm):
                 {'fingerprint': md.get('fingerprint'), 'items': items})
 
 
+def serial_samples(gcp, vm, vs):
+    """New nbci-mem samples from the VM's serial console since the last read (offset kept in vs); [] on any failure."""
+    try:
+        d = gcp.compute('/zones/%s/instances/%s/serialPort?port=1&start=%d' % (vm['zone'], vm['name'], vs.get('serial_next', 0)))
+    except Exception as e:
+        log('serial', vm['name'], str(e)[:100]); return []
+    vs['serial_next'] = int(d.get('next') or vs.get('serial_next', 0))
+    return L.parse_mem_lines(d.get('contents', ''))
+
+
+def emit_vm(st, name, byname, prices, now, lost=False, jobs=None):
+    """kind=vm record for a VM that is gone (deleted by us, or lost to GCE); the bookkeeping entry is consumed."""
+    vs = st.setdefault('vmstat', {}).pop(name, None)
+    if not vs:
+        return
+    if jobs is not None: vs['jobs'] = max(vs.get('jobs', 0), jobs)
+    METRICS.add(L.vm_metric(vs, name, byname.get(vs.get('cls'), byname['gate']), prices, now, lost), now)
+
+
 def notify(st, text, key=None, window_s=6 * 3600):
     """One alert per incident: logged, sent to Teams when a webhook is configured, and queued (retried, never
     blocking) as ONE comment on the Pulse task ALERT_TASK. key (default: the text with numbers/ids blanked)
@@ -770,9 +800,14 @@ def tick(gh, gcp, st, mode='scale'):
         dirty, EVENTS['dirty_repos'] = set(EVENTS['dirty_repos']), set()
         failed, EVENTS['failed'] = EVENTS['failed'], []
         passed, EVENTS['passed'] = EVENTS.get('passed', []), []
+        jobdone, EVENTS['jobdone'] = EVENTS.get('jobdone', []), []
     day = st['day'].setdefault(today, {'usd': 0.0, 'vcpu_h': {}, 'jobs': 0, 'waits': [], 'create_fail': 0, 'fallback': 0, 'bypass': 0})
     day.setdefault('vm_min', 0.0)
     day['waits'] = (day['waits'] + waits)[-5000:]
+    for jd in jobdone:
+        if jd['runner'].startswith(STEM + '-') and not jd['runner'].startswith('nbci-ctl-'):
+            c_ = L.class_for(jd['labels'], classes)
+            METRICS.add(L.job_metric(jd, c_ and c_['name'], now), now)
     failures, started = [], False
     try:
         vms = our_vms(gcp); gce_ok = True
@@ -785,6 +820,8 @@ def tick(gh, gcp, st, mode='scale'):
     if not vm_room:
         notify(st, 'daily VM-minutes cap reached: %.0f of %.0f min today; no VM (deploy, gate or AQA) starts until 00:00 UTC. '
                'Raise NB_DAILY_VM_MIN in /etc/nbci.env to lift it.' % (day['vm_min'], DAILY_VM_MIN), key='vmcap' + today, window_s=86400)
+    if L.minutes_warn80(day['vm_min'], DAILY_VM_MIN):
+        notify(st, 'daily VM-minutes at 80%%: %.0f of %.0f min used today' % (day['vm_min'], DAILY_VM_MIN), key='vm80' + today, window_s=86400)
     for v in vms:
         if v['status'] in ('RUNNING', 'STAGING', 'PROVISIONING'):
             c = byname.get(v['cls'], byname['gate'])
@@ -804,7 +841,7 @@ def tick(gh, gcp, st, mode='scale'):
         cur = {v['name'] for v in vms}
         lost = st.setdefault('lost', {})
         for n in L.lost_vms(known, cur, ours, {v['name'] for v in vms if v['status'] in L.DEAD}):
-            lost[n] = now; log('VM lost (preempted?)', n)
+            lost[n] = now; log('VM lost (preempted?)', n); emit_vm(st, n, byname, prices, now, lost=True)
         st['known_vms'] = {v['name']: v['created'] for v in vms if v['status'] in L.LIVE and not v['builder']}
         for d in (ours, lost):
             for k in [k for k, t in d.items() if now - t > 3600]:
@@ -820,12 +857,16 @@ def tick(gh, gcp, st, mode='scale'):
                 log('delete', v['name'], 'builder ' + L.LIFETIME); _safe(gcp.compute, '/zones/%s/instances/%s' % (v['zone'], v['name']), 'DELETE')
             continue
         c_v = byname.get(v['cls'], byname['gate'])
+        vs = st.setdefault('vmstat', {}).setdefault(v['name'], {'created': v['created'], 'slots': v.get('slots', 1), 'vcpu': v['vcpu'],
+                                                                'cls': v['cls'], 'busy_s': 0, 'idle_s': 0, 'jobs': 0})
         if v.get('slots', 1) > 1:            # packed VM: reused while jobs flow, deleted after IDLE_S idle
             c_v = dict(c_v, slots=v['slots'])
             r = L.vm_runners(v, rby)
             fin = [n for n in v['slot_names'].values() if n in done]
             if any(x.get('busy') for x in r) or fin:
                 busy_at[v['name']] = now
+            if mode == 'scale': L.acc_busy(vs, any(x.get('busy') for x in r), dt_h * 3600)
+            vs['jobs'] += len(fin)
             day['jobs'] += len(fin)
             with LOCK:
                 for n in fin: EVENTS['done_runners'].discard(n)
@@ -838,10 +879,14 @@ def tick(gh, gcp, st, mode='scale'):
             why = L.vm_verdict(v, r, v['name'] in done, now, L.NO_JOB_STARTUP_S if RUNNER_BOOT == 'startup' else L.NO_JOB_S,
                                MAX_RUN_S + 900) if mode != 'drain' else 'drain'
             rdesc = r and ('busy' if r['busy'] else r['status'])
+            if mode == 'scale': L.acc_busy(vs, bool(r and r.get('busy')), dt_h * 3600)
         if mode == 'status':
             print('vm   %-34s %-10s %-6s runner=%s delete=%s' % (v['name'], v['status'], v['cls'], rdesc, why))
             live.append(v); continue
+        if why and gce_ok and v['status'] == 'RUNNING' and not DRY:       # last memory peaks, once, before the VM is gone
+            vs['peaks'] = L.fold_peaks(vs.get('peaks'), serial_samples(gcp, v, vs))
         if why and gce_ok and delete_vm(gh, gcp, v, r, why):
+            if v['name'] not in st.get('lost', {}): emit_vm(st, v['name'], byname, prices, now, jobs=1 if why == 'job completed' else None)
             st.setdefault('deleted', {})[v['name']] = now
             with LOCK: EVENTS['done_runners'].discard(v['name'])
             busy_at.pop(v['name'], None)
@@ -849,6 +894,14 @@ def tick(gh, gcp, st, mode='scale'):
             continue
         if v.get('slots', 1) > 1:
             if gce_ok and mode == 'scale' and v['status'] == 'RUNNING':
+                if L.idle_overdue(v, busy_at.get(v['name']), now, IDLE_S):
+                    notify(st, 'VM %s idle > %d s and not deleted (still RUNNING)' % (v['name'], IDLE_S + 120), key='idlevm' + v['name'], window_s=3600)
+                if not DRY and now - vs.get('mem_at', 0) >= MEM_SAMPLE_S:
+                    vs['mem_at'] = now
+                    smp = serial_samples(gcp, v, vs); vs['peaks'] = L.fold_peaks(vs.get('peaks'), smp)
+                    why_mem = L.mem_pressure(smp)
+                    if why_mem:
+                        notify(st, 'memory pressure on %s: %s' % (v['name'], why_mem), key='mem' + v['name'], window_s=3600)
                 refill, scrub = L.slot_actions(v, c_v, rby, done, issued, now, MAX_VM_S, JOB_MAX_S)
                 if refill or scrub:
                     try: refill_slots(gh, gcp, v, c_v, refill, scrub, rby, issued)
@@ -875,6 +928,12 @@ def tick(gh, gcp, st, mode='scale'):
     served = st.setdefault('served', {})
     for k in [k for k, t in served.items() if now - t > 2 * L.SERVE_WINDOW_S]:
         del served[k]
+    live_cls = {v['cls'] for v in live if v['status'] in L.LIVE}
+    stuck = L.stuck_jobs(waiting, served, live_cls, classes, now, STUCK_JOB_S)
+    if stuck:
+        for jid in stuck: served.pop(str(jid), None)
+        EVENTS['need_full_poll'] = True      # re-poll the queue next pass; the cleared marks let it re-buy a VM
+        log('stuck jobs: served mark cleared, VM re-bought next pass', stuck)
     want, serve_ids = L.cap_creates(want, waiting, served, now)
     room = 0
     if mode == 'status':
@@ -925,7 +984,9 @@ def tick(gh, gcp, st, mode='scale'):
         except Exception as e: log('autoqa allowance', e)
     # orphan disks, stale runners
     if gce_ok and every(st, 'disks', 120, now):
-        try: sweep_disks(gcp)
+        try:
+            for dn, gb in sweep_disks(gcp):
+                notify(st, 'orphan disk %s (%s GB) unattached > 10 min, %s' % (dn, gb, 'would delete (DRY)' if DRY else 'deleted'), key='orphandisk' + dn)
         except Exception as e: log('disk sweep', e)
     # sweeper: nbci-* / aqa-* VMs no pool logic owns, and offline registrations whose VM is gone
     all_names = None
@@ -942,6 +1003,7 @@ def tick(gh, gcp, st, mode='scale'):
                 why = L.sweep_verdict(v, vr, now, IDLE_S, L.NO_JOB_STARTUP_S, AQA_MAX_S)
                 if why:
                     log('sweep', v['name'], why)
+                    notify(st, 'orphan VM %s: %s (%s)' % (v['name'], why, 'would delete (DRY)' if DRY else 'deleted'), key='orphanvm' + v['name'])
                     if not DRY:
                         for r in vr:
                             _safe(gh, 'orgs/%s/actions/runners/%s' % (ORG, r['id']), 'DELETE')
@@ -1062,6 +1124,14 @@ def tick(gh, gcp, st, mode='scale'):
         if L.image_build_due(age_d, IMAGE_MAX_AGE_D, st['last'].get('image_build'), now):
             st['last']['image_build'] = now      # one attempt per 20 h: a failing build alerts, it is not retried hourly
             threading.Thread(target=lambda: _safe(build_image, gcp, lambda t: notify(st, t, key='image')), daemon=True).start()
+    # metrics: queue per pass, pass duration; flush at most every 5 min in a thread (never blocks the pass)
+    METRICS.add(L.queue_metric(waiting, classes, now, len(live), sum(pending.values())), now)
+    METRICS.add({'kind': 'pass', 'dur_s': round(time.time() - now, 1)}, now)
+    if METRICS.due(now) and not any(t.name == 'metrics-flush' for t in threading.enumerate()):
+        threading.Thread(target=METRICS.flush, args=(now,), name='metrics-flush', daemon=True).start()
+    live_names = {v['name'] for v in vms}
+    for k in [k for k, x in st.get('vmstat', {}).items() if k not in live_names and now - x.get('created', now) > 6 * 3600]:
+        del st['vmstat'][k]
     # heartbeat + daily report
     try:
         os.makedirs(os.path.dirname(HEARTBEAT_FILE), exist_ok=True); open(HEARTBEAT_FILE, 'w').write(str(int(now)))
@@ -1073,7 +1143,7 @@ def tick(gh, gcp, st, mode='scale'):
         log('heartbeat: mode=%s, %d VMs, %d jobs queued, today $%.2f, %.0f VM-min' % (ci_mode, len(live), len(jobs), day['usd'], day['vm_min']))
     if time.gmtime(now).tm_hour == REPORT_HOUR and every(st, 'report', 20 * 3600, now) and not gh.low():
         report(st, alert, today)
-    if (time.gmtime(now).tm_hour == REPORT_HOUR and every(st, 'redeliver', 20 * 3600, now)) or EVENTS.pop('redeliver_now', False):
+    if every(st, 'redeliver', 1800, now) or EVENTS.pop('redeliver_now', False):     # lost triggers: failed deliveries re-sent every 30 min
         _safe(redeliver, gh, st)
     if every(st, 'dns', 60 if st.get('hook_host') != 'fixed' else 3600, now):
         _safe(set_hook, gh, st)
@@ -1166,9 +1236,15 @@ def notify_systemd(msg):
         except OSError: pass
 
 
+def _ref():
+    try: return subprocess.check_output(['git', '-C', HERE, 'rev-parse', '--short', 'HEAD'], text=True, timeout=5, stderr=subprocess.DEVNULL).strip()
+    except Exception: return 'unknown'
+
+
 def main():
     mode = (sys.argv[1:] or ['loop'])[0]
     gcp = GCP(PROJECT); gh = GitHub(gcp); st = load_state()
+    METRICS.upload = lambda p, b: None if DRY else gcp.storage_upload(METRICS_BUCKET, p, b, 'application/x-ndjson')
     if not E('TEAMS_WEBHOOK'):
         try: os.environ['TEAMS_WEBHOOK'] = gcp.secret('nbci-teams-webhook')
         except Exception: pass
@@ -1194,7 +1270,7 @@ def main():
     except Exception as e:
         log('webhook receiver off (polling only):', e)
     EVENTS['redeliver_now'] = True       # deliveries that failed while we were down (the full poll covers jobs; this covers runs/PRs)
-    notify_systemd('READY=1'); notify(st, 'controller started (DRY_RUN=%d)' % DRY, key='started', window_s=3600)
+    notify_systemd('READY=1'); notify(st, 'controller restarted (ref %s, DRY_RUN=%d)' % (_ref(), DRY), key='started', window_s=60)
     while True:
         t = time.time()
         try: tick(gh, gcp, st)
