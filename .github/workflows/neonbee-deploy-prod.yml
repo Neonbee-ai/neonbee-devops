@@ -449,6 +449,9 @@ jobs:
   gate:
     needs: [route]
     runs-on: ${{ fromJSON(needs.route.outputs.runs_on) }}
+    concurrency:
+      group: nb-prod-${{ github.repository }}-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}-gate
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}   # a new push to the PR supersedes; main runs never share a group
     # Shell's suite (~230s alone) blew the 900s UT ceiling on the shared
     # runner while other deploys ran; it gets 1800s UT / 40 min job.
     timeout-minutes: ${{ inputs.is_shell && 40 || 20 }}
@@ -917,6 +920,9 @@ jobs:
     if: inputs.deploy_type == 'backend' && needs.route.outputs.prior_pass != 'true'
     needs: [route]
     runs-on: ${{ fromJSON(needs.route.outputs.runs_on) }}
+    concurrency:
+      group: nb-prod-${{ github.repository }}-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}-contract-tests
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}   # a new push to the PR supersedes; main runs never share a group
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4.3.1
@@ -1098,6 +1104,9 @@ jobs:
     if: inputs.deploy_type == 'backend' && needs.route.outputs.prior_pass != 'true'
     needs: [route]
     runs-on: ${{ fromJSON(needs.route.outputs.runs_on) }}
+    concurrency:
+      group: nb-prod-${{ github.repository }}-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}-integration-tests
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}   # a new push to the PR supersedes; main runs never share a group
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4.3.1

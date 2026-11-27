@@ -269,8 +269,10 @@ class Controller(unittest.TestCase):
     src = open(os.path.join(ROOT, 'runner', 'controller', 'nbci.py')).read()
 
     def test_every_vm_has_a_90_minute_delete_limit_and_no_service_account(self):
-        self.assertIn("'instanceTerminationAction': 'DELETE', 'maxRunDuration': {'seconds': MAX_RUN_S}", self.src)
+        self.assertIn("'instanceTerminationAction': 'DELETE', 'maxRunDuration': {'seconds': life}", self.src)
+        self.assertIn("life = MAX_VM_S + 900 if slots else MAX_RUN_S", self.src)    # packed VMs: 4 h + 15 min backstop
         self.assertIn("MAX_RUN_S = int(E('MAX_RUN_S', '5400'))", self.src)
+        self.assertIn("MAX_VM_S = int(E('MAX_VM_S', '14400'))", self.src)
         self.assertIn("'serviceAccounts': L.service_accounts(c, PROJECT)", self.src)
 
     def test_dry_run_is_the_default(self):

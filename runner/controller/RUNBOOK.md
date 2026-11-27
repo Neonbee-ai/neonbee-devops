@@ -78,6 +78,17 @@ Merges are `gh pr merge --merge --match-head-commit` as the nb-ci App (never --a
 
 * Resilience: `Restart=always` (nbci, nbci-guard), watchdog cron (heartbeat), full queued-job poll on every start,
   state on disk, failed webhook deliveries redelivered at start and nightly (03 UTC).
+* Packing (Pulse 652ffcd8): classes with `slots` > 1 (today `legacy`: 4 slots on e2-standard-4 Spot) boot stock ubuntu +
+  `runner/image/provision.sh` + `runner/image/slots.sh` (no custom image). Each slot = user `nbs<i>`, own HOME / work dir /
+  private /tmp, no sudo, no metadata access; the controller refills a slot after every job with a fresh one-job JIT
+  config (metadata `jit-<i>`, runner name `slot-<i>`). The VM is reused while jobs flow, deleted after `IDLE_S` (180 s)
+  with no busy slot, hard lifetime `MAX_VM_S` (4 h; no new job after 4 h - `JOB_MAX_S`). Scale-up = live quota
+  (CPUS_ALL_REGIONS, CPUS, IN_USE_ADDRESSES, INSTANCES, SSD_TOTAL_GB) minus `quota.reserve_aqa` (1 VM: 4 vCPU + 1 IP) less
+  what live aqa-* VMs hold. Deploy lanes (`legacy-prod`) stay one job per fresh standard VM.
+  Deploy / roll back the controller code: `runner/controller/nbci-set-ref.sh <sha|main>` (see its header).
+* Sweeper (every 2 min): nbci-* / aqa-* VMs no pool logic owns (never `nbci-controller` or MIG members): stopped, or a
+  registered runner none busy past boot grace + idle window; unattached nbci-labelled or nbci-*/aqa-* disks > 10 min;
+  offline nbci-*/aqa-* registrations whose VM is gone.
 * Reaper (every pass): nbci VMs TERMINATED / job done / no job 5 min after boot / older than 90 min + 15 min
   (hard, busy or not); builder older than 2 h; every `aqa-*` VM TERMINATED or older than 2 h (MIG members excluded);
   unattached nbci disks after 10 min; offline `nbci-*` runner registrations.

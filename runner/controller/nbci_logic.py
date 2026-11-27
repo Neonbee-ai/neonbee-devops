@@ -103,11 +103,16 @@ SERVE_WINDOW_S = 900
 
 
 def cap_creates(want, waiting, served, now, window_s=SERVE_WINDOW_S):
-    """Hard cap: at most one create per queued job per window. served: {job_id: unix time a VM was bought
-    for it}. Returns (want trimmed to the unserved jobs, the job ids those creates will serve)."""
+    """Hard cap: at most one create per queued job per window; a packed VM (class 'slots' > 1) serves that many
+    jobs. served: {job_id: unix time a VM was bought for it}. Returns (want trimmed to the unserved jobs, the job
+    ids those creates will serve)."""
     open_ids = [j['id'] for j in waiting if now - served.get(str(j['id']), 0) >= window_s]
-    n = min(len(want), len(open_ids))
-    return want[:n], open_ids[:n]
+    out, ids = [], []
+    for c in want:
+        if len(ids) >= len(open_ids):
+            break
+        out.append(c); ids += open_ids[len(ids):len(ids) + slots_of(c)]
+    return out, ids
 
 
 LIFETIME = 'older than max lifetime'
@@ -327,16 +332,23 @@ def release_blocking(item, now, stale_s=7200):
 STOCK_IMAGE = 'projects/ubuntu-os-cloud/global/images/family/ubuntu-2404-lts-amd64'
 
 
-def boot_plan(mode, family_link, provision_sh, jit):
+def boot_plan(mode, family_link, provision_sh, jit, slots=None, slots_sh=''):
     """How a job VM boots. 'image': the prebuilt nb-ci-runner family, metadata = the JIT config only.
     'startup': stock ubuntu-2404 (no custom image) that runs runner/image/provision.sh as its
     startup-script, then starts the one-job runner; any provisioning error powers the VM off (the
-    controller deletes it). Returns (sourceImage, metadata items)."""
+    controller deletes it). slots = [(i, runner name, JIT config)] -> a packed VM: always stock ubuntu +
+    startup script (provision.sh, then runner/image/slots.sh starts one nb-slot@i service per slot), metadata
+    jit-<i> (the slot's next one-job config) and slot-<i> (its runner name). Returns (sourceImage, metadata items)."""
+    hdr = '#!/bin/bash\nexport NB_STARTUP=1\ntrap poweroff ERR\n'
+    if slots:
+        items = [{'key': 'jit-%d' % i, 'value': j} for i, _, j in slots] + \
+                [{'key': 'slot-%d' % i, 'value': n} for i, n, _ in slots]
+        script = hdr + provision_sh + '\nexport NB_SLOTS=%d\n' % len(slots) + slots_sh + '\n'
+        return STOCK_IMAGE, items + [{'key': 'startup-script', 'value': script}]
     items = [{'key': 'jit', 'value': jit}]
     if mode != 'startup':
         return family_link, items
-    script = ('#!/bin/bash\nexport NB_STARTUP=1\ntrap poweroff ERR\n' + provision_sh +
-              '\nsystemctl start --no-block nb-runner.service\n')
+    script = (hdr + provision_sh + '\nsystemctl start --no-block nb-runner.service\n')
     return STOCK_IMAGE, items + [{'key': 'startup-script', 'value': script}]
 
 
@@ -356,7 +368,7 @@ def service_accounts(c, project):
 LIVE = ('PROVISIONING', 'STAGING', 'RUNNING')
 
 
-def churn_verdict(vms, runners, queued_by_class, since, now, window_s=300, cap=8):
+def churn_verdict(vms, runners, queued_by_class, since, now, window_s=300, cap=8, grace_s=0):
     """Auto-stop verdict for the controller-side guard. Parallel gate/deploy VMs are normal: a class only
     counts as churning when it has more idle (runner not busy) live VMs than queued jobs of that class, and has
     had for more than one reconcile window. More than `cap` live nbci VMs trips at once. `since` is the guard's
@@ -366,9 +378,11 @@ def churn_verdict(vms, runners, queued_by_class, since, now, window_s=300, cap=8
         return '%d live nbci VMs (cap %d)' % (len(live), cap)
     idle = {}
     for v in live:
-        r = runners.get(v['name'])
-        if not (r and r.get('busy')):
-            idle[v['cls']] = idle.get(v['cls'], 0) + 1
+        if any(r.get('busy') for r in vm_runners(v, runners)):
+            continue
+        if grace_s and now - v.get('created', now) < grace_s:
+            continue            # still booting (startup mode provisions ~10 min); the reaper owns a VM that never takes a job
+        idle[v['cls']] = idle.get(v['cls'], 0) + 1
     over = {c: n - queued_by_class.get(c, 0) for c, n in idle.items() if n > queued_by_class.get(c, 0)}
     for c in list(since):
         if c not in over:
@@ -449,3 +463,193 @@ def aqa_outcome(result, gone_s, grace_s=900):
             return 'not_tested'                 # 0 cases executed: never a pass (alerted like a failure)
         return 'pass' if code == 0 else 'failed (exit %s)' % result['exit']
     return 'wait' if gone_s < grace_s else 'ended without a result'
+
+
+# ── packing (v4): N runner slots per VM, VM reuse, quota-driven scale-up, sweeper ─────────────────
+IDLE_S = 180            # a packed VM with no busy slot for 3 min is deleted (VM + disk)
+SLOT_RE = re.compile(r'^(?P<vm>.+)-s(?P<i>\d+)-[0-9a-z]+$')
+
+
+def slots_of(c):
+    """Runner slots per VM of class c: 1 = today's one-job VM; > 1 = a packed, reused VM."""
+    return max(1, int((c or {}).get('slots', 1)))
+
+
+def packed(c):
+    return slots_of(c) > 1
+
+
+def slot_name(vm, i, now):
+    """Runner name of slot i's next job: unique per refill, <= 64 chars, maps back to its VM (vm_of)."""
+    n, out = int(now * 10) % (36 ** 6), ''
+    while True:
+        n, d = divmod(n, 36); out = '0123456789abcdefghijklmnopqrstuvwxyz'[d] + out
+        if not n:
+            break
+    return '%s-s%d-%s' % (vm, i, out)
+
+
+def vm_of(runner_name, vm_names):
+    """The VM a runner lives on: the VM itself (one-job VM) or the VM of a slot runner; None = no live VM."""
+    if runner_name in vm_names:
+        return runner_name
+    m = SLOT_RE.match(runner_name or '')
+    return m.group('vm') if m and m.group('vm') in vm_names else None
+
+
+def vm_runners(vm, runners):
+    """Runners registered for one VM: its slot runners (packed) or the runner named after it."""
+    names = vm.get('slot_names') or {}
+    if names:
+        return [runners[n] for n in names.values() if n in runners]
+    r = runners.get(vm['name'])
+    return [r] if r else []
+
+
+def capacity(quota, aqa_live=None, reserve=None):
+    """Free room for CI VMs from LIVE quota usage, not a constant. quota: {metric: (limit, usage)} for
+    CPUS_ALL_REGIONS / CPUS / IN_USE_ADDRESSES / INSTANCES / SSD_TOTAL_GB (+ optional cap MAX_VCPU). The AQA
+    reserve (default 1 VM: 4 vCPU + 1 IP) stays free, less what AQA VMs already hold (they are in the usage)."""
+    reserve = reserve or {'vcpu': 4, 'ips': 1}
+    aqa_live = aqa_live or {}
+
+    def free(*ms):
+        xs = [int(quota[m][0] - quota[m][1]) for m in ms if m in quota]
+        return max(0, min(xs)) if xs else 0
+    # E2_CPUS is not used: live usage stays 0 with e2 VMs running (2026-11-27), e2 vCPUs count against CPUS
+    out = {'vcpu': free('CPUS_ALL_REGIONS', 'CPUS'), 'ips': free('IN_USE_ADDRESSES'),
+           'instances': free('INSTANCES'), 'ssd_gb': free('SSD_TOTAL_GB')}
+    if 'MAX_VCPU' in quota:
+        out['vcpu'] = max(0, min(out['vcpu'], int(quota['MAX_VCPU'][0] - quota['CPUS_ALL_REGIONS'][1])))
+    out['vcpu'] = max(0, out['vcpu'] - max(0, reserve.get('vcpu', 0) - aqa_live.get('vcpu', 0)))
+    out['ips'] = max(0, out['ips'] - max(0, reserve.get('ips', 0) - aqa_live.get('ips', 0)))
+    return out
+
+
+def fits(c, room):
+    """One VM of class c fits the room (vCPU, one external IP, one instance, its pd-balanced disk)."""
+    return room['vcpu'] >= c['vcpu'] and room['ips'] >= 1 and room['instances'] >= 1 and \
+        room.get('ssd_gb', 10 ** 6) >= c.get('disk_gb', 30)
+
+
+def take(c, room):
+    return dict(room, vcpu=room['vcpu'] - c['vcpu'], ips=room['ips'] - 1, instances=room['instances'] - 1,
+                ssd_gb=room.get('ssd_gb', 10 ** 6) - c.get('disk_gb', 30))
+
+
+def refill_open(vm, c, now, max_s, job_max_s):
+    """A packed VM takes new jobs only while a job started now still ends before its hard lifetime."""
+    return packed(c) and now - vm['created'] < max_s - job_max_s
+
+
+def free_slots(vm, c, runners, now, max_s, job_max_s):
+    """Supply one live VM offers to waiting jobs: packed = slots not busy while refill is open (else its idle
+    registered runners); one-job VM = 1 while its runner is not busy."""
+    if vm['status'] not in LIVE:
+        return 0
+    rs = vm_runners(vm, runners)
+    busy = sum(1 for r in rs if r.get('busy'))
+    if packed(c):
+        if refill_open(vm, c, now, max_s, job_max_s):
+            return max(0, slots_of(c) - busy)
+        return sum(1 for r in rs if not r.get('busy') and r.get('status') == 'online')
+    return 0 if busy else 1
+
+
+def plan_packed(waiting, supply_by_class, classes):
+    """VMs to buy: per class, ceil((waiting jobs - free slots) / slots). Deploy (priority 0, standard) first."""
+    import math
+    need = {}
+    for j in waiting:
+        c = class_for(j['labels'], classes)
+        if c and c.get('host') != 'controller':
+            need[c['name']] = need.get(c['name'], 0) + 1
+    out = []
+    for c in sorted(classes, key=lambda c: (c.get('priority', 9), bool(c.get('spot')))):
+        n = need.get(c['name'], 0) - supply_by_class.get(c['name'], 0)
+        out += [c] * max(0, int(math.ceil(n / float(slots_of(c)))))
+    return out
+
+
+def pool_verdict(vm, c, rs, last_busy, now, idle_s=IDLE_S, grace_s=NO_JOB_STARTUP_S, max_s=4 * 3600):
+    """Why to delete one packed VM, or None. rs: its registered slot runners; last_busy: last time any slot was
+    seen busy or finished a job (None = never). A busy slot keeps the VM except past the hard lifetime."""
+    if vm['status'] in DEAD:
+        return 'stopped (%s): disk still bills' % vm['status']
+    if now - vm['created'] >= max_s:
+        return LIFETIME + ' (%d min)' % ((now - vm['created']) // 60)
+    if any(r.get('busy') for r in rs):
+        return None
+    if last_busy is None:
+        return 'no job %ds after boot' % (now - vm['created']) if now - vm['created'] >= grace_s else None
+    return 'idle %ds' % (now - last_busy) if now - last_busy >= idle_s else None
+
+
+def slot_actions(vm, c, runners, done, issued, now, max_s, job_max_s, settle_s=60, grace_s=NO_JOB_STARTUP_S):
+    """Per packed VM: (slots to refill with a fresh JIT config, slots whose JIT config can be scrubbed).
+    A slot needs a new config once its one-job runner finished (done event) or is gone from GitHub (ephemeral
+    runners deregister after their job), or never came online within the boot grace, and only while refill is
+    open. issued: {runner name: unix time its config was generated}; a config younger than settle_s is never
+    replaced (listing lag)."""
+    refill, scrub = [], []
+    names = vm.get('slot_names') or {}
+    jits = vm.get('slot_jits') or set()
+    for i in range(1, slots_of(c) + 1):
+        n = names.get(i)
+        r = runners.get(n) if n else None
+        if r and (r.get('busy') or r.get('status') == 'online') and i in jits:
+            scrub.append(i)
+        finished = n is None or n in done or (r is None and now - issued.get(n, 0) >= settle_s)
+        # a config that never came online (runner failed to start) is replaced once the boot grace is over
+        stuck = r is not None and not r.get('busy') and r.get('status') != 'online' and \
+            now - vm['created'] >= grace_s and now - issued.get(n, 0) >= grace_s
+        finished = finished or stuck
+        if finished and refill_open(vm, c, now, max_s, job_max_s):
+            refill.append(i)
+    return refill, scrub
+
+
+def sweep_verdict(vm, runners, now, idle_s=IDLE_S, grace_s=NO_JOB_STARTUP_S, aqa_max_s=7200):
+    """Sweeper for VMs the pool logic does not own (no nbci label: other code, a lost state, the AQA agent):
+    nbci-* / aqa-* only, never the controller or MIG members. Deleted when stopped, or (with a registered
+    runner) no runner busy and older than grace + idle; without a runner, aqa-* after aqa_max_s, nbci-* after
+    grace. vm: {name, status, created, mig}; runners: the registrations that map to this VM."""
+    n = vm['name']
+    if n == 'nbci-controller' or vm.get('mig') or not n.startswith(('nbci-', 'aqa-')):
+        return None
+    if vm['status'] in DEAD:
+        return 'stopped (%s)' % vm['status']
+    age = now - vm['created']
+    if runners:
+        return None if any(r.get('busy') for r in runners) or age < grace_s + idle_s else 'no busy runner %ds' % age
+    if n.startswith('aqa-'):
+        return 'older than %d min' % (aqa_max_s // 60) if age >= aqa_max_s else None
+    return 'unowned nbci VM, no runner, %ds old' % age if age >= grace_s + idle_s else None
+
+
+def stale_runner(r, live_vm_names, now_unused=None):
+    """An offline, idle nbci-*/aqa-* registration whose VM is gone. The controller's own nb-ctl runners never."""
+    n = r['name']
+    if r.get('busy') or r.get('status') != 'offline' or n.startswith('nbci-ctl-') or not n.startswith(('nbci-', 'aqa-')):
+        return False
+    return vm_of(n, live_vm_names) is None
+
+
+
+def vm_name_of(runner_name):
+    """VM of a runner name without a live VM list (the VM may be gone): a slot runner's VM, else the name."""
+    m = SLOT_RE.match(runner_name or '')
+    return m.group('vm') if m else runner_name
+
+
+def lost_vms(known, current, deleted_by_us, stopped):
+    """VMs GCE took back: seen live last pass and now gone without a delete of ours, or found stopped (a Spot
+    preemption with instanceTerminationAction DELETE passes through TERMINATED)."""
+    return sorted((set(known) - set(current) - set(deleted_by_us)) | (set(stopped) & set(known)))
+
+
+def preempt_retry(f, preempted, retried):
+    """Re-run the failed jobs of a run once when the job died with its VM: the runner's VM was preempted (Spot)
+    and the job ended failure/cancelled. Any repo mode; at most once per run (retried: {run id: time})."""
+    return f.get('conclusion') in ('failure', 'cancelled') and vm_name_of(f.get('runner', '')) in preempted \
+        and str(f.get('run')) not in retried and int(f.get('attempt') or 1) == 1

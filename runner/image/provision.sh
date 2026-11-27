@@ -9,28 +9,35 @@ apt-get update -q
 apt-get install -yq git rsync jq curl unzip zip build-essential openssh-client python3 python3-pip python3-venv iptables ca-certificates
 curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -yq nodejs
 NODEV=$(node -v | tr -d v)
-# Node in the Actions tool cache so setup-node finds it instead of downloading it on every job
-mkdir -p /opt/hostedtoolcache/node/$NODEV/x64
-curl -fsSL "https://nodejs.org/dist/v$NODEV/node-v$NODEV-linux-x64.tar.xz" | tar xJ --strip-components=1 -C /opt/hostedtoolcache/node/$NODEV/x64
-touch /opt/hostedtoolcache/node/$NODEV/x64.complete
 id runner >/dev/null 2>&1 || useradd -m -s /bin/bash runner
 echo 'runner ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/runner
-
+# The rest runs as 4 parallel groups (first boot of a packed VM: ~10 min serial). apt users stay in ONE group
+# (apt holds a lock); a failing group fails `wait`, which fails the script (startup mode: trap -> poweroff).
 # versions are pinned (no unauthenticated GitHub REST call: shared GCP IPs hit its rate limit); bump on rebuild
 V=${RUNNER_VERSION:-2.338.2}
-mkdir -p /opt/runner && curl -fsSL "https://github.com/actions/runner/releases/download/v$V/actions-runner-linux-x64-$V.tar.gz" | tar xz -C /opt/runner
-/opt/runner/bin/installdependencies.sh
-echo 'RUNNER_TOOLSDIRECTORY=/opt/hostedtoolcache' >> /opt/runner/.env
+GL=${GITLEAKS_VERSION:-8.30.1}
+( # A (apt): Actions runner + its deps, then Playwright Chromium system deps + browser into the runner's cache
+  mkdir -p /opt/runner && curl -fsSL "https://github.com/actions/runner/releases/download/v$V/actions-runner-linux-x64-$V.tar.gz" | tar xz -C /opt/runner
+  /opt/runner/bin/installdependencies.sh
+  echo 'RUNNER_TOOLSDIRECTORY=/opt/hostedtoolcache' >> /opt/runner/.env
+  npx -y playwright@1 install-deps chromium
+  sudo -u runner -H npx -y playwright@1 install chromium
+) & PA=$!
+( # B: Node in the Actions tool cache so setup-node finds it instead of downloading it on every job
+  mkdir -p /opt/hostedtoolcache/node/$NODEV/x64
+  curl -fsSL "https://nodejs.org/dist/v$NODEV/node-v$NODEV-linux-x64.tar.xz" | tar xJ --strip-components=1 -C /opt/hostedtoolcache/node/$NODEV/x64
+  touch /opt/hostedtoolcache/node/$NODEV/x64.complete
+) & PB=$!
+( # C: gitleaks
+  curl -fsSL "https://github.com/gitleaks/gitleaks/releases/download/v${GL}/gitleaks_${GL}_linux_x64.tar.gz" | tar xz -C /usr/local/bin gitleaks
+) & PC=$!
+( # D: semgrep in a venv: the debian-owned typing_extensions cannot be uninstalled by a system-wide pip (broke every startup-mode boot)
+  python3 -m venv /opt/semgrep && /opt/semgrep/bin/pip install -q semgrep && ln -sf /opt/semgrep/bin/semgrep /usr/local/bin/semgrep
+) & PD=$!
+wait $PA; wait $PB; wait $PC; wait $PD
 chown -R runner: /opt/runner /opt/hostedtoolcache
 
-GL=${GITLEAKS_VERSION:-8.30.1}
-curl -fsSL "https://github.com/gitleaks/gitleaks/releases/download/v${GL}/gitleaks_${GL}_linux_x64.tar.gz" | tar xz -C /usr/local/bin gitleaks
-# venv: the debian-owned typing_extensions cannot be uninstalled by a system-wide pip (broke every startup-mode boot)
-python3 -m venv /opt/semgrep && /opt/semgrep/bin/pip install -q semgrep && ln -sf /opt/semgrep/bin/semgrep /usr/local/bin/semgrep
-
-# Playwright Chromium (system deps as root, browsers into the runner's cache) + warm npm cache
-npx -y playwright@1 install-deps chromium
-sudo -u runner -H npx -y playwright@1 install chromium
+# warm npm cache (image only)
 [ -n "${NB_STARTUP:-}" ] || sudo -u runner -H npm cache add typescript@5 @nestjs/cli@11 vite@5 vite@7 jest@29 eslint@9 @swc/core@1 esbuild@0 \
   vitest@2 ts-node@10 prettier@3 @vitejs/plugin-react@4 @originjs/vite-plugin-federation@1 tailwindcss@3 || true
 

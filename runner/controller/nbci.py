@@ -47,6 +47,12 @@ HEARTBEAT_FILE = E('HEARTBEAT_FILE', '/var/lib/nbci/heartbeat')
 POLL_S, RECONCILE_S = int(E('POLL_S', '30')), int(E('RECONCILE_S', '300'))
 CAP_USD = float(E('NB_DAILY_CAP_USD', '2'))
 MAX_RUN_S = int(E('MAX_RUN_S', '5400'))
+# packed VMs (class "slots" > 1): reused while jobs flow, deleted after IDLE_S without a busy slot; hard lifetime
+# MAX_VM_S (GCE maxRunDuration = MAX_VM_S + 15 min as the backstop); no slot takes a new job after
+# MAX_VM_S - JOB_MAX_S, so a job that starts always finishes before the hard limit
+MAX_VM_S = int(E('MAX_VM_S', '14400'))
+JOB_MAX_S = int(E('JOB_MAX_S', '5400'))
+IDLE_S = int(E('IDLE_S', str(L.IDLE_S)))
 # RUNNER_BOOT=image (prebuilt family) | startup (stock ubuntu + provision.sh as startup-script, no image)
 RUNNER_BOOT = E('RUNNER_BOOT', 'image')
 IMAGE_FAMILY, IMAGE_MAX_AGE_D = E('IMAGE_FAMILY', 'nb-ci-runner'), float(E('IMAGE_MAX_AGE_D', '7'))
@@ -172,12 +178,53 @@ def our_vms(gcp):
     vms = []
     for z in ZONES:
         for v in gcp.compute('/zones/%s/instances?filter=labels.%s%%3D1' % (z, STEM)).get('items', []):
-            lab = v.get('labels', {})
+            lab = v.get('labels', {}); md = v.get('metadata', {}); items = md.get('items', [])
             vms.append({'name': v['name'], 'zone': z, 'status': v['status'], 'created': ts(v['creationTimestamp']),
                         'cls': lab.get('nb-class', 'gate'), 'builder': lab.get('nb-role') == 'builder',
                         'vcpu': int(v['machineType'].rsplit('-', 1)[1]),
-                        'jit': any(i['key'] == 'jit' for i in v.get('metadata', {}).get('items', []))})
+                        'jit': any(i['key'] == 'jit' for i in items),
+                        'slots': int(lab.get('nb-slots', '1') or 1),
+                        'slot_names': {int(i['key'][5:]): i['value'] for i in items if i['key'].startswith('slot-') and i['value']},
+                        'slot_jits': {int(i['key'][4:]) for i in items if i['key'].startswith('jit-') and i.get('value')},
+                        'md_fp': md.get('fingerprint')})
     return vms
+
+
+def all_instances(gcp):
+    """Every instance of the project (one aggregated call): the sweeper's view and AQA's live quota share."""
+    out, tok = [], ''
+    while True:
+        d = gcp.compute('/aggregated/instances?maxResults=500' + ('&pageToken=' + tok if tok else ''))
+        for scope in d.get('items', {}).values():
+            for v in scope.get('instances', []):
+                out.append({'name': v['name'], 'zone': v['zone'].rsplit('/', 1)[1], 'status': v['status'],
+                            'created': ts(v['creationTimestamp']), 'labels': v.get('labels', {}),
+                            'vcpu': int((v['machineType'].rsplit('-', 1)[1]) if v['machineType'].rsplit('-', 1)[1].isdigit() else 2),
+                            'ip': any(a.get('natIP') for n in v.get('networkInterfaces', []) for a in n.get('accessConfigs', [])),
+                            'mig': any(i['key'] == 'created-by' for i in v.get('metadata', {}).get('items', []))})
+        tok = d.get('nextPageToken')
+        if not tok:
+            return out
+
+
+def quota(gcp):
+    """Live quota {metric: (limit, usage)}: the global vCPU cap plus the region's vCPU / E2 / IP / instance / SSD
+    quotas, and the controller's own vCPU ceiling MAX_VCPU."""
+    out = {}
+    for q in gcp.compute('')['quotas']:
+        if q['metric'] == 'CPUS_ALL_REGIONS':
+            out['CPUS_ALL_REGIONS'] = (q['limit'], q['usage'])
+    for q in gcp.compute('/regions/' + REGION)['quotas']:
+        if q['metric'] in ('CPUS', 'IN_USE_ADDRESSES', 'INSTANCES', 'SSD_TOTAL_GB'):
+            out[q['metric']] = (q['limit'], q['usage'])
+    out['MAX_VCPU'] = (int(E('MAX_VCPU', '32')), 0)
+    return out
+
+
+def aqa_usage(insts):
+    """vCPU / external IPs held by live aqa-* VMs (they draw from the AQA reserve first)."""
+    live = [v for v in insts if v['name'].startswith('aqa-') and v['status'] in L.LIVE]
+    return {'vcpu': sum(v['vcpu'] for v in live), 'ips': sum(1 for v in live if v['ip'])}
 
 
 def free_vcpu(gcp):
@@ -195,21 +242,42 @@ def image_link(gcp):
     return gcp.compute('/global/images/family/' + IMAGE_FAMILY)['selfLink']
 
 
-def create_vm(gh, gcp, c, failures, image):
+def gen_jit(gh, name, c):
+    return gh('orgs/%s/actions/runners/generate-jitconfig' % ORG, 'POST',
+              {'name': name, 'runner_group_id': 1, 'labels': c['labels'], 'work_folder': '_work'})
+
+
+def create_vm(gh, gcp, c, failures, image, issued=None):
     name = '%s-%s-%s' % (STEM, c['name'], time.strftime('%m%d%H%M%S', time.gmtime()) + str(int(time.time() * 1000) % 1000))
+    if L.packed(c):
+        name += os.urandom(2).hex()      # several packed VMs can be bought in one pass; names must never collide
+    n_slots = L.slots_of(c)
     if DRY:
-        log('DRY create', name, c['machine'], 'spot' if c['spot'] else 'standard'); return True
-    jit = gh('orgs/%s/actions/runners/generate-jitconfig' % ORG, 'POST',
-             {'name': name, 'runner_group_id': 1, 'labels': c['labels'], 'work_folder': '_work'})
-    sched = {'instanceTerminationAction': 'DELETE', 'maxRunDuration': {'seconds': MAX_RUN_S},
+        log('DRY create', name, c['machine'], 'spot' if c['spot'] else 'standard', 'slots=%d' % n_slots); return True
+    jits, slots = [], None
+    if L.packed(c):          # one JIT config per slot; the controller refills each slot after its job
+        now = time.time(); slots = []
+        try:
+            for i in range(1, n_slots + 1):
+                rn = L.slot_name(name, i, now + i); j = gen_jit(gh, rn, c); jits.append(j)
+                slots.append((i, rn, j['encoded_jit_config']))
+                if issued is not None: issued[rn] = now
+        except RuntimeError as e:
+            log('jit failed', name, str(e)[:160]); _dereg_all(gh, jits); return False
+        jit = None
+    else:
+        jit = gen_jit(gh, name, c); jits = [jit]
+    life = MAX_VM_S + 900 if slots else MAX_RUN_S
+    sched = {'instanceTerminationAction': 'DELETE', 'maxRunDuration': {'seconds': life},
              'automaticRestart': False, 'onHostMaintenance': 'TERMINATE' if c['spot'] else 'MIGRATE'}   # e2 standard (deploy) VMs cannot use TERMINATE
     if c['spot']:
         sched['provisioningModel'] = 'SPOT'
-    prov = open(os.path.join(HERE, '..', 'image', 'provision.sh')).read() if RUNNER_BOOT == 'startup' else ''
-    src, items = L.boot_plan(RUNNER_BOOT, image, prov, jit['encoded_jit_config'])
+    prov = open(os.path.join(HERE, '..', 'image', 'provision.sh')).read() if RUNNER_BOOT == 'startup' or slots else ''
+    slots_sh = open(os.path.join(HERE, '..', 'image', 'slots.sh')).read() if slots else ''
+    src, items = L.boot_plan(RUNNER_BOOT, image, prov, jit and jit['encoded_jit_config'], slots, slots_sh)
     for z in ZONES:
         body = {'name': name, 'machineType': 'zones/%s/machineTypes/%s' % (z, c['machine']),
-                'labels': {STEM: '1', 'nb-class': c['name']}, 'scheduling': sched,
+                'labels': {STEM: '1', 'nb-class': c['name'], 'nb-slots': str(n_slots)}, 'scheduling': sched,
                 'disks': [{'boot': True, 'autoDelete': True, 'initializeParams': {
                     'sourceImage': src, 'diskSizeGb': str(c.get('disk_gb', 30)),
                     'diskType': 'zones/%s/diskTypes/pd-balanced' % z, 'labels': {STEM: '1'}}}],
@@ -218,38 +286,77 @@ def create_vm(gh, gcp, c, failures, image):
                 'serviceAccounts': L.service_accounts(c, PROJECT), 'metadata': {'items': items}}
         try:
             gcp.wait_op(gcp.compute('/zones/%s/instances' % z, 'POST', body), z, 120)
-            log('created', name, c['machine'], z, 'spot' if c['spot'] else 'standard'); return True
+            log('created', name, c['machine'], z, 'spot' if c['spot'] else 'standard', 'slots=%d' % n_slots); return True
         except Exception as e:
             k = L.classify_gce_error(str(e)); failures.append((z, k)); log('create failed', z, k, ' '.join(str(e).split())[:700])
             if k in ('billing', 'quota'):
                 break
-    try: gh('orgs/%s/actions/runners/%s' % (ORG, jit['runner']['id']), 'DELETE')
-    except RuntimeError: pass
+    _dereg_all(gh, jits)
     return False
 
 
+def _dereg_all(gh, jits):
+    for j in jits:
+        try: gh('orgs/%s/actions/runners/%s' % (ORG, j['runner']['id']), 'DELETE')
+        except RuntimeError: pass
+
+
 def delete_vm(gh, gcp, vm, runner, why):
-    """Never kills a running job: a busy runner keeps its VM, and the runner is deregistered first
-    (GitHub refuses with 422 if it took a job in the meantime)."""
+    """Never kills a running job: a busy runner keeps its VM, and every runner of the VM (one, or one per slot
+    of a packed VM) is deregistered first (GitHub refuses with 422 if it took a job in the meantime)."""
     hard = why.startswith(L.LIFETIME)
-    if runner and runner.get('busy') and vm['status'] not in L.DEAD and why != 'job completed' and not hard:
+    rs = runner if isinstance(runner, list) else [runner] if runner else []
+    if any(r.get('busy') for r in rs) and vm['status'] not in L.DEAD and why != 'job completed' and not hard:
         return False
     log('delete', vm['name'], why)
     if DRY:
         return True
-    if runner and vm['status'] not in L.DEAD and why != 'job completed':
-        try: gh('orgs/%s/actions/runners/%s' % (ORG, runner['id']), 'DELETE')
-        except RuntimeError as e:
-            if ' 404 ' not in str(e) and not hard:
-                log('keep', vm['name'], 'runner took a job'); return False
+    if vm['status'] not in L.DEAD and why != 'job completed':
+        for r in rs:
+            try: gh('orgs/%s/actions/runners/%s' % (ORG, r['id']), 'DELETE')
+            except RuntimeError as e:
+                if ' 404 ' not in str(e) and not hard:
+                    log('keep', vm['name'], 'runner %s took a job' % r['name']); return False
     gcp.compute('/zones/%s/instances/%s' % (vm['zone'], vm['name']), 'DELETE')
     return True
 
 
+def refill_slots(gh, gcp, vm, c, refill, scrub, rby, issued):
+    """One setMetadata per packed VM: a fresh one-job JIT config for each finished slot (its old registration
+    removed if still listed), and the JIT config of slots whose runner is online scrubbed from metadata."""
+    if DRY:
+        log('DRY slots', vm['name'], 'refill', refill, 'scrub', scrub); return
+    i_ = gcp.compute('/zones/%s/instances/%s' % (vm['zone'], vm['name']))
+    md = i_.get('metadata', {}); items = {x['key']: x.get('value', '') for x in md.get('items', [])}
+    now = time.time(); made = []
+    for i in refill:
+        old = rby.get(items.get('slot-%d' % i, ''))
+        if old and old.get('busy'):
+            continue
+        if old:
+            try: gh('orgs/%s/actions/runners/%s' % (ORG, old['id']), 'DELETE')
+            except RuntimeError as e:
+                if ' 404 ' not in str(e): continue      # it took a job meanwhile
+        rn = L.slot_name(vm['name'], i, now + i)
+        j = gen_jit(gh, rn, c); issued[rn] = now; made.append(j)
+        items['jit-%d' % i], items['slot-%d' % i] = j['encoded_jit_config'], rn
+    for i in scrub:
+        if i not in refill:
+            items['jit-%d' % i] = ''
+    try:
+        gcp.compute('/zones/%s/instances/%s/setMetadata' % (vm['zone'], vm['name']), 'POST',
+                    {'fingerprint': md.get('fingerprint'), 'items': [{'key': k, 'value': v} for k, v in items.items()]})
+    except Exception:
+        _dereg_all(gh, made); raise
+    if refill: log('slots refilled', vm['name'], refill)
+
+
 def sweep_disks(gcp):
+    """Unattached disks of ours (label nbci=1) or named nbci-* / aqa-* (any owner), older than 10 min."""
     for z in ZONES:
-        for d in gcp.compute('/zones/%s/disks?filter=labels.%s%%3D1' % (z, STEM)).get('items', []):
-            if not d.get('users') and time.time() - ts(d['creationTimestamp']) > 600:
+        for d in gcp.compute('/zones/%s/disks' % z).get('items', []):
+            mine = d.get('labels', {}).get(STEM) == '1' or d['name'].startswith(('nbci-', 'aqa-'))
+            if mine and not d.get('users') and time.time() - ts(d['creationTimestamp']) > 600:
                 log('orphan disk', d['name'], d.get('sizeGb'), 'GB')
                 if not DRY:
                     gcp.compute('/zones/%s/disks/%s' % (z, d['name']), 'DELETE')
@@ -691,24 +798,62 @@ def tick(gh, gcp, st, mode='scale'):
             st['alerted'][key] = now
             alert('CI spend today $%.2f of $%.2f cap (%s)%s' % (day['usd'], CAP_USD, lvl,
                   ': only deploy VMs start until 00:00 UTC' if lvl == 'capped' else ''))
-    # deletions (job done / no job in 5 min / stopped) -- idempotent
+    # VMs lost to GCE (Spot preemption: TERMINATED or gone without our delete) -> their failed jobs are re-run once
+    if gce_ok and mode == 'scale':
+        known, ours = st.setdefault('known_vms', {}), st.setdefault('deleted', {})
+        cur = {v['name'] for v in vms}
+        lost = st.setdefault('lost', {})
+        for n in L.lost_vms(known, cur, ours, {v['name'] for v in vms if v['status'] in L.DEAD}):
+            lost[n] = now; log('VM lost (preempted?)', n)
+        st['known_vms'] = {v['name']: v['created'] for v in vms if v['status'] in L.LIVE and not v['builder']}
+        for d in (ours, lost):
+            for k in [k for k, t in d.items() if now - t > 3600]:
+                del d[k]
+    # deletions (job done / no job in 5 min / stopped; packed: idle 3 min / lifetime) -- idempotent
     live = []
+    busy_at = st.setdefault('busy_at', {}); issued = st.setdefault('issued', {})
+    for k in [k for k, t in issued.items() if now - t > MAX_VM_S + 3600]:
+        del issued[k]
     for v in vms:
         if v['builder']:
             if mode == 'scale' and gce_ok and now - v['created'] > 7200 and not DRY:      # builder backstop (normal build < 40 min)
                 log('delete', v['name'], 'builder ' + L.LIFETIME); _safe(gcp.compute, '/zones/%s/instances/%s' % (v['zone'], v['name']), 'DELETE')
             continue
-        r = rby.get(v['name'])
-        why = L.vm_verdict(v, r, v['name'] in done, now, L.NO_JOB_STARTUP_S if RUNNER_BOOT == 'startup' else L.NO_JOB_S,
-                           MAX_RUN_S + 900) if mode != 'drain' else 'drain'
+        c_v = byname.get(v['cls'], byname['gate'])
+        if v.get('slots', 1) > 1:            # packed VM: reused while jobs flow, deleted after IDLE_S idle
+            c_v = dict(c_v, slots=v['slots'])
+            r = L.vm_runners(v, rby)
+            fin = [n for n in v['slot_names'].values() if n in done]
+            if any(x.get('busy') for x in r) or fin:
+                busy_at[v['name']] = now
+            day['jobs'] += len(fin)
+            with LOCK:
+                for n in fin: EVENTS['done_runners'].discard(n)
+            done -= set(fin)
+            why = L.pool_verdict(v, c_v, r, busy_at.get(v['name']), now, IDLE_S, L.NO_JOB_STARTUP_S, MAX_VM_S) \
+                if mode != 'drain' else 'drain'
+            rdesc = '%d/%d busy' % (sum(1 for x in r if x.get('busy')), v['slots'])
+        else:
+            r = rby.get(v['name'])
+            why = L.vm_verdict(v, r, v['name'] in done, now, L.NO_JOB_STARTUP_S if RUNNER_BOOT == 'startup' else L.NO_JOB_S,
+                               MAX_RUN_S + 900) if mode != 'drain' else 'drain'
+            rdesc = r and ('busy' if r['busy'] else r['status'])
         if mode == 'status':
-            print('vm   %-34s %-10s %-6s runner=%s delete=%s' % (v['name'], v['status'], v['cls'],
-                  r and ('busy' if r['busy'] else r['status']), why))
+            print('vm   %-34s %-10s %-6s runner=%s delete=%s' % (v['name'], v['status'], v['cls'], rdesc, why))
             live.append(v); continue
         if why and gce_ok and delete_vm(gh, gcp, v, r, why):
+            st.setdefault('deleted', {})[v['name']] = now
             with LOCK: EVENTS['done_runners'].discard(v['name'])
+            busy_at.pop(v['name'], None)
             if why == 'job completed': day['jobs'] += 1
             continue
+        if v.get('slots', 1) > 1:
+            if gce_ok and mode == 'scale' and v['status'] == 'RUNNING':
+                refill, scrub = L.slot_actions(v, c_v, rby, done, issued, now, MAX_VM_S, JOB_MAX_S)
+                if refill or scrub:
+                    try: refill_slots(gh, gcp, v, c_v, refill, scrub, rby, issued)
+                    except Exception as e: log('slots', v['name'], str(e)[:160])
+            live.append(v); continue
         # JIT config leaves metadata only once the runner is ONLINE: a JIT runner is listed (offline) the moment its
         # config is generated, and a startup-mode VM reads the config ~10 min later, after provisioning. Scrubbing on
         # "listed" powered every startup-mode VM off before it could register (2026-11-27).
@@ -719,10 +864,14 @@ def tick(gh, gcp, st, mode='scale'):
     if mode == 'drain':
         return
     # demand -> VMs (one per job), priority + quota + spend cap
-    idle_names = {r['name'] for r in rs if r['status'] == 'online' and not r['busy']}
-    pending = L.pending_by_class(live, rby, now, L.NO_JOB_STARTUP_S if RUNNER_BOOT == 'startup' else L.NO_JOB_S)
+    single = [v for v in live if v.get('slots', 1) <= 1]
+    pending = L.pending_by_class(single, rby, now, L.NO_JOB_STARTUP_S if RUNNER_BOOT == 'startup' else L.NO_JOB_S)
+    for v in live:
+        if v.get('slots', 1) > 1:
+            c_v = dict(byname.get(v['cls'], byname['gate']), slots=v['slots'])
+            pending[v['cls']] = pending.get(v['cls'], 0) + L.free_slots(v, c_v, rby, now, MAX_VM_S, JOB_MAX_S)
     waiting = [j for j in jobs if now - j['created'] >= 3]
-    want = L.plan(waiting, pending, classes)
+    want = L.plan_packed(waiting, pending, classes)
     served = st.setdefault('served', {})
     for k in [k for k, t in served.items() if now - t > 2 * L.SERVE_WINDOW_S]:
         del served[k]
@@ -736,23 +885,28 @@ def tick(gh, gcp, st, mode='scale'):
             ci_mode, [c['name'] for c in want], day['usd'], spend, st['fallback'], gh.remaining))
         return
     # VMs only ever serve auto-lane labels (nb-auto / nb-deploy): legacy repos' jobs match no class.
+    insts = None
     if want and gce_ok:
         try:
-            room = free_vcpu(gcp); image = image_link(gcp)
+            insts = all_instances(gcp)
+            cap = L.capacity(quota(gcp), aqa_usage(insts), cfg['quota'].get('reserve_aqa'))
+            image = image_link(gcp) if any(not L.packed(c) for c in want) else L.STOCK_IMAGE
         except Exception as e:
-            room, image = 0, None; failures.append(('-', L.classify_gce_error(str(e))))
+            cap, image = {'vcpu': 0, 'ips': 0, 'instances': 0, 'ssd_gb': 0}, None; failures.append(('-', L.classify_gce_error(str(e))))
+        room = cap['vcpu']
         reserve = cfg['quota']['reserve_deploy_vcpu']
         for c in want:
-            if image and vm_room and L.may_start(c, spend, room, reserve):
-                if create_vm(gh, gcp, c, failures, image):
-                    started = True; room -= c['vcpu']
-                    if serve_ids: served[str(serve_ids.pop(0))] = now
+            if image and vm_room and L.fits(c, cap) and L.may_start(c, spend, cap['vcpu'], reserve):
+                if create_vm(gh, gcp, c, failures, image, issued):
+                    started = True; cap = L.take(c, cap); room = cap['vcpu']
+                    for _ in range(L.slots_of(c)):
+                        if serve_ids: served[str(serve_ids.pop(0))] = now
                 else:
                     day['create_fail'] += 1
                     kinds = ','.join(sorted({k for _, k in failures})) or 'api'
                     notify(st, 'VM create failed: class %s (%s) in every zone tried; its jobs wait for the next pass or the fallback runner'
                            % (c['name'], kinds), key='create' + c['name'] + kinds)
-            elif spend != 'capped' and room < c['vcpu'] and not any(v['status'] == 'RUNNING' for v in live):
+            elif spend != 'capped' and not L.fits(c, cap) and not any(v['status'] == 'RUNNING' for v in live):
                 failures.append(('-', 'quota'))          # nothing of ours running, yet no room: someone else holds it
     if gce_ok and every(st, 'aqa-reap', 120, now):
         try:
@@ -773,10 +927,34 @@ def tick(gh, gcp, st, mode='scale'):
     if gce_ok and every(st, 'disks', 120, now):
         try: sweep_disks(gcp)
         except Exception as e: log('disk sweep', e)
-    names = {v['name'] for v in live}
+    # sweeper: nbci-* / aqa-* VMs no pool logic owns, and offline registrations whose VM is gone
+    all_names = None
+    if gce_ok and every(st, 'sweep', 120, now):
+        try:
+            insts = insts if insts is not None else all_instances(gcp)
+            all_names = {v['name'] for v in insts}
+            mine = {v['name'] for v in vms}
+            for v in insts:
+                if v['name'] in mine or (v['name'].startswith('aqa-') and v['name'] not in rby and not any(
+                        L.vm_of(r['name'], {v['name']}) for r in rs)):
+                    continue             # ours: pool/one-job verdicts above; runner-less aqa-*: reap_aqa
+                vr = [r for r in rs if L.vm_of(r['name'], {v['name']})]
+                why = L.sweep_verdict(v, vr, now, IDLE_S, L.NO_JOB_STARTUP_S, AQA_MAX_S)
+                if why:
+                    log('sweep', v['name'], why)
+                    if not DRY:
+                        for r in vr:
+                            _safe(gh, 'orgs/%s/actions/runners/%s' % (ORG, r['id']), 'DELETE')
+                        _safe(gcp.compute, '/zones/%s/instances/%s' % (v['zone'], v['name']), 'DELETE')
+        except Exception as e: log('sweep', str(e)[:160])
+    names = all_names if all_names is not None else {v['name'] for v in vms}
     for r in rs:
-        if r['status'] == 'offline' and not r['busy'] and r['name'].startswith(STALE) and r['name'] not in names \
-                and not r['name'].startswith('nbci-ctl-'):
+        # aqa-* registrations only on a sweep pass (the full instance list); nbci-* every pass (our VMs suffice)
+        stale = L.stale_runner(r, names) and (all_names is not None or not r['name'].startswith('aqa-'))
+        if not HANDS_OFF and not stale:
+            stale = r['status'] == 'offline' and not r['busy'] and r['name'].startswith(STALE) and \
+                L.vm_of(r['name'], names) is None and not r['name'].startswith('nbci-ctl-')
+        if stale:
             log('deregister offline runner', r['name'])
             if not DRY:
                 try: gh('orgs/%s/actions/runners/%s' % (ORG, r['id']), 'DELETE')
@@ -824,9 +1002,20 @@ def tick(gh, gcp, st, mode='scale'):
     def released(tid, note):
         pq._put('status', task=tid, status=E('PULSE_RELEASED_STATUS', 'released')); pq._put('comment', task=tid, text=note)
     rel_state = st['release']
+    # Spot preemption: a VM taken back by GCE kills every job on it (4 on a packed VM); re-run them once, any repo mode
+    if failed:
+        pre = set(st.get('lost', {}))
+        for f in failed:
+            if L.preempt_retry(f, pre, rel_state.setdefault('retried', {})):
+                log('preemption retry', f['repo'], f['name'], f['run'], L.vm_name_of(f['runner']))
+                rel_state['retried'][str(f['run'])] = now
+                if not DRY:
+                    _safe(gh, 'repos/%s/%s/actions/runs/%s/rerun-failed-jobs' % (ORG, f['repo'], f['run']), 'POST', {})
     # flaky-infra retry for any failed job on an nb-ci runner (push runs too), once per run
     for f in failed:
         try:
+            if str(f['run']) in rel_state.get('retried', {}) and now - rel_state['retried'][str(f['run'])] < 60:
+                continue        # just re-run for a preemption
             if repo_mode(gh, st, f['repo'], ci_mode, now) != 'auto':
                 continue
             text = job_log(gh, ORG, f['repo'], f['job'])
