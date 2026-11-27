@@ -18,7 +18,8 @@ class NotifyRunsOnTest(unittest.TestCase):
         for f in FILES:
             blk = notify_block((WF / f).read_text())
             self.assertTrue(blk, f)
-            self.assertIn("runs-on: [self-hosted, nb-route]", blk, f)
+            # legacy repos: nb-route (controller runners or a free packed slot); NB_CI_MODE=auto: nb-ctl
+            self.assertRegex(blk, r"runs-on: (\[self-hosted, nb-route\]|.*fromJSON\('\[\"self-hosted\",\"nb-route\"\]'\))", f)
             self.assertNotIn("runner-vm", blk, f)
 
 

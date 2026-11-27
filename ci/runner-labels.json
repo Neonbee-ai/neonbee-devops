@@ -110,9 +110,10 @@
         "lane-burst",
         "contabo",
         "browsers",
-        "aqa-coord"
+        "aqa-coord",
+        "nb-route"
       ],
-      "_doc": "Legacy lanes (repos not on NB_CI_MODE=auto), packed (2026-11-27, Pulse 652ffcd8): 4 one-job runner slots per e2-standard-4 Spot VM, each its own user/HOME/work dir/private /tmp, no sudo; the VM is reused while jobs flow and deleted after 3 min idle (hard lifetime 4 h). Measured: a job VM averaged 27% of 4 vCPU (p90 62%), so 4 jobs fill one VM; 6 VMs = 24 slots inside 32 vCPU / 8 IPs less the controller and the AQA reserve.",
+      "_doc": "Legacy lanes (repos not on NB_CI_MODE=auto), packed (2026-11-27, Pulse 652ffcd8). nb-route: a free slot of a live packed VM also takes route/notify/Gate-summary jobs (curl/jq, the same secrets the slot's deploy jobs already get), so they never queue behind the 2 controller runners; class_for still maps a bare nb-route job to 'control', so it never buys a VM.4 one-job runner slots per e2-standard-4 Spot VM, each its own user/HOME/work dir/private /tmp, no sudo; the VM is reused while jobs flow and deleted after 3 min idle (hard lifetime 4 h). Measured: a job VM averaged 27% of 4 vCPU (p90 62%), so 4 jobs fill one VM; 6 VMs = 24 slots inside 32 vCPU / 8 IPs less the controller and the AQA reserve.",
       "slots": 4
     },
     {

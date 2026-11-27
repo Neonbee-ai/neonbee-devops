@@ -76,6 +76,24 @@ class SlotMath(unittest.TestCase):
         self.assertEqual((len(out), ids), (1, [1]))
 
 
+class ControllerChoke(unittest.TestCase):
+    """Route/notify/Gate-summary jobs must not queue behind the 2 controller runners (30-45 min, 2026-11-27)."""
+
+    def test_given_a_bare_nb_route_job_then_it_never_buys_a_vm(self):
+        self.assertEqual(L.class_for(['self-hosted', 'nb-route'], CLS).get('host'), 'controller')
+        self.assertEqual(L.plan_packed(jobs(5, ['self-hosted', 'nb-route']), {}, CLS), [])
+
+    def test_given_a_live_packed_vm_then_its_slots_can_also_take_nb_route_jobs(self):
+        self.assertIn('nb-route', LEGACY['labels'])
+        self.assertNotIn('nb-route', PROD['labels'])      # deploy lanes stay one job per fresh VM
+
+    def test_given_the_controller_then_the_loop_outranks_its_runner_jobs(self):
+        b = open(os.path.join(ROOT, 'runner', 'controller', 'bootstrap.sh')).read()
+        self.assertIn('CPUWeight=1000', b)
+        self.assertIn('CPUWeight=20', b)
+        self.assertNotIn('try-restart "actions.runner', b)   # never kill a running job to apply limits
+
+
 class Supply(unittest.TestCase):
     def test_given_a_packed_vm_with_one_busy_slot_then_three_slots_are_supply(self):
         v = pvm(); rs = online(*v['slot_names'].values(), busy=(v['slot_names'][1],))

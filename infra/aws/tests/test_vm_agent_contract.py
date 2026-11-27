@@ -55,7 +55,8 @@ class VmAgentContractTest(unittest.TestCase):
             self.assertNotIn(banned, names)
 
     def test_given_real_catalog_when_read_then_excludes_internal_tools_vm_and_mobility_apps(self):
-        names = [s["name"] for s in json.loads(read("vm-agent", "services.json"))["services"]]
+        # shell-fe-tools (tools.neonbee.app) moved to AWS on purpose (#152); the Internal Tools VM apps stay out
+        names = [s["name"] for s in json.loads(read("vm-agent", "services.json"))["services"] if s["name"] != "shell-fe-tools"]
         for n in names:
             for banned in ("command", "website", "tools", "mobility"):
                 self.assertNotIn(banned, n)
