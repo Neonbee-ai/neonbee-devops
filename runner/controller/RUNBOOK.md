@@ -49,6 +49,12 @@ Every alert is one comment on Pulse `71b8be5b` starting with `[nbci]`. Deduped p
 | `budget "nbci project budget": N%` | monthly project budget (INR 6000) 50/90/100 % |
 | `AQA failed (exit N)` / `ended without a result` | the AQA VM's `<evidence>/result.json` says exit != 0, or none 15 min after the VM went; evidence.tgz next to it |
 | `AQA VM ... reaped` | an aqa-* VM outlived `AQA_MAX_S` (2 h) |
+| `controller restarted (ref ...)` | `nbci` started (crash, update, reboot); once per start |
+| `controller updated A -> B` / `update to B FAILED health check: rolled back` | auto-update result; a failed sha is written to `/var/lib/nbci/bad-ref` and not retried |
+| `VM ... idle > N s and not deleted` | a packed VM had no busy slot for `IDLE_S` + 2 min yet is RUNNING: the delete failed |
+| `memory pressure on VM` | packed VM: available memory < 10 % or swap used > 2048 MB (sampled every 10 min from the serial console) |
+| `orphan disk ...` / `orphan VM ...` | the sweeper found (and, outside DRY_RUN, deleted) an nbci-/aqa- disk or VM nothing owns |
+| `daily VM-minutes at 80%` | 80 % of `NB_DAILY_VM_MIN` used today (the $ cap warns at 50/80/100 %) |
 | `weekly image build failed` | runner VMs keep the previous `nb-ci-runner` image; retried after 20 h |
 
 CI failures of a PR (not infra) go to the PR's Pulse task(s) from the commit trailers: comment, status `fixing`,
@@ -74,10 +80,28 @@ Merges are `gh pr merge --merge --match-head-commit` as the nb-ci App (never --a
 | Cloudflare (`CF_PREVIEW_API_TOKEN`) | GitHub org secret only (used by the `ops/nbci-dns` workflow) | none |
 | `aqa-*` | AQA secrets, read only by SA `aqa-runner` (IAM condition `aqa-` prefix) | none |
 
+## Self-heal, auto-update, metrics (Pulse 652ffcd8)
+
+* Auto-update: `nbci-update.timer` (every 10 min) runs `nbci_update.py`: when instance metadata `nbci-ref` is a branch
+  (`main` = follow main) and it has a new sha, `bootstrap.sh` moves `/opt/nbci/src` and restarts `nbci`/`nbci-guard`;
+  health = `nbci` active + `/healthz` 200 + loop heartbeat written after the restart and < 3 min old (waits up to 5 min).
+  Failure: sha -> `/var/lib/nbci/bad-ref`, automatic rollback to the previous sha, alert. A 40-char sha in `nbci-ref` pins it.
+  Logs: `journalctl -u nbci-update`. Manual move: `nbci-set-ref.sh <sha|main>` (also sets the scheduling below).
+* Controller VM survives GCE events (run once, idempotent; also run by `nbci-set-ref.sh`, never by the controller):
+  `gcloud compute instances set-scheduling nbci-controller --zone us-central1-a --project gen-lang-client-0521938031 --restart-on-failure --maintenance-policy=MIGRATE`
+* Stuck jobs: a queued job > 20 min (`NBCI_STUCK_JOB_S`) of a served class with a VM bought but none live is re-bought
+  next pass (served mark cleared + full queue re-poll). Failed webhook deliveries are redelivered every 30 min.
+* Metrics (groundwork, no UI): JSONL in `gs://neonbee-aqa-0521938031/metrics/nbci/<YYYY-MM-DD>/<kind>-<HHMM>.jsonl`, batched,
+  one object per kind per flush (<= every 5 min, in a thread; create-only, no overwrite). Kinds: `vm` (vm, class, slots,
+  created, deleted, busy_min, idle_min, jobs, cost_usd, spot_lost, peak_mem_mb, peak_load), `job` (repo, job, labels, class,
+  runner, queued_s, run_s, conclusion), `queue` (t, queued_by_class, oldest_s, live_vms, free_slots), `pass` (t, dur_s).
+  Needs the controller SA to create objects under `metrics/` (it already creates `aqa/*.tgz` bundles in that bucket).
+  Not written while `DRY_RUN=1`. Records buffered in memory are lost on a restart.
+
 ## Moving parts and their guards
 
 * Resilience: `Restart=always` (nbci, nbci-guard), watchdog cron (heartbeat), full queued-job poll on every start,
-  state on disk, failed webhook deliveries redelivered at start and nightly (03 UTC).
+  state on disk, failed webhook deliveries redelivered at start and every 30 min.
 * Packing (Pulse 652ffcd8): classes with `slots` > 1 (today `legacy`: 4 slots on e2-standard-4 Spot) boot stock ubuntu +
   `runner/image/provision.sh` + `runner/image/slots.sh` (no custom image). Each slot = user `nbs<i>`, own HOME / work dir /
   private /tmp, no sudo, no metadata access; the controller refills a slot after every job with a fresh one-job JIT

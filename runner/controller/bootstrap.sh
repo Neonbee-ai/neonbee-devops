@@ -6,7 +6,7 @@ set -uo pipefail
 MD=http://metadata.google.internal/computeMetadata/v1
 md() { curl -sf -m 5 -H 'Metadata-Flavor: Google' "$MD/$1"; }
 attr() { md "instance/attributes/$1"; }
-P=$(md project/project-id); REF=$(attr nbci-ref || echo main)
+P=$(md project/project-id); REF=${NBCI_REF_OVERRIDE:-$(attr nbci-ref || echo main)}
 APP=$(attr nbci-app-id || true); INST=$(attr nbci-installation-id || true)
 export DEBIAN_FRONTEND=noninteractive
 [ "$0" = /opt/nbci-bootstrap.sh ] || { md instance/attributes/startup-script > /opt/nbci-bootstrap.sh && chmod 700 /opt/nbci-bootstrap.sh; } || true
@@ -47,6 +47,7 @@ gh_token() {
 }
 TOKEN=; [ -n "$APP" ] && [ -n "$INST" ] && { TOKEN=$(gh_token) || TOKEN=; }; [ "$TOKEN" = null ] && TOKEN=
 SRC=/opt/nbci/src
+OLD_SHA=$(git -C $SRC rev-parse HEAD 2>/dev/null || true)
 if [ -n "$TOKEN" ]; then
   if [ -d $SRC/.git ]; then git -C $SRC fetch -q "https://x-access-token:$TOKEN@github.com/Neonbee-ai/neonbee-devops.git" "$REF" && git -C $SRC checkout -q -f FETCH_HEAD
   else mkdir -p /opt/nbci && git clone -q --depth 50 -b "$REF" "https://x-access-token:$TOKEN@github.com/Neonbee-ai/neonbee-devops.git" $SRC; fi
@@ -54,6 +55,14 @@ if [ -n "$TOKEN" ]; then
   # bash reads this file while it runs: after a checkout, re-run the NEW bootstrap once (2026-11-27 a deploy kept
   # the old unit files until a second run)
   [ -n "${NBCI_REEXEC:-}" ] || NBCI_REEXEC=1 exec "$SRC/runner/controller/bootstrap.sh" "$@"
+fi
+# nbci-update.timer (every 10 min): only move when the ref has a new sha that did not already fail its health check
+if [ "${NBCI_ONLY_IF_CHANGED:-}" = 1 ]; then
+  NEW_SHA=$(git -C $SRC rev-parse HEAD 2>/dev/null || true)
+  if [ -z "$NEW_SHA" ] || [ "$NEW_SHA" = "$OLD_SHA" ] || [ "$NEW_SHA" = "$(cat /var/lib/nbci/bad-ref 2>/dev/null)" ]; then
+    [ -n "$OLD_SHA" ] && [ "$NEW_SHA" != "$OLD_SHA" ] && git -C $SRC checkout -q -f "$OLD_SHA"
+    exit 0
+  fi
 fi
 if [ ! -f $SRC/runner/controller/nbci.py ]; then
   # No App key / ids yet (or GitHub down): nothing to run. Retry every 15 min from cron, exit 0 so
@@ -101,6 +110,29 @@ Nice=-5
 WantedBy=multi-user.target
 U
 install -m 644 /opt/nbci/src/runner/controller/nbci-guard.service /etc/systemd/system/nbci-guard.service
+# Auto-update (Pulse 652ffcd8): every 10 min nbci_update.py moves the controller to the new sha of nbci-ref (a branch
+# name such as main; a pinned sha never moves), health-checks it and rolls back + alerts when it fails.
+cat > /etc/systemd/system/nbci-update.service <<'U'
+[Unit]
+Description=nb-ci controller auto-update (follow nbci-ref, health check, rollback)
+After=network-online.target
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/nbci.env
+ExecStart=/usr/bin/flock -n /run/nbci-boot.lock /usr/bin/python3 /opt/nbci/src/runner/controller/nbci_update.py
+TimeoutStartSec=1500
+Nice=10
+U
+cat > /etc/systemd/system/nbci-update.timer <<'U'
+[Unit]
+Description=nb-ci controller auto-update every 10 min
+[Timer]
+OnBootSec=10min
+OnUnitInactiveSec=10min
+AccuracySec=30s
+[Install]
+WantedBy=timers.target
+U
 # Night train (overnight develop->main release train, runs only here). Metadata nbci-night-train
 # off|dry|live (default off), nbci-nt-deadline (ISO UTC; the train stops after it), nbci-nt-aqa-repos (comma list).
 cat > /etc/night-train.env <<ENV
@@ -164,7 +196,7 @@ cat > /etc/cron.d/nbci <<'CRON'
 17 4 * * * root /opt/nbci/src/runner/controller/bootstrap.sh >/var/log/nbci-update.log 2>&1
 CRON
 systemctl daemon-reload
-systemctl enable --now caddy nbci nbci-guard
+systemctl enable --now caddy nbci nbci-guard nbci-update.timer
 if grep -qE "^NT_MODE=(dry|live)$" /etc/night-train.env; then systemctl enable --now night-train.timer; else systemctl disable --now night-train.timer 2>/dev/null || true; fi
 caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null 2>&1 &&
   { systemctl reload caddy || systemctl restart caddy; } || echo 'nbci: Caddyfile invalid - webhook down, polling only'

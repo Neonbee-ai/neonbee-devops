@@ -672,3 +672,174 @@ def preempt_retry(f, preempted, retried):
     and the job ended failure/cancelled. Any repo mode; at most once per run (retried: {run id: time})."""
     return f.get('conclusion') in ('failure', 'cancelled') and vm_name_of(f.get('runner', '')) in preempted \
         and str(f.get('run')) not in retried and int(f.get('attempt') or 1) == 1
+
+
+# ── self-heal, metrics and alert helpers (Pulse 652ffcd8) ────────────────────────────────────────────
+STUCK_JOB_S = 1200       # a queued job older than this with a class we serve and no live VM of that class is re-bought
+
+
+def stuck_jobs(waiting, served, live_classes, classes, now, stuck_s=STUCK_JOB_S):
+    """Ids of queued jobs whose 'served' mark must be cleared so the next pass buys a VM again: older than stuck_s,
+    served by one of our classes (not a controller-hosted one), a VM was already bought for them (mark present) yet
+    no live VM of their class exists (it was preempted, died or never registered)."""
+    out = []
+    for j in waiting:
+        c = class_for(j['labels'], classes)
+        if not c or c.get('host') == 'controller' or now - j['created'] < stuck_s:
+            continue
+        if str(j['id']) in served and c['name'] not in live_classes:
+            out.append(j['id'])
+    return out
+
+
+def orphan_disk(d, now, stem='nbci', min_age_s=600):
+    """True for an unattached disk of ours (label stem=1) or named nbci-* / aqa-*, older than min_age_s."""
+    mine = d.get('labels', {}).get(stem) == '1' or d['name'].startswith(('nbci-', 'aqa-'))
+    return bool(mine and not d.get('users') and now - ts(d['creationTimestamp']) > min_age_s)
+
+
+def minutes_warn80(used, cap):
+    """True from 80 % of the daily VM-minutes cap up to (not including) the cap itself."""
+    return cap > 0 and 0.8 * cap <= used < cap
+
+
+def idle_overdue(vm, busy_at, now, idle_s, grace_s=120):
+    """A packed RUNNING VM that has had no busy slot for idle_s + grace_s (since its last busy time, else its
+    creation) and is still there: the delete did not happen."""
+    if vm.get('status') != 'RUNNING' or vm.get('slots', 1) <= 1:
+        return False
+    since = max(busy_at or 0, 0) or vm['created']
+    return now - since >= idle_s + grace_s
+
+
+MEM_RE = re.compile(r'nbci-mem (\d\d:\d\d:\d\d) mem_total=(\d+) used=(\d+) avail=(\d+)(?: swap_used=(\d+))? load=([\d.]+) busy=(\d+)')
+
+
+def parse_mem_lines(text):
+    """Samples from serial console text: {t, total, used, avail, swap, load, busy} (MB, load, busy slots)."""
+    out = []
+    for m in MEM_RE.finditer(text or ''):
+        out.append({'t': m.group(1), 'total': int(m.group(2)), 'used': int(m.group(3)), 'avail': int(m.group(4)),
+                    'swap': int(m.group(5) or 0), 'load': float(m.group(6)), 'busy': int(m.group(7))})
+    return out
+
+
+def fold_peaks(peaks, samples):
+    """Running peaks of one VM: {mem, load, swap, avail_pct_min}; samples from parse_mem_lines."""
+    p = dict(peaks or {})
+    for s in samples:
+        p['mem'] = max(p.get('mem', 0), s['used']); p['load'] = max(p.get('load', 0.0), s['load'])
+        p['swap'] = max(p.get('swap', 0), s['swap'])
+        pct = 100.0 * s['avail'] / s['total'] if s['total'] else 100.0
+        p['avail_pct_min'] = min(p.get('avail_pct_min', 100.0), pct)
+    return p
+
+
+def mem_pressure(samples, min_avail_pct=10.0, max_swap_mb=2048):
+    """Reason string when the latest sample shows memory pressure (avail < 10 % of total or swap_used > 2048 MB)."""
+    if not samples:
+        return None
+    s = samples[-1]
+    if s['total'] and 100.0 * s['avail'] / s['total'] < min_avail_pct:
+        return 'available memory %d of %d MB (< %d%%)' % (s['avail'], s['total'], min_avail_pct)
+    if s['swap'] > max_swap_mb:
+        return 'swap used %d MB (> %d)' % (s['swap'], max_swap_mb)
+    return None
+
+
+def acc_busy(stat, busy, dt_s):
+    """Add dt_s seconds to a VM's busy or idle account (stat = {'busy_s', 'idle_s'})."""
+    k = 'busy_s' if busy else 'idle_s'
+    stat[k] = stat.get(k, 0) + max(0, dt_s)
+    return stat
+
+
+def vm_metric(stat, name, c, prices, now, spot_lost=False):
+    """kind=vm record of a VM that is gone. stat: controller bookkeeping (created, slots, vcpu, busy_s, idle_s, jobs,
+    peaks); c: its class dict."""
+    created = stat.get('created', now)
+    hrs = max(0, now - created) / 3600.0
+    pk = stat.get('peaks') or {}
+    return {'kind': 'vm', 'vm': name, 'class': c.get('name'), 'slots': stat.get('slots', 1), 'created': int(created),
+            'deleted': int(now), 'busy_min': round(stat.get('busy_s', 0) / 60.0, 1), 'idle_min': round(stat.get('idle_s', 0) / 60.0, 1),
+            'jobs': stat.get('jobs', 0), 'cost_usd': round(hourly_usd(dict(c, vcpu=stat.get('vcpu', c.get('vcpu', 0))), prices) * hrs, 4),
+            'spot_lost': bool(spot_lost), 'peak_mem_mb': pk.get('mem'), 'peak_load': pk.get('load')}
+
+
+def job_metric(j, cls_name, now):
+    """kind=job record from a workflow_job completed webhook payload dict (created_at/started_at/completed_at epoch)."""
+    started = j.get('started') or j['created']
+    return {'kind': 'job', 'repo': j['repo'], 'job': j['name'], 'labels': j['labels'], 'class': cls_name,
+            'runner': j.get('runner', ''), 'queued_s': int(max(0, started - j['created'])),
+            'run_s': int(max(0, (j.get('completed') or now) - started)), 'conclusion': j.get('conclusion')}
+
+
+def queue_metric(waiting, classes, now, live_vms, free_slots):
+    by = {}
+    for j in waiting:
+        c = class_for(j['labels'], classes)
+        k = c['name'] if c else 'other'
+        by[k] = by.get(k, 0) + 1
+    return {'kind': 'queue', 't': int(now), 'queued_by_class': by,
+            'oldest_s': int(max([now - j['created'] for j in waiting] or [0])), 'live_vms': live_vms, 'free_slots': free_slots}
+
+
+def metrics_path(kind, now):
+    """metrics/nbci/<YYYY-MM-DD>/<kind>-<HHMM>.jsonl (UTC)."""
+    g = time.gmtime(now)
+    return 'metrics/nbci/%s/%s-%s.jsonl' % (time.strftime('%Y-%m-%d', g), kind, time.strftime('%H%M', g))
+
+
+class MetricsBuffer:
+    """Buffers records in memory; flush() uploads one object per kind (create-only) at most every interval_s and
+    never raises: on failure the records go back (capped). upload(path, bytes) is injected (GCS in production)."""
+
+    def __init__(self, upload, interval_s=300, cap=20000):
+        self.upload, self.interval_s, self.cap = upload, interval_s, cap
+        self.recs, self.last = [], 0.0
+        import threading
+        self.lock = threading.Lock()
+
+    def add(self, rec, now=None):
+        rec.setdefault('t', int(now or time.time()))
+        with self.lock:
+            self.recs.append(rec)
+            if len(self.recs) > self.cap:
+                del self.recs[:len(self.recs) - self.cap]
+
+    def due(self, now):
+        return bool(self.recs) and now - self.last >= self.interval_s
+
+    def flush(self, now):
+        with self.lock:
+            if not self.due(now):
+                return 0
+            batch, self.recs, self.last = self.recs, [], now
+        by = {}
+        for r in batch:
+            by.setdefault(r['kind'], []).append(r)
+        sent, back = 0, []
+        for kind, rs in by.items():
+            try:
+                self.upload(metrics_path(kind, now), ('\n'.join(json.dumps(r, separators=(',', ':')) for r in rs) + '\n').encode())
+                sent += len(rs)
+            except Exception:
+                back += rs
+        with self.lock:
+            self.recs = (back + self.recs)[-self.cap:]
+        return sent
+
+
+def health_ok(heartbeat, started, now, healthz_code, active, max_age_s=180):
+    """After an update: nbci active, /healthz 200 and a loop heartbeat written after the restart and < 3 min old."""
+    return bool(active) and healthz_code == 200 and heartbeat >= started and now - heartbeat <= max_age_s
+
+
+def update_action(ref, old, new, bad):
+    """What the 10-min updater does. ref: nbci-ref metadata; old/new: current and fetched sha; bad: sha that failed
+    health before. 'pinned' = ref is a sha (never auto-moves); 'skip' = nothing new or known bad; 'update'."""
+    if re.fullmatch(r'[0-9a-f]{40}', ref or ''):
+        return 'pinned'
+    if not new or new == old or new == bad:
+        return 'skip'
+    return 'update'
