@@ -3,6 +3,7 @@ import importlib.util
 import json
 import os
 import pathlib
+import re
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -175,11 +176,17 @@ class InventoryAndCertTest(unittest.TestCase):
             cc.origin_cert([FakeCF([])], "neonbee.app", "-----BEGIN PRIVATE KEY-----", dry_run=True)
 
 
+ROUTE_LANE = ("${{ vars.NB_CI_MODE == 'auto' && fromJSON('[\"self-hosted\",\"nb-ctl\"]') "
+              "|| fromJSON('[\"self-hosted\",\"nb-route\"]') }}")
+
+
 class WorkflowTest(unittest.TestCase):
     def test_given_workflow_when_read_then_it_is_dispatch_only_on_nb_route_and_dry_run_by_default(self):
         self.assertIn("workflow_dispatch:", WF)
         self.assertNotIn("push:", WF)
-        self.assertIn("[self-hosted, nb-route]", WF)
+        # NB_CI_MODE=auto -> controller lane (nb-ctl); otherwise the legacy nb-route lane.
+        self.assertIn("runs-on: " + ROUTE_LANE, WF)
+        self.assertEqual(len(re.findall(r"runs-on: (.*)", WF)), 1)
         self.assertRegex(WF, r"dry_run:[\s\S]*?default: true")
         for a in ("inventory", "origin-cert", "dns-switch", "dns-revert"):
             self.assertIn(a, WF)
