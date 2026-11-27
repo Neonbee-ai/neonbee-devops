@@ -1,0 +1,10 @@
+{
+  "_doc": "Merge order for a multi-repo release on the nb-ci merge train (base main). A repo in group N merges only after every queued main PR of groups < N has merged and its main runs are green. Repos not listed join the 'frontends' group. develop follows each repo's green main automatically.",
+  "groups": [
+    { "name": "core", "repos": ["so360-core", "so360-subscription-be"] },
+    { "name": "backends", "match": "-be$|-api$|^so360-storefront-api$" },
+    { "name": "frontends", "match": "-fe$|-web-fe$", "default": true },
+    { "name": "shell", "repos": ["so360-shell-fe"] },
+    { "name": "devops", "repos": ["neonbee-devops"] }
+  ]
+}

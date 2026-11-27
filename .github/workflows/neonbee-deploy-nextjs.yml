@@ -114,13 +114,16 @@ jobs:
   # a label on both Contabo runner-vm and burst runners, so whichever is free first takes them.
   # gcp-burst.sh watch flips NB_BURST to off when org active jobs drop below the threshold.
   route:
-    runs-on: [self-hosted, nb-route]
+    runs-on: ${{ vars.NB_CI_MODE == 'auto' && fromJSON('["self-hosted","nb-ctl"]') || fromJSON('["self-hosted","nb-route"]') }}
     timeout-minutes: 3
     outputs:
       runs_on: ${{ steps.r.outputs.runs_on }}
+      # deploy jobs: standard (non-Spot) nb-ci VMs in auto mode, a preemption cannot leave a partial deploy
+      deploy_runs_on: ${{ vars.NB_CI_MODE == 'auto' && '["self-hosted","nb-deploy"]' || steps.r.outputs.runs_on }}
     steps:
       - id: r
         env:
+          CI_MODE: ${{ vars.NB_CI_MODE }}
           MODE: ${{ vars.NB_BURST }}
           GH_TOKEN: ${{ github.token }}
           BRANCH: ${{ github.head_ref || github.ref_name }}
@@ -174,6 +177,9 @@ jobs:
               *)       lane='["self-hosted","lane-burst"]' ;;
             esac
           fi
+          # NB_CI_MODE=auto (repo variable overrides the org one): this repo's jobs go ONLY to nb-ci GCP
+          # VMs (label nb-auto, never carried by legacy runners), so auto and legacy repos never share runners.
+          if [ "${CI_MODE:-}" = auto ]; then lane='["self-hosted","nb-auto"]'; why="NB_CI_MODE=auto - nb-ci GCP runner"; fi
           echo "runs_on=$lane" >> "$GITHUB_OUTPUT"
           echo "lane: $lane ($why)" >> "$GITHUB_STEP_SUMMARY"
 
@@ -478,7 +484,7 @@ jobs:
     needs: [route, gate, security]
     # Linux only: the Mac Mini gate runners also carry `contabo` (they run the
     # gate), but this job builds + rsyncs to the VMs and assumes a Linux host.
-    runs-on: ${{ fromJSON(needs.route.outputs.runs_on) }}
+    runs-on: ${{ fromJSON(needs.route.outputs.deploy_runs_on) }}
     concurrency:
       group: neonbee-deploy-${{ inputs.service_name }}-${{ github.ref_name }}
       cancel-in-progress: false
@@ -873,9 +879,12 @@ jobs:
   notify:
     timeout-minutes: 5
     name: Notify Teams
+    # Never gates anything: a failed or lost notify must not turn the run red or skip the caller's
+    # deploy-aws job (2026-11-26: accounting-fe + folio-fe kept old CDN files).
+    continue-on-error: true
     needs: [gate, security, build-deploy]
     if: always()
-    runs-on: [self-hosted, nb-route]
+    runs-on: ${{ vars.NB_CI_MODE == 'auto' && fromJSON('["self-hosted","nb-ctl"]') || fromJSON('["self-hosted","nb-route"]') }}
     steps:
       - name: Post pipeline result to Teams
         env:

@@ -138,13 +138,16 @@ jobs:
   # a label on both Contabo runner-vm and burst runners, so whichever is free first takes them.
   # gcp-burst.sh watch flips NB_BURST to off when org active jobs drop below the threshold.
   route:
-    runs-on: [self-hosted, nb-route]
+    runs-on: ${{ vars.NB_CI_MODE == 'auto' && fromJSON('["self-hosted","nb-ctl"]') || fromJSON('["self-hosted","nb-route"]') }}
     timeout-minutes: 3
     outputs:
       runs_on: ${{ steps.r.outputs.runs_on }}
+      # deploy jobs: standard (non-Spot) nb-ci VMs in auto mode, a preemption cannot leave a partial deploy
+      deploy_runs_on: ${{ vars.NB_CI_MODE == 'auto' && '["self-hosted","nb-deploy"]' || steps.r.outputs.runs_on }}
     steps:
       - id: r
         env:
+          CI_MODE: ${{ vars.NB_CI_MODE }}
           MODE: ${{ vars.NB_BURST }}
           GH_TOKEN: ${{ github.token }}
           BRANCH: ${{ github.head_ref || github.ref_name }}
@@ -198,6 +201,9 @@ jobs:
               *)       lane='["self-hosted","lane-burst"]' ;;
             esac
           fi
+          # NB_CI_MODE=auto (repo variable overrides the org one): this repo's jobs go ONLY to nb-ci GCP
+          # VMs (label nb-auto, never carried by legacy runners), so auto and legacy repos never share runners.
+          if [ "${CI_MODE:-}" = auto ]; then lane='["self-hosted","nb-auto"]'; why="NB_CI_MODE=auto - nb-ci GCP runner"; fi
           echo "runs_on=$lane" >> "$GITHUB_OUTPUT"
           echo "lane: $lane ($why)" >> "$GITHUB_STEP_SUMMARY"
 
@@ -511,7 +517,7 @@ jobs:
     needs: [route, gate, security]
     # Linux only: the Mac Mini gate runners also carry `contabo` (they run the
     # gate), but this job builds + rsyncs to the VMs and assumes a Linux host.
-    runs-on: ${{ fromJSON(needs.route.outputs.runs_on) }}
+    runs-on: ${{ fromJSON(needs.route.outputs.deploy_runs_on) }}
     timeout-minutes: 20
     concurrency:
       group: neonbee-deploy-${{ inputs.service_name }}-${{ github.ref_name }}
@@ -552,6 +558,24 @@ jobs:
             ${{ secrets.DIGITALOCEAN_SSH_KEY }}
 
       # Build on Contabo runner — dist/ generated here, never on target VM
+      - name: Restore npm cache (GCS)
+        if: vars.NB_NPM_CACHE_BUCKET != '' && env.NB_NPM_CACHE_OBJ == ''
+        continue-on-error: true
+        env:
+          BUCKET: ${{ vars.NB_NPM_CACHE_BUCKET }}
+        run: |
+          # Private bucket, us-central1, 14-day lifecycle. The token file is written at boot by the runner VM
+          # (read-only service account on gate VMs, read-write on deploy VMs); no token = no cache, never an error.
+          [ -s /run/nb-gcs-token ] && [ -f package-lock.json ] || { echo "npm cache: no token or lockfile - skipped"; exit 0; }
+          key="$(sha256sum package-lock.json | cut -c1-32)-node$(node -p 'process.versions.node.split(".")[0]')"
+          obj="npm%2F${GITHUB_REPOSITORY//\//__}%2F$key.tgz"
+          echo "NB_NPM_CACHE_OBJ=$obj" >> "$GITHUB_ENV"
+          mkdir -p "$NPM_CONFIG_CACHE"
+          if curl -sfL -H "Authorization: Bearer $(cat /run/nb-gcs-token)" "https://storage.googleapis.com/storage/v1/b/$BUCKET/o/$obj?alt=media" | tar xz -C "$NPM_CONFIG_CACHE"; then
+            echo "NB_NPM_CACHE_HIT=1" >> "$GITHUB_ENV"; echo "npm cache: hit $key"
+          else
+            rm -rf "$NPM_CONFIG_CACHE"; mkdir -p "$NPM_CONFIG_CACHE"; echo "npm cache: miss $key"
+          fi
       - name: Install + build (dev)
         if: github.ref == 'refs/heads/develop'
         run: |
@@ -804,6 +828,24 @@ jobs:
           cp .env .env.production.local
           npm run build
 
+      - name: Restore npm cache (GCS)
+        if: vars.NB_NPM_CACHE_BUCKET != '' && env.NB_NPM_CACHE_OBJ == ''
+        continue-on-error: true
+        env:
+          BUCKET: ${{ vars.NB_NPM_CACHE_BUCKET }}
+        run: |
+          # Private bucket, us-central1, 14-day lifecycle. The token file is written at boot by the runner VM
+          # (read-only service account on gate VMs, read-write on deploy VMs); no token = no cache, never an error.
+          [ -s /run/nb-gcs-token ] && [ -f package-lock.json ] || { echo "npm cache: no token or lockfile - skipped"; exit 0; }
+          key="$(sha256sum package-lock.json | cut -c1-32)-node$(node -p 'process.versions.node.split(".")[0]')"
+          obj="npm%2F${GITHUB_REPOSITORY//\//__}%2F$key.tgz"
+          echo "NB_NPM_CACHE_OBJ=$obj" >> "$GITHUB_ENV"
+          mkdir -p "$NPM_CONFIG_CACHE"
+          if curl -sfL -H "Authorization: Bearer $(cat /run/nb-gcs-token)" "https://storage.googleapis.com/storage/v1/b/$BUCKET/o/$obj?alt=media" | tar xz -C "$NPM_CONFIG_CACHE"; then
+            echo "NB_NPM_CACHE_HIT=1" >> "$GITHUB_ENV"; echo "npm cache: hit $key"
+          else
+            rm -rf "$NPM_CONFIG_CACHE"; mkdir -p "$NPM_CONFIG_CACHE"; echo "npm cache: miss $key"
+          fi
       - name: Install + build (staging)
         if: github.ref == 'refs/heads/qa'
         run: |
@@ -1038,6 +1080,18 @@ jobs:
           npm run build
 
       # ── Dev ──────────────────────────────────────────────────────────────
+      - name: Save npm cache (GCS, develop/main, on miss)
+        if: always() && vars.NB_NPM_CACHE_BUCKET != '' && env.NB_NPM_CACHE_OBJ != '' && env.NB_NPM_CACHE_HIT != '1' && (github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main')
+        continue-on-error: true
+        env:
+          BUCKET: ${{ vars.NB_NPM_CACHE_BUCKET }}
+        run: |
+          # Only deploy VMs hold a read-write token; on a gate VM the upload is refused (403) and ignored.
+          [ -s /run/nb-gcs-token ] && [ -n "$(ls -A "$NPM_CONFIG_CACHE" 2>/dev/null)" ] || exit 0
+          tar czf - -C "$NPM_CONFIG_CACHE" . | curl -sf -X POST -H "Authorization: Bearer $(cat /run/nb-gcs-token)" \
+            -H 'Content-Type: application/gzip' --data-binary @- \
+            "https://storage.googleapis.com/upload/storage/v1/b/$BUCKET/o?uploadType=media&name=$NB_NPM_CACHE_OBJ" >/dev/null \
+            && echo "npm cache: saved" || echo "npm cache: save refused or failed (ignored)"
       - name: Deploy to Dev
         if: github.ref == 'refs/heads/develop'
         env:
@@ -1138,6 +1192,31 @@ jobs:
             " 2>/dev/null || true
           fi
 
+      - name: AQA bundle
+        # Contract pending from the AQA agent: neonbee-qa aqa/bundle.sh builds the bundle for this sha; the nb-ci
+        # controller's deploy->AQA trigger names it in the AQA VM metadata (aqa-bundle = aqa-bundle-<sha>).
+        # Off until the org/repo variable NB_AQA_BUNDLE is 'true'; never fails the deploy.
+        if: success() && vars.NB_AQA_BUNDLE == 'true' && (github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main')
+        continue-on-error: true
+        env:
+          QA_TOKEN: ${{ secrets.PAT_TOKEN }}
+        run: |
+          rm -rf "$RUNNER_TEMP/neonbee-qa" "$RUNNER_TEMP/aqa-bundle"; mkdir -p "$RUNNER_TEMP/aqa-bundle"
+          git clone -q --depth=1 "https://x-access-token:${QA_TOKEN}@github.com/Neonbee-ai/neonbee-qa.git" "$RUNNER_TEMP/neonbee-qa"
+          if [ -f "$RUNNER_TEMP/neonbee-qa/aqa/bundle.sh" ]; then
+            bash "$RUNNER_TEMP/neonbee-qa/aqa/bundle.sh" "$GITHUB_SHA" "$RUNNER_TEMP/aqa-bundle"
+          else
+            echo "::warning::neonbee-qa aqa/bundle.sh not found - no AQA bundle for $GITHUB_SHA"
+          fi
+      - name: Upload AQA bundle
+        if: success() && vars.NB_AQA_BUNDLE == 'true' && hashFiles(format('{0}/aqa-bundle/**', runner.temp)) != ''
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: aqa-bundle-${{ github.sha }}
+          path: ${{ runner.temp }}/aqa-bundle
+          retention-days: 14
+
       - name: Push build metrics
         if: always()
         continue-on-error: true
@@ -1162,9 +1241,12 @@ jobs:
   notify:
     timeout-minutes: 5
     name: Notify Teams
+    # Never gates anything: a failed or lost notify must not turn the run red or skip the caller's
+    # deploy-aws job (2026-11-26: accounting-fe + folio-fe kept old CDN files).
+    continue-on-error: true
     needs: [gate, security, build-deploy]
     if: always()
-    runs-on: [self-hosted, nb-route]
+    runs-on: ${{ vars.NB_CI_MODE == 'auto' && fromJSON('["self-hosted","nb-ctl"]') || fromJSON('["self-hosted","nb-route"]') }}
     steps:
       - name: Post pipeline result to Teams
         env:

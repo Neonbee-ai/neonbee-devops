@@ -1,0 +1,13 @@
+[Unit]
+Description=nb-ci churn guard (stops nbci when VMs outnumber queued jobs)
+After=network-online.target nbci.service
+Wants=network-online.target
+[Service]
+User=root
+EnvironmentFile=/etc/nbci.env
+ExecStart=/usr/bin/python3 /opt/nbci/src/runner/controller/nbci_guard.py
+Restart=always
+RestartSec=15
+MemoryMax=200M
+[Install]
+WantedBy=multi-user.target

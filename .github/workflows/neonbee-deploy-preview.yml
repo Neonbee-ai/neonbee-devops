@@ -229,13 +229,16 @@ jobs:
   # a label on both Contabo runner-vm and burst runners, so whichever is free first takes them.
   # gcp-burst.sh watch flips NB_BURST to off when org active jobs drop below the threshold.
   route:
-    runs-on: [self-hosted, nb-route]
+    runs-on: ${{ vars.NB_CI_MODE == 'auto' && fromJSON('["self-hosted","nb-ctl"]') || fromJSON('["self-hosted","nb-route"]') }}
     timeout-minutes: 3
     outputs:
       runs_on: ${{ steps.r.outputs.runs_on }}
+      # deploy jobs: standard (non-Spot) nb-ci VMs in auto mode, a preemption cannot leave a partial deploy
+      deploy_runs_on: ${{ vars.NB_CI_MODE == 'auto' && '["self-hosted","nb-deploy"]' || steps.r.outputs.runs_on }}
     steps:
       - id: r
         env:
+          CI_MODE: ${{ vars.NB_CI_MODE }}
           MODE: ${{ vars.NB_BURST }}
           GH_TOKEN: ${{ github.token }}
           BRANCH: ${{ github.head_ref || github.ref_name }}
@@ -289,6 +292,9 @@ jobs:
               *)       lane='["self-hosted","lane-burst"]' ;;
             esac
           fi
+          # NB_CI_MODE=auto (repo variable overrides the org one): this repo's jobs go ONLY to nb-ci GCP
+          # VMs (label nb-auto, never carried by legacy runners), so auto and legacy repos never share runners.
+          if [ "${CI_MODE:-}" = auto ]; then lane='["self-hosted","nb-auto"]'; why="NB_CI_MODE=auto - nb-ci GCP runner"; fi
           echo "runs_on=$lane" >> "$GITHUB_OUTPUT"
           echo "lane: $lane ($why)" >> "$GITHUB_STEP_SUMMARY"
 
@@ -353,12 +359,39 @@ jobs:
             echo "App: https://$label.$PREVIEW_DOMAIN"
           fi
 
-  build-deploy:
+  # A failing commit never deploys: the preview waits for the PR Gate of the SAME sha. Gate absent after the grace
+  # window (a branch with no PR) = no gate exists to wait for, so the preview proceeds as it always did.
+  gate-ok:
     needs: [route, check]
+    if: needs.check.outputs.run == 'true'
+    runs-on: ${{ vars.NB_CI_MODE == 'auto' && fromJSON('["self-hosted","nb-ctl"]') || fromJSON('["self-hosted","nb-route"]') }}
+    timeout-minutes: 25
+    steps:
+      - name: Wait for the PR Gate of this sha
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN || github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          deadline=$((SECONDS + 1380)); seen=0
+          while [ $SECONDS -lt $deadline ]; do
+            row=$(gh api "repos/$REPO/commits/$SHA/check-runs?per_page=100" --jq '[.check_runs[]|select(.name=="gate / Gate" or .name=="Gate")]|sort_by(.id)|last|"\(.status) \(.conclusion // "")"' 2>/dev/null || true)
+            case "$row" in
+              "completed success") echo "PR Gate passed for $SHA"; exit 0;;
+              completed*) echo "::error::PR Gate for $SHA ended '$row' - the preview does not deploy a commit whose gate failed"; exit 1;;
+              ""|null*) seen=$((seen + 1)); [ $seen -ge 8 ] && { echo "::notice::no PR Gate for $SHA after 2 min - no PR to gate, deploying"; exit 0; };;
+              *) seen=0;;
+            esac
+            sleep 15
+          done
+          echo "::error::PR Gate for $SHA did not finish in 23 min"; exit 1
+
+  build-deploy:
+    needs: [route, check, gate-ok]
     if: needs.check.outputs.run == 'true'
     # The runner VM only: the Mac Minis are reserved for autonomous QA and the
     # Dev VM never builds (it only receives dist).
-    runs-on: ${{ fromJSON(needs.route.outputs.runs_on) }}
+    runs-on: ${{ fromJSON(needs.route.outputs.deploy_runs_on) }}
     timeout-minutes: 25
     # Latest push wins: a newer push to the same branch cancels this one.
     concurrency:

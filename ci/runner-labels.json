@@ -1,0 +1,202 @@
+{
+  "_doc": "THE canonical runner config (nb-ci controller, scripts/ci/mini-runner-labels.sh, tests). Isolation: auto repos (NB_CI_MODE=auto, repo variable overrides org) route to nb-auto / nb-deploy / nb-ctl, labels no legacy runner carries; legacy repos keep runner-vm / nb-route on today's runners, so neither side can take the other's jobs. One ephemeral VM per job, first class whose labels contain all of the job's labels. The fallback runner gets fallback_labels ADDED (its own labels untouched) only while GCP cannot start VMs. Mac Mini CI labels (ci_labels) are removed only after every repo is auto. 2026-11-27: Mac Minis removed from CI; legacy lanes are served by classes legacy/legacy-prod, nb-route by the controller's nb-ctl runners.",
+  "ci_labels": [
+    "runner-vm",
+    "nb-route",
+    "nb-pool",
+    "lane-burst",
+    "lane-dev",
+    "lane-prod",
+    "contabo",
+    "browsers"
+  ],
+  "classes": [
+    {
+      "name": "control",
+      "host": "controller",
+      "labels": [
+        "self-hosted",
+        "Linux",
+        "X64",
+        "nb-ctl",
+        "nb-route"
+      ],
+      "_doc": "route + notify jobs of auto repos (runs-on nb-ctl): the 2 runners on the always-on controller VM, no VM boot"
+    },
+    {
+      "name": "deploy",
+      "machine": "e2-standard-4",
+      "vcpu": 4,
+      "ram_gb": 16,
+      "spot": false,
+      "priority": 0,
+      "disk_gb": 40,
+      "labels": [
+        "self-hosted",
+        "Linux",
+        "X64",
+        "nb-deploy"
+      ],
+      "_doc": "build + rsync / S3 release: standard VM, a preemption can never leave a partial deploy",
+      "sa": "rw"
+    },
+    {
+      "name": "gate",
+      "machine": "c2d-highcpu-8",
+      "vcpu": 8,
+      "ram_gb": 16,
+      "spot": true,
+      "priority": 1,
+      "disk_gb": 40,
+      "labels": [
+        "self-hosted",
+        "Linux",
+        "X64",
+        "nb-auto"
+      ],
+      "sa": "ro",
+      "price": {
+        "core": 0.01415,
+        "ram": 0.001895
+      },
+      "_doc": "fastest 8-vCPU Spot type the quota allows (us-central1 quotas 2026-11-27: C3 24, N2D 16, C2D 100): c2d-highcpu-8 so 32 vCPU = 4 concurrent jobs; change machine/vcpu/ram_gb/price here only. sa=ro: read-only npm-cache bucket token"
+    },
+    {
+      "name": "large",
+      "machine": "e2-standard-8",
+      "vcpu": 8,
+      "ram_gb": 32,
+      "spot": true,
+      "priority": 1,
+      "disk_gb": 40,
+      "labels": [
+        "self-hosted",
+        "Linux",
+        "X64",
+        "nb-auto",
+        "nb-size-l"
+      ]
+    },
+    {
+      "name": "small",
+      "machine": "e2-standard-2",
+      "vcpu": 2,
+      "ram_gb": 8,
+      "spot": true,
+      "priority": 1,
+      "disk_gb": 30,
+      "labels": [
+        "self-hosted",
+        "Linux",
+        "X64",
+        "nb-auto",
+        "nb-size-s"
+      ]
+    },
+    {
+      "name": "legacy",
+      "machine": "e2-standard-4",
+      "vcpu": 4,
+      "ram_gb": 16,
+      "spot": true,
+      "priority": 0,
+      "disk_gb": 50,
+      "labels": [
+        "self-hosted",
+        "Linux",
+        "X64",
+        "runner-vm",
+        "nb-pool",
+        "lane-burst",
+        "contabo",
+        "browsers",
+        "aqa-coord"
+      ],
+      "_doc": "Legacy lanes (repos not on NB_CI_MODE=auto) after the Mac Minis left the pool (user order 2026-11-27): one Spot VM per job."
+    },
+    {
+      "name": "legacy-prod",
+      "machine": "e2-standard-4",
+      "vcpu": 4,
+      "ram_gb": 16,
+      "spot": false,
+      "priority": 0,
+      "disk_gb": 50,
+      "labels": [
+        "self-hosted",
+        "Linux",
+        "X64",
+        "runner-vm",
+        "nb-pool",
+        "lane-burst",
+        "contabo",
+        "browsers",
+        "aqa-coord",
+        "lane-prod",
+        "lane-dev"
+      ],
+      "_doc": "Legacy jobs that ask for lane-prod/lane-dev (deploy lanes): standard VM, never preempted mid-deploy."
+    }
+  ],
+  "prices_usd": {
+    "_doc": "GCP Cloud Billing Catalog, us-central1, read 2026-11-26 (services/6F81-5844-456A). Per hour unless noted.",
+    "region": "us-central1",
+    "spot_core": 0.01309,
+    "spot_ram_gb": 0.001754,
+    "std_core": 0.021812,
+    "std_ram_gb": 0.002924,
+    "ip_spot": 0.0025,
+    "ip_std": 0.005,
+    "pd_balanced_gb_month": 0.1,
+    "pd_standard_gb_month": 0.04,
+    "image_gb_month": 0.05
+  },
+  "pools": {
+    "macmini": {
+      "base": [
+        "self-hosted",
+        "macOS",
+        "ARM64"
+      ],
+      "include_ci_labels": false,
+      "extra": []
+    },
+    "aqa-coord": {
+      "base": [
+        "self-hosted",
+        "macOS",
+        "ARM64"
+      ],
+      "include_ci_labels": false,
+      "extra": [
+        "aqa-coord"
+      ]
+    }
+  },
+  "minis": {
+    "macmini-preview": [
+      "aqa-coord"
+    ],
+    "macmini-preview-2": [
+      "aqa-coord"
+    ],
+    "macmini-preview-3": []
+  },
+  "fallback": {
+    "runner": null,
+    "labels": [
+      "nb-auto",
+      "nb-deploy",
+      "nb-ctl",
+      "nb-size-l",
+      "nb-size-s"
+    ],
+    "_doc": "No fallback runner: nb-ci never hands CI labels to a Mac Mini (user order 2026-11-27). GCP refusing VMs = jobs wait + Pulse alert."
+  },
+  "quota": {
+    "max_vcpu": 32,
+    "reserve_deploy_vcpu": 4,
+    "autoqa_vm_label": "autoqa",
+    "_doc": "One budget for CI + AutoQA: deploy > gate > AutoQA. Gate VMs leave reserve_deploy_vcpu free; AutoQA gets what is left (published as project metadata nb-autoqa-vcpu-allowance)."
+  }
+}

@@ -201,9 +201,11 @@ class RunsOnTheRunnerVmOnly(unittest.TestCase):
 
     def test_every_preview_job_runs_on_the_runner_vm_or_its_routed_lane(self):
         text = read(DEPLOY)
+        route_lane = ("${{ vars.NB_CI_MODE == 'auto' && fromJSON('[\"self-hosted\",\"nb-ctl\"]') "
+                      "|| fromJSON('[\"self-hosted\",\"nb-route\"]') }}")
         self.assertEqual(re.findall(r"runs-on: (.*)", text), [
-            "[self-hosted, nb-route]", "[self-hosted, runner-vm]",
-            "${{ fromJSON(needs.route.outputs.runs_on) }}"])
+            route_lane, "[self-hosted, runner-vm]", route_lane,
+            "${{ fromJSON(needs.route.outputs.deploy_runs_on) }}"])
 
     def test_no_job_targets_the_shared_contabo_label(self):
         self.assertNotIn("contabo", "".join(re.findall(r"runs-on: .*", read(DEPLOY))))

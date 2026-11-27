@@ -1,0 +1,77 @@
+#!/bin/bash
+# Image family nb-ci-runner: provisioning, run ONCE on a stock ubuntu-2404 builder VM by
+# `nbci.py build-image` (weekly). The controller turns the powered-off builder disk into the image.
+# Contents: Node 22, the latest Actions runner, Playwright Chromium + deps, gitleaks, semgrep, a warm
+# npm cache, and the one-job boot unit. No credentials of any kind are baked in.
+set -euxo pipefail
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -q
+apt-get install -yq git rsync jq curl unzip zip build-essential openssh-client python3 python3-pip python3-venv iptables ca-certificates
+curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -yq nodejs
+NODEV=$(node -v | tr -d v)
+# Node in the Actions tool cache so setup-node finds it instead of downloading it on every job
+mkdir -p /opt/hostedtoolcache/node/$NODEV/x64
+curl -fsSL "https://nodejs.org/dist/v$NODEV/node-v$NODEV-linux-x64.tar.xz" | tar xJ --strip-components=1 -C /opt/hostedtoolcache/node/$NODEV/x64
+touch /opt/hostedtoolcache/node/$NODEV/x64.complete
+id runner >/dev/null 2>&1 || useradd -m -s /bin/bash runner
+echo 'runner ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/runner
+
+# versions are pinned (no unauthenticated GitHub REST call: shared GCP IPs hit its rate limit); bump on rebuild
+V=${RUNNER_VERSION:-2.338.2}
+mkdir -p /opt/runner && curl -fsSL "https://github.com/actions/runner/releases/download/v$V/actions-runner-linux-x64-$V.tar.gz" | tar xz -C /opt/runner
+/opt/runner/bin/installdependencies.sh
+echo 'RUNNER_TOOLSDIRECTORY=/opt/hostedtoolcache' >> /opt/runner/.env
+chown -R runner: /opt/runner /opt/hostedtoolcache
+
+GL=${GITLEAKS_VERSION:-8.30.1}
+curl -fsSL "https://github.com/gitleaks/gitleaks/releases/download/v${GL}/gitleaks_${GL}_linux_x64.tar.gz" | tar xz -C /usr/local/bin gitleaks
+# venv: the debian-owned typing_extensions cannot be uninstalled by a system-wide pip (broke every startup-mode boot)
+python3 -m venv /opt/semgrep && /opt/semgrep/bin/pip install -q semgrep && ln -sf /opt/semgrep/bin/semgrep /usr/local/bin/semgrep
+
+# Playwright Chromium (system deps as root, browsers into the runner's cache) + warm npm cache
+npx -y playwright@1 install-deps chromium
+sudo -u runner -H npx -y playwright@1 install chromium
+[ -n "${NB_STARTUP:-}" ] || sudo -u runner -H npm cache add typescript@5 @nestjs/cli@11 vite@5 vite@7 jest@29 eslint@9 @swc/core@1 esbuild@0 \
+  vitest@2 ts-node@10 prettier@3 @vitejs/plugin-react@4 @originjs/vite-plugin-federation@1 tailwindcss@3 || true
+
+# One job per VM: read the JIT config from metadata (root only), run it as `runner`, power off.
+cat > /opt/nb-run.sh <<'RUN'
+#!/bin/bash
+J=$(curl -sf -m 5 -H 'Metadata-Flavor: Google' http://metadata.google.internal/computeMetadata/v1/instance/attributes/jit) || { poweroff; exit; }
+# cache bucket token (read-only on gate VMs, read-write on deploy VMs; none when the VM has no service account).
+# Fetched here as root so the job needs no metadata access.
+T=$(curl -sf -m 5 -H 'Metadata-Flavor: Google' http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token | jq -r .access_token) \
+  && [ -n "$T" ] && [ "$T" != null ] && { umask 022; printf %s "$T" > /run/nb-gcs-token; }
+# job code must not read metadata (no SA is attached anyway; this keeps the JIT config private)
+iptables -C OUTPUT -m owner --uid-owner runner -d 169.254.169.254 -j REJECT 2>/dev/null ||
+  iptables -A OUTPUT -m owner --uid-owner runner -d 169.254.169.254 -j REJECT
+# no job within 5 min of boot -> power off (the controller deletes the stopped VM and its disk)
+( sleep 300; pgrep -f Runner.Worker >/dev/null || poweroff ) &
+sudo -u runner -H env ACTIONS_RUNNER_HOOK_JOB_STARTED=/opt/nb-disk-guard.sh /opt/runner/run.sh --jitconfig "$J" > /var/log/nb-runner.log 2>&1
+poweroff
+RUN
+cat > /opt/nb-disk-guard.sh <<'G'
+#!/bin/bash
+free=$(df -Pk / | awk 'NR==2{print int($4/1048576)}')
+[ "$free" -ge 5 ] || { echo "::error::runner disk has ${free} GB free"; exit 1; }
+G
+chmod 755 /opt/nb-run.sh /opt/nb-disk-guard.sh
+cat > /etc/systemd/system/nb-runner.service <<'U'
+[Unit]
+Description=nb-ci one-job runner
+After=network-online.target
+Wants=network-online.target
+[Service]
+Type=simple
+ExecStart=/opt/nb-run.sh
+PrivateTmp=yes
+[Install]
+WantedBy=multi-user.target
+U
+systemctl enable nb-runner.service
+# small image: drop caches and logs (image build only; a startup-script VM is deleted after one job)
+if [ -z "${NB_STARTUP:-}" ]; then
+  apt-get clean; rm -rf /var/lib/apt/lists/* /tmp/* /root/.npm/_logs
+  journalctl --vacuum-time=1s || true
+fi
+sync

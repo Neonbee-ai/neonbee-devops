@@ -16,11 +16,17 @@ WORKFLOWS = sorted(glob.glob(os.path.join(ROOT, ".github", "workflows", "*.yml")
 EVERY_RUNNER = {"cleanup-runner-workspace.yml"}
 RUNNER_VM = "[self-hosted, runner-vm]"
 ROUTER = "[self-hosted, nb-route]"
+# route/notify: nb-ctl (controller-local runners) for NB_CI_MODE=auto repos, nb-route otherwise
+ROUTER_AUTO = "${{ vars.NB_CI_MODE == 'auto' && fromJSON('[\"self-hosted\",\"nb-ctl\"]') || fromJSON('[\"self-hosted\",\"nb-route\"]') }}"
+# Light devops checks: the controller's nb-ctl runners under NB_CI_MODE=auto, else the runner VM.
+RUNNER_VM_AUTO = "${{ vars.NB_CI_MODE == 'auto' && fromJSON('[\"self-hosted\",\"nb-ctl\"]') || fromJSON('[\"self-hosted\",\"runner-vm\"]') }}"
 ROUTED = "${{ fromJSON(needs.route.outputs.runs_on) }}"
 # Reusable deploy workflows: the caller's route job picks the lane and passes it in as runs_on.
 FROM_CALLER = "${{ fromJSON(inputs.runs_on) }}"
+# deploy jobs: non-Spot nb-deploy lane from the route job (NB_CI_MODE=auto), else the routed lane
+DEPLOY = "${{ fromJSON(needs.route.outputs.deploy_runs_on) }}"
 # nb-pool: label on Contabo runner-vm + burst runners, used only for NB_BURST=batch re-runs (either lane).
-LANES = {'["self-hosted","runner-vm"]', '["self-hosted","lane-burst"]', '["self-hosted","nb-pool"]'}
+LANES = {'["self-hosted","runner-vm"]', '["self-hosted","lane-burst"]', '["self-hosted","nb-pool"]', '["self-hosted","nb-auto"]'}
 
 
 def runs_on(path):
@@ -36,7 +42,7 @@ class GivenTheOrgWorkflows(unittest.TestCase):
                 continue
             for target in runs_on(path):
                 with self.subTest(workflow=name):
-                    self.assertIn(target.strip(), (RUNNER_VM, ROUTER, ROUTED, FROM_CALLER))
+                    self.assertIn(target.strip(), (RUNNER_VM, RUNNER_VM_AUTO, ROUTER, ROUTER_AUTO, ROUTED, FROM_CALLER, DEPLOY))
 
     def test_when_a_job_is_routed_then_its_workflow_has_a_route_job_on_the_router(self):
         for path in WORKFLOWS:
@@ -44,7 +50,7 @@ class GivenTheOrgWorkflows(unittest.TestCase):
             if ROUTED not in text:
                 continue
             with self.subTest(workflow=os.path.basename(path)):
-                self.assertRegex(text, r"\n  route:\n(?:    .*\n)*?    runs-on: \[self-hosted, nb-route\]")
+                self.assertRegex(text, r"\n  route:\n(?:    .*\n)*?    runs-on: .*nb-route")
 
     def test_when_a_job_is_routed_then_it_needs_the_route_job_directly(self):
         for path in WORKFLOWS:
