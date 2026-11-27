@@ -647,6 +647,23 @@ def sweep_verdict(vm, runners, now, idle_s=IDLE_S, grace_s=NO_JOB_STARTUP_S, aqa
     return 'unowned nbci VM, no runner, %ds old' % age if age >= grace_s + idle_s else None
 
 
+def deregister_runners(gh, org, runners, log=lambda *a: None):
+    """DELETE each runner registration. GitHub answers 422 when the runner is busy: then the VM must be kept this
+    pass (deleting it would kill a live job). Returns True when the VM may be deleted, False if any 422 came back.
+    Other errors are logged and do not block the delete (the registration goes stale on its own)."""
+    ok = True
+    for r in runners:
+        try:
+            gh('orgs/%s/actions/runners/%s' % (org, r['id']), 'DELETE')
+        except RuntimeError as e:
+            if ' -> 422 ' in str(e):
+                log('sweep', r.get('name'), 'runner busy (422): keeping VM this pass')
+                ok = False
+            else:
+                log('sweep', r.get('name'), 'deregister failed: %s' % str(e)[:120])
+    return ok
+
+
 def stale_runner(r, live_vm_names, now_unused=None):
     """An offline, idle nbci-*/aqa-* registration whose VM is gone. The controller's own nb-ctl runners never."""
     n = r['name']
