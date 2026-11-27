@@ -828,7 +828,7 @@ def tick(gh, gcp, st, mode='scale'):
         polled = queued_jobs(gh, recent)
         with LOCK:
             fresh = {k: j for k, j in EVENTS['jobs'].items() if now - j['created'] < 120}   # listing lag: a just-queued webhook job survives
-            EVENTS['jobs'] = dict(fresh, **polled)
+            EVENTS['jobs'] = {**fresh, **polled}   # job ids are ints: dict(a, **b) raises 'keywords must be strings' and aborts the tick
             EVENTS['recent'] = {n: t for n, t in EVENTS.get('recent', {}).items() if now - t < 7200}
     with LOCK: st['recent'] = dict(EVENTS.get('recent', {}))         # survives a restart (the first full poll needs it)
     with LOCK:
