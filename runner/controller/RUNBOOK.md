@@ -41,7 +41,8 @@ Every alert is one comment on Pulse `71b8be5b` starting with `[nbci]`. Deduped p
 |---|---|
 | `ALERT OPEN: nbci controller down` | GCP uptime check (3 regions, 5 min) failing 10 min. Check the VM is RUNNING; `systemctl status nbci`; `resolved` follows |
 | `controller heartbeat Ns old` | watchdog restarted `nbci` (loop hung) |
-| `nbci STOPPED by the churn guard` | VMs outnumbered queued jobs; inspect, then `sudo rm -f /run/nbci-stopped-by-guard && sudo systemctl start nbci` |
+| `churn guard tripped (n/3 ...)` | VMs outnumbered queued jobs: the guard deleted the excess idle VMs (+ disks) and nbci keeps running. Tunables `GUARD_MAX_TRIPS` (3), `GUARD_TRIP_WINDOW_S` (1800) |
+| `nbci STOPPED by the churn guard` | `GUARD_MAX_TRIPS` trips within `GUARD_TRIP_WINDOW_S` (deleting did not cure it); inspect, then `sudo rm -f /run/nbci-stopped-by-guard && sudo systemctl start nbci` |
 | `guard deleted <vm>: no runner online for Ns` | Backstop (runs even while nbci is stopped): a VM had no runner online/busy for `GUARD_UNREG_S` (default 1200 s, always > the 900 s boot grace), so it could never take a job. Check `journalctl -u nbci` for 401s / gce list failures and that nbci is running |
 | `gce list failed ... 401` | GCP token expired early. Tokens are now cached for `expires_in - 300 s` and a 401 drops the token and retries once (`nbci_io.GCP`); persistent 401 = service-account scope/key problem |
 | `job ... queued N min` | a job waited > 15 min: quota, stock-out or labels with no class |

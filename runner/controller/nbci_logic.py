@@ -400,6 +400,36 @@ def churn_verdict(vms, runners, queued_by_class, since, now, window_s=300, cap=8
     return None
 
 
+def excess_idle_vms(vms, runners, queued_by_class, now, cap=8, grace_s=0):
+    """VMs the guard deletes when the churn verdict trips: per class the idle (no busy runner, past the boot
+    grace) live VMs beyond its queued jobs, then, if the fleet is still over `cap`, more idle ones. Busy and
+    booting VMs are never picked. Newest first (the least-used). Returns [vm]."""
+    live = [v for v in vms if v['status'] in LIVE and not v.get('builder') and v.get('cls') != 'aqa']
+    idle = [v for v in live if not any(r.get('busy') for r in vm_runners(v, runners))
+            and not (grace_s and now - v.get('created', now) < grace_s)]
+    idle.sort(key=lambda v: -v.get('created', 0))
+    pick, per = [], {}
+    for v in idle:
+        per[v['cls']] = per.get(v['cls'], 0) + 1
+    left = dict(per)
+    for v in idle:
+        if left[v['cls']] > queued_by_class.get(v['cls'], 0):
+            pick.append(v); left[v['cls']] -= 1
+    for v in idle:
+        if len(live) - len(pick) <= cap:
+            break
+        if v not in pick:
+            pick.append(v)
+    return pick
+
+
+def trips_exceeded(trips, now, max_trips=3, window_s=1800):
+    """Repeated-trip breaker: `trips` is the guard's own list of trip times (pruned in place to the window).
+    True when it holds max_trips or more, i.e. deleting excess VMs is not curing the churn, so stop nbci."""
+    trips[:] = [t for t in trips if now - t <= window_s]
+    return len(trips) >= max_trips
+
+
 UNREGISTERED_S = NO_JOB_STARTUP_S + 300   # guard backstop: > the boot grace, so a provisioning VM is never reaped
 
 
