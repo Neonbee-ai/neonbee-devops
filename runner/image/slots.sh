@@ -20,9 +20,6 @@ MD=http://metadata.google.internal/computeMetadata/v1/instance
 md() { curl -sf -m 5 -H 'Metadata-Flavor: Google' "$MD/$1"; }
 if ! id "$U" >/dev/null 2>&1; then
   useradd -m -s /bin/bash "$U"
-  if [ -d /home/runner/.cache/ms-playwright ]; then
-    mkdir -p "/home/$U/.cache" && cp -a /home/runner/.cache/ms-playwright "/home/$U/.cache/" && chown -R "$U:" "/home/$U/.cache"
-  fi
 fi
 iptables -C OUTPUT -m owner --uid-owner "$U" -d 169.254.169.254 -j REJECT 2>/dev/null ||
   iptables -A OUTPUT -m owner --uid-owner "$U" -d 169.254.169.254 -j REJECT
@@ -35,6 +32,10 @@ while :; do
   # cache bucket token (only VMs with a service account); refreshed per job, a reused VM outlives one token
   T=$(md service-accounts/default/token | jq -r .access_token 2>/dev/null) && [ -n "$T" ] && [ "$T" != null ] &&
     { umask 022; printf %s "$T" > /run/nb-gcs-token; }
+  # Playwright installs in the background after boot: give this slot the browsers once they exist (kept across jobs)
+  if [ -f /opt/nb-ready.playwright ] && [ ! -d "/home/$U/.cache/ms-playwright" ] && [ -d /home/runner/.cache/ms-playwright ]; then
+    mkdir -p "/home/$U/.cache" && cp -a /home/runner/.cache/ms-playwright "/home/$U/.cache/" && chown -R "$U:" "/home/$U/.cache"
+  fi
   mkdir -p "$D" && rsync -a --delete /opt/runner/ "$D/" && chown -R "$U:" "$D"
   echo "== slot $i job start $(date -u +%FT%TZ)" >> "/var/log/nb-slot-$i.log"
   # npm "global" config/prefix per slot: the shared Node in /opt/hostedtoolcache belongs to `runner`, so
