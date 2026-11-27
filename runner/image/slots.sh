@@ -61,5 +61,23 @@ KillMode=control-group
 [Install]
 WantedBy=multi-user.target
 U
+# memory telemetry for the slot count decision: one line a minute on the serial console
+# (gcloud compute instances get-serial-port-output <vm> | grep nbci-mem): total/used/available MB, swap used, load, busy slots
+cat > /opt/nb-mem.sh <<'MEM'
+#!/bin/bash
+while :; do
+  echo "nbci-mem $(date -u +%H:%M:%S) $(free -m | awk '/^Mem:/{printf "mem_total=%d used=%d avail=%d", $2, $3, $7} /^Swap:/{printf " swap_used=%d", $3}') load=$(cut -d' ' -f1 /proc/loadavg) busy=$(pgrep -c -f Runner.Worker)" > /dev/ttyS0
+  sleep 60
+done
+MEM
+chmod 755 /opt/nb-mem.sh
+cat > /etc/systemd/system/nb-mem.service <<'U'
+[Unit]
+Description=nb-ci memory telemetry to the serial console
+[Service]
+ExecStart=/opt/nb-mem.sh
+Restart=always
+U
 systemctl daemon-reload
+systemctl start --no-block nb-mem.service
 for i in $(seq 1 "$N"); do systemctl start --no-block "nb-slot@$i.service"; done

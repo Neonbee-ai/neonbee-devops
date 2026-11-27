@@ -632,3 +632,22 @@ def stale_runner(r, live_vm_names, now_unused=None):
         return False
     return vm_of(n, live_vm_names) is None
 
+
+
+def vm_name_of(runner_name):
+    """VM of a runner name without a live VM list (the VM may be gone): a slot runner's VM, else the name."""
+    m = SLOT_RE.match(runner_name or '')
+    return m.group('vm') if m else runner_name
+
+
+def lost_vms(known, current, deleted_by_us, stopped):
+    """VMs GCE took back: seen live last pass and now gone without a delete of ours, or found stopped (a Spot
+    preemption with instanceTerminationAction DELETE passes through TERMINATED)."""
+    return sorted((set(known) - set(current) - set(deleted_by_us)) | (set(stopped) & set(known)))
+
+
+def preempt_retry(f, preempted, retried):
+    """Re-run the failed jobs of a run once when the job died with its VM: the runner's VM was preempted (Spot)
+    and the job ended failure/cancelled. Any repo mode; at most once per run (retried: {run id: time})."""
+    return f.get('conclusion') in ('failure', 'cancelled') and vm_name_of(f.get('runner', '')) in preempted \
+        and str(f.get('run')) not in retried and int(f.get('attempt') or 1) == 1

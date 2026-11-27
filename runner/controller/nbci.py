@@ -768,6 +768,17 @@ def tick(gh, gcp, st, mode='scale'):
             st['alerted'][key] = now
             alert('CI spend today $%.2f of $%.2f cap (%s)%s' % (day['usd'], CAP_USD, lvl,
                   ': only deploy VMs start until 00:00 UTC' if lvl == 'capped' else ''))
+    # VMs lost to GCE (Spot preemption: TERMINATED or gone without our delete) -> their failed jobs are re-run once
+    if gce_ok and mode == 'scale':
+        known, ours = st.setdefault('known_vms', {}), st.setdefault('deleted', {})
+        cur = {v['name'] for v in vms}
+        lost = st.setdefault('lost', {})
+        for n in L.lost_vms(known, cur, ours, {v['name'] for v in vms if v['status'] in L.DEAD}):
+            lost[n] = now; log('VM lost (preempted?)', n)
+        st['known_vms'] = {v['name']: v['created'] for v in vms if v['status'] in L.LIVE and not v['builder']}
+        for d in (ours, lost):
+            for k in [k for k, t in d.items() if now - t > 3600]:
+                del d[k]
     # deletions (job done / no job in 5 min / stopped; packed: idle 3 min / lifetime) -- idempotent
     live = []
     busy_at = st.setdefault('busy_at', {}); issued = st.setdefault('issued', {})
@@ -801,6 +812,7 @@ def tick(gh, gcp, st, mode='scale'):
             print('vm   %-34s %-10s %-6s runner=%s delete=%s' % (v['name'], v['status'], v['cls'], rdesc, why))
             live.append(v); continue
         if why and gce_ok and delete_vm(gh, gcp, v, r, why):
+            st.setdefault('deleted', {})[v['name']] = now
             with LOCK: EVENTS['done_runners'].discard(v['name'])
             busy_at.pop(v['name'], None)
             if why == 'job completed': day['jobs'] += 1
@@ -960,9 +972,20 @@ def tick(gh, gcp, st, mode='scale'):
     def released(tid, note):
         pq._put('status', task=tid, status=E('PULSE_RELEASED_STATUS', 'released')); pq._put('comment', task=tid, text=note)
     rel_state = st['release']
+    # Spot preemption: a VM taken back by GCE kills every job on it (4 on a packed VM); re-run them once, any repo mode
+    if failed:
+        pre = set(st.get('lost', {}))
+        for f in failed:
+            if L.preempt_retry(f, pre, rel_state.setdefault('retried', {})):
+                log('preemption retry', f['repo'], f['name'], f['run'], L.vm_name_of(f['runner']))
+                rel_state['retried'][str(f['run'])] = now
+                if not DRY:
+                    _safe(gh, 'repos/%s/%s/actions/runs/%s/rerun-failed-jobs' % (ORG, f['repo'], f['run']), 'POST', {})
     # flaky-infra retry for any failed job on an nb-ci runner (push runs too), once per run
     for f in failed:
         try:
+            if str(f['run']) in rel_state.get('retried', {}) and now - rel_state['retried'][str(f['run'])] < 60:
+                continue        # just re-run for a preemption
             if repo_mode(gh, st, f['repo'], ci_mode, now) != 'auto':
                 continue
             text = job_log(gh, ORG, f['repo'], f['job'])

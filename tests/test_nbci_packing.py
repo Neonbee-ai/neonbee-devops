@@ -292,5 +292,50 @@ class Workflows(unittest.TestCase):
         self.assertIn('cancel-in-progress: false', self.wf('neonbee-deploy-prod.yml'))
 
 
+class Preemption(unittest.TestCase):
+    def f(self, **k):
+        return dict({'repo': 'r', 'run': 7, 'attempt': 1, 'conclusion': 'failure', 'runner': 'nbci-legacy-9-s2-abc'}, **k)
+
+    def test_given_a_vm_gone_without_our_delete_then_it_is_lost(self):
+        self.assertEqual(L.lost_vms({'a': 1, 'b': 1}, {'a'}, {}, set()), ['b'])
+
+    def test_given_a_vm_we_deleted_then_it_is_not_lost(self):
+        self.assertEqual(L.lost_vms({'a': 1, 'b': 1}, {'a'}, {'b': 1}, set()), [])
+
+    def test_given_a_known_vm_found_stopped_then_it_is_lost(self):
+        self.assertEqual(L.lost_vms({'a': 1}, {'a'}, {}, {'a'}), ['a'])
+
+    def test_given_a_job_that_died_with_a_preempted_packed_vm_then_its_run_is_retried_once(self):
+        self.assertTrue(L.preempt_retry(self.f(), {'nbci-legacy-9'}, {}))
+        self.assertTrue(L.preempt_retry(self.f(conclusion='cancelled', runner='nbci-legacy-9'), {'nbci-legacy-9'}, {}))
+        self.assertFalse(L.preempt_retry(self.f(), {'nbci-legacy-9'}, {'7': 1}))     # once per run
+        self.assertFalse(L.preempt_retry(self.f(attempt=2), {'nbci-legacy-9'}, {}))  # a re-run that fails again counts
+
+    def test_given_a_job_failed_on_a_healthy_vm_then_no_retry(self):
+        self.assertFalse(L.preempt_retry(self.f(), {'nbci-legacy-other'}, {}))
+        self.assertFalse(L.preempt_retry(self.f(conclusion='success'), {'nbci-legacy-9'}, {}))
+
+
+class FastBoot(unittest.TestCase):
+    PROV = open(os.path.join(ROOT, 'runner', 'image', 'provision.sh')).read()
+
+    def test_provisioning_runs_independent_installs_in_parallel_and_fails_on_any_group(self):
+        self.assertEqual(self.PROV.count(') & P'), 4)
+        self.assertIn('wait $PA; wait $PB; wait $PC; wait $PD', self.PROV)
+        a = self.PROV[self.PROV.index('( # A (apt)'):self.PROV.index(') & PA=$!')]
+        self.assertIn('installdependencies.sh', a)       # every apt user stays in one group (apt lock)
+        self.assertIn('playwright@1 install-deps', a)
+        self.assertNotIn('apt-get', self.PROV[self.PROV.index(') & PA=$!'):self.PROV.index('wait $PA')])
+
+    def test_provision_still_parses(self):
+        r = subprocess.run(['bash', '-n', '-c', self.PROV], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_packed_vms_log_memory_to_the_serial_console(self):
+        t = open(os.path.join(ROOT, 'runner', 'image', 'slots.sh')).read()
+        self.assertIn('nbci-mem', t)
+        self.assertIn('> /dev/ttyS0', t)
+
+
 if __name__ == '__main__':
     unittest.main()
