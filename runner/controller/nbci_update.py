@@ -2,9 +2,10 @@
 """Controller auto-update (run by nbci-update.timer every 10 min, as root, under the bootstrap flock).
 Follows instance metadata nbci-ref ('main' = follow main; a 40-char sha is pinned and never moves). When the ref has a
 new sha: run bootstrap.sh (checkout + restart nbci/nbci-guard), then health-check (nbci active, /healthz 200, loop
-heartbeat written after the restart and < 3 min old). On failure: remember the sha in /var/lib/nbci/bad-ref (never
+heartbeat written after the restart and < 3 min old, one full loop pass logged after the restart). The new sha is only
+adopted when all its GitHub check runs are completed green (bootstrap.sh -> --check-green). On failure: remember the sha in /var/lib/nbci/bad-ref (never
 retried), roll back to the previous sha (bootstrap with NBCI_REF_OVERRIDE) and alert. Never touches job VMs."""
-import os, subprocess, sys, time, urllib.request
+import json, os, subprocess, sys, time, urllib.request
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import nbci_logic as L  # noqa: E402
@@ -41,11 +42,27 @@ def probe(started):
     return code, hb, sh('systemctl', 'is-active', '--quiet', 'nbci').returncode == 0
 
 
+def journal_since(started):
+    try: return sh('journalctl', '-u', 'nbci', '--since', '@%d' % started, '-o', 'cat', '--no-pager', timeout=60).stdout
+    except Exception: return ''
+
+
+def green(sha, token):
+    """True when every GitHub check run of sha completed successfully (App token). Anything else (none, pending, API error) = no."""
+    try:
+        r = urllib.request.Request('https://api.github.com/repos/Neonbee-ai/neonbee-devops/commits/%s/check-runs?per_page=100' % sha,
+                                   headers={'Authorization': 'Bearer ' + token, 'Accept': 'application/vnd.github+json'})
+        with urllib.request.urlopen(r, timeout=20) as f:
+            return L.checks_green(json.loads(f.read()))
+    except Exception:
+        return False
+
+
 def healthy(started):
     end = time.time() + WAIT_S
     while True:
         code, hb, active = probe(started)
-        if L.health_ok(hb, started, time.time(), code, active):
+        if L.update_healthy(hb, started, time.time(), code, active, journal_since(started)):
             return True
         if time.time() > end:
             return False
@@ -78,4 +95,6 @@ def main():
 
 
 if __name__ == '__main__':
+    if len(sys.argv) == 3 and sys.argv[1] == '--check-green':   # bootstrap.sh: exit 0 only for a fully green commit
+        sys.exit(0 if green(sys.argv[2], os.environ.get('GH_TOKEN', '')) else 1)
     sys.exit(main())

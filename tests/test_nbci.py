@@ -1054,3 +1054,28 @@ class CreateTimeout(unittest.TestCase):
     def test_given_a_stockout_error_then_no_lookup_happens_and_the_next_zone_is_tried(self):
         def compute(path): raise AssertionError('must not be called')
         self.assertFalse(L.created_despite_timeout(RuntimeError('ZONE_RESOURCE_POOL_EXHAUSTED'), compute, 'z', 'n'))
+
+
+class UpdateGate(unittest.TestCase):
+    def _run(self, **kw):
+        return {'status': 'completed', 'conclusion': 'success', **kw}
+
+    def test_given_all_checks_completed_green_then_the_commit_is_adoptable(self):
+        self.assertTrue(L.checks_green({'total_count': 2, 'check_runs': [self._run(), self._run(conclusion='skipped')]}))
+
+    def test_given_a_pending_or_failed_check_then_the_commit_is_not_adoptable(self):
+        self.assertFalse(L.checks_green({'total_count': 2, 'check_runs': [self._run(), self._run(status='in_progress', conclusion=None)]}))
+        self.assertFalse(L.checks_green({'total_count': 1, 'check_runs': [self._run(conclusion='failure')]}))
+
+    def test_given_no_check_runs_or_a_truncated_page_then_the_commit_is_not_adoptable(self):
+        self.assertFalse(L.checks_green({'total_count': 0, 'check_runs': []}))
+        self.assertFalse(L.checks_green({'total_count': 150, 'check_runs': [self._run()] * 100}))
+        self.assertFalse(L.checks_green(None))
+
+    def test_given_a_restart_without_a_loop_pass_logged_then_the_update_is_unhealthy(self):
+        args = (NOW - 10, NOW - 60, NOW, 200, True)
+        self.assertFalse(L.update_healthy(*args, journal='12:00:00 starting\n'))
+        self.assertTrue(L.update_healthy(*args, journal='12:00:00 starting\n12:00:30 mode=scale jobs=0 vms=0\n'))
+
+    def test_given_a_loop_pass_but_healthz_down_then_the_update_is_unhealthy(self):
+        self.assertFalse(L.update_healthy(NOW - 10, NOW - 60, NOW, 503, True, '12:00:30 mode=scale jobs=0\n'))

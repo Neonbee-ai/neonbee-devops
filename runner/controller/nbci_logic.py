@@ -872,6 +872,25 @@ def health_ok(heartbeat, started, now, healthz_code, active, max_age_s=180):
     return bool(active) and healthz_code == 200 and heartbeat >= started and now - heartbeat <= max_age_s
 
 
+def pass_logged(journal):
+    """True when the loop logged at least one full pass (nbci.py tick ends with a 'HH:MM:SS mode=...' line)."""
+    return bool(re.search(r'^(\d\d:\d\d:\d\d )?mode=', journal or '', re.M))
+
+
+def update_healthy(heartbeat, started, now, healthz_code, active, journal):
+    """health_ok plus one full loop pass logged after the restart (journal = nbci log since the restart)."""
+    return health_ok(heartbeat, started, now, healthz_code, active) and pass_logged(journal)
+
+
+def checks_green(payload):
+    """GitHub check-runs payload of a commit: green only if there is at least one run, all of them (the whole list
+    fits in the page) completed with success/skipped/neutral. Pending, failed or none = not green."""
+    runs = (payload or {}).get('check_runs') or []
+    if not runs or (payload or {}).get('total_count', 0) > len(runs):
+        return False
+    return all(r.get('status') == 'completed' and r.get('conclusion') in ('success', 'skipped', 'neutral') for r in runs)
+
+
 def update_action(ref, old, new, bad):
     """What the 10-min updater does. ref: nbci-ref metadata; old/new: current and fetched sha; bad: sha that failed
     health before. 'pinned' = ref is a sha (never auto-moves); 'skip' = nothing new or known bad; 'update'."""
