@@ -1,0 +1,8 @@
+{"kind": "job", "type": "build-deploy", "n": 95, "queue_p50": 137.0, "queue_p90": 1018.0, "run_p50": 65.0, "run_p90": 134.0, "install_share": 0.118}
+{"kind": "job", "type": "notify", "n": 40, "queue_p50": 56.0, "queue_p90": 1188.0, "run_p50": 11.0, "run_p90": 25.0, "install_share": 0.0}
+{"kind": "job", "type": "other", "n": 75, "queue_p50": 88.0, "queue_p90": 2673.0, "run_p50": 12.0, "run_p90": 69.0, "install_share": 0.066}
+{"kind": "job", "type": "route", "n": 160, "queue_p50": 137.0, "queue_p90": 2255.0, "run_p50": 13.0, "run_p90": 27.0, "install_share": 0.0}
+{"kind": "job", "type": "security", "n": 27, "queue_p50": 496.0, "queue_p90": 11638.0, "run_p50": 28.0, "run_p90": 67.0, "install_share": 0.071}
+{"kind": "job", "type": "unit", "n": 187, "queue_p50": 173.0, "queue_p90": 2672.0, "run_p50": 114.0, "run_p90": 340.0, "install_share": 0.164}
+{"kind": "e2e", "event": "pull_request", "workflow_like": "PR Gate", "n": 79, "p50_s": 2109.0, "p90_s": 16348.0}
+{"kind": "e2e", "event": "push", "workflow_like": "Deploy", "n": 73, "p50_s": 987.0, "p90_s": 16715.0}
