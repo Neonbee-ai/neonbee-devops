@@ -97,9 +97,10 @@ def base_url(env, domain='skyoffice360.com'):
     return 'https://%s.%s' % (env, domain) if env.startswith('pr-') else ''
 
 
-def sizing(n_tasks):
-    """(machine, workers): e2-standard-2 up to 5 tasks, then 4 and 8 vCPU with aqa-workers = nproc."""
-    if n_tasks <= 5:
+def sizing(n_tasks, ci_waiting=0):
+    """(machine, workers): e2-standard-2 up to 5 tasks, then 4 and 8 vCPU with aqa-workers = nproc. While CI jobs
+    wait for a VM the AQA VM stays e2-standard-2 (the 2 vCPU AQA reserve), so AutoQA never takes CI's quota."""
+    if n_tasks <= 5 or ci_waiting > 0:
         return 'e2-standard-2', None
     return ('e2-standard-4', 4) if n_tasks <= 15 else ('e2-standard-8', 8)
 

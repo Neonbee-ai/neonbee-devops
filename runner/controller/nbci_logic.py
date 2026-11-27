@@ -59,6 +59,8 @@ def may_start(c, spend, free_vcpu, reserve_deploy):
     spend cap (a pipeline that already passed its gate must be able to finish); other classes keep
     reserve_deploy vCPUs free and stop at the cap."""
     if c['priority'] == 0:
+        if c.get('spot'):       # packed legacy CI lane (priority 0, Spot): ignores the spend cap, never takes the deploy reserve
+            return free_vcpu - reserve_deploy >= c['vcpu']
         return free_vcpu >= c['vcpu']
     return spend != 'capped' and free_vcpu - reserve_deploy >= c['vcpu']
 
@@ -145,6 +147,8 @@ def classify_gce_error(text):
         return 'billing'
     if 'quota' in t:
         return 'quota'
+    if 'alreadyexists' in t or 'already exists' in t or '-> 409' in t:
+        return 'exists'
     if 'zone_resource_pool_exhausted' in t or 'does not have enough resources' in t or 'stockout' in t:
         return 'stockout'
     return 'api'

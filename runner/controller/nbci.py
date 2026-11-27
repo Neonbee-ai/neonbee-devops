@@ -118,6 +118,7 @@ def on_event(kind, ev):
     with LOCK:
         EVENTS['last_event'] = time.time()
         repo = (ev.get('repository') or {}).get('name', '')
+        if repo: EVENTS.setdefault('recent', {})[repo] = time.time()     # a re-run never moves pushed_at: the poll must still see it
         if kind == 'workflow_job':
             j = ev['workflow_job']
             if ev['action'] in ('queued', 'waiting'):
@@ -157,11 +158,14 @@ def on_event(kind, ev):
 
 
 # ── GitHub / GCE state ──────────────────────────────────────────────────────────────────────────────
-def queued_jobs(gh):
-    """Slow-poll truth for the job table (webhooks can be missed). Repos pushed in the last 2 h only."""
+def queued_jobs(gh, recent=None):
+    """Slow-poll truth for the job table (webhooks can be missed). Repos pushed in the last 2 h, plus repos with a
+    webhook event in the last 2 h (recent: {repo: unix time}): a re-run or workflow_dispatch never moves pushed_at,
+    and the poll used to drop such a queued job from the table (2026-11-27: help-fe build-deploy re-run waited, jobs=0)."""
     out, since = {}, time.time() - 2 * 3600
+    hot = {n for n, t in (recent or {}).items() if t >= since}
     for r in gh('orgs/%s/repos?sort=pushed&direction=desc&per_page=100' % ORG, cache=True):
-        if r['archived'] or not r['pushed_at'] or ts(r['pushed_at']) < since:
+        if r['archived'] or ((not r['pushed_at'] or ts(r['pushed_at']) < since) and r['name'] not in hot):
             continue
         runs = gh('repos/%s/actions/runs?status=queued&per_page=30' % r['full_name'], cache=True)['workflow_runs'] + \
             gh('repos/%s/actions/runs?status=in_progress&per_page=30' % r['full_name'], cache=True)['workflow_runs']
@@ -546,16 +550,23 @@ def reconcile_deploys(gh, now):
     return out
 
 
-def live_aqa(gcp):
-    n = 0
+def aqa_instances(gcp):
+    """{name: status} of every aqa-* VM in our zones (ours or the AQA agent's): the live count and the names a
+    create must not reuse (one VM name per repo+sha; a second POST of the same name is a 409)."""
+    out = {}
     for z in ZONES:
-        n += sum(1 for v in gcp.compute('/zones/%s/instances?filter=name%%3Daqa-*' % z).get('items', []) if v['status'] != 'TERMINATED')
-    return n
+        for v in gcp.compute('/zones/%s/instances?filter=name%%3Daqa-*' % z).get('items', []):
+            out[v['name']] = v['status']
+    return out
+
+
+def live_aqa(gcp):
+    return sum(1 for s in aqa_instances(gcp).values() if s != 'TERMINATED')
 
 
 def _aqa_events(gh, gcp, st, now, today, failures, cfg, pending, later, ci_waiting=0):
     ast = st.setdefault('aqa', {})
-    live = None
+    live, existing = None, {}
     for ev in pending:
         repo, run = ev['repo'], ev['run']
         env = A.deploy_env(run, cfg)
@@ -597,12 +608,14 @@ def _aqa_events(gh, gcp, st, now, today, failures, cfg, pending, later, ci_waiti
         except Exception as e:          # held, not dropped: retried every pass until the event is 2 h old
             log('aqa held: cannot read/bundle %s@%s' % (cfg.get('qa_repo'), cfg.get('qa_ref')), str(e)[:120]); later.append(ev); continue
         if live is None:
-            try: live = live_aqa(gcp)
-            except Exception as e: live = 0; log('aqa live count', str(e)[:100])
+            try: existing = aqa_instances(gcp); live = sum(1 for s in existing.values() if s != 'TERMINATED')
+            except Exception as e: existing, live = {}, 0; log('aqa live count', str(e)[:100])
+        name = A.vm_name(env, run['head_sha'])
+        if name in existing:            # already created (a restart lost the record, or the webhook + 10-min reconcile raced): never a 2nd VM
+            log('aqa exists', name, key, existing[name]); A.record(ast, key, today, now); continue
         if live >= L.aqa_max_live(cfg.get('max_live', 3), ci_waiting):
             later.append(ev); continue                  # IP / vCPU caps: queue, retried next pass
-        machine, workers = A.sizing(len(ids))
-        name = A.vm_name(env, run['head_sha'])
+        machine, workers = A.sizing(len(ids), ci_waiting)
         commits = json.dumps([{'message': m[:500], 'branch': run['head_branch'], 'prBody': ''} for m in msgs])
         items = A.metadata(env, run['head_sha'], cfg['bundle_template'].format(qa_sha=qa_sha), ids, commits,
                            cfg['evidence_template'].format(env=A.aqa_env(env), sha=run['head_sha'], repo=repo),
@@ -616,11 +629,18 @@ def _aqa_events(gh, gcp, st, now, today, failures, cfg, pending, later, ci_waiti
                 gcp.wait_op(gcp.compute('/zones/%s/instances' % z, 'POST', A.vm_body(vm_cfg, name, z, items, STEM, MAX_RUN_S)), z, 120)
                 log('aqa created', name, env, key, 'tasks=%s' % ','.join(ids)); made = True; break
             except Exception as e:
-                k = L.classify_gce_error(str(e)); failures.append((z, k)); log('aqa create failed', z, k, str(e)[:160])
+                if L.created_despite_timeout(e, gcp.compute, z, name):
+                    log('aqa created (after wait timeout)', name, env, key); made = True; break
+                k = L.classify_gce_error(str(e))
+                if k == 'exists':           # the name is taken: that VM is this run; never retry it in another zone
+                    log('aqa exists', name, key, z); made = None; break
+                failures.append((z, k)); log('aqa create failed', z, k, str(e)[:160])
                 if k in ('billing', 'quota'): break
+        if made is None:
+            A.record(ast, key, today, now); existing[name] = 'EXISTS'; save_state(st); continue
         if made:
-            live += 1
-            A.record(ast, key, today, now)
+            live += 1; existing[name] = 'PROVISIONING'
+            A.record(ast, key, today, now); save_state(st)      # persisted at once: a restart before the pass ends never re-creates it
             st.setdefault('aqa_runs', {})[name] = {'repo': repo, 'sha': run['head_sha'], 'env': env, 'created': now,
                                                    'evidence': cfg['evidence_template'].format(env=A.aqa_env(env), sha=run['head_sha'], repo=repo),
                                                    'tasks': ids}
@@ -804,9 +824,13 @@ def tick(gh, gcp, st, mode='scale'):
     webhook_live = now - EVENTS['last_event'] < 900 and not EVENTS.get('need_full_poll', True)
     if every(st, 'reconcile', RECONCILE_S if webhook_live else 60, now) or mode != 'scale' or EVENTS.get('need_full_poll', True):
         EVENTS['need_full_poll'] = False   # first pass after a start: poll every queued job (webhook events sent while down are lost)
-        polled = queued_jobs(gh)
+        with LOCK: recent = dict(EVENTS.get('recent', {}))
+        polled = queued_jobs(gh, recent)
         with LOCK:
-            EVENTS['jobs'] = polled
+            fresh = {k: j for k, j in EVENTS['jobs'].items() if now - j['created'] < 120}   # listing lag: a just-queued webhook job survives
+            EVENTS['jobs'] = dict(fresh, **polled)
+            EVENTS['recent'] = {n: t for n, t in EVENTS.get('recent', {}).items() if now - t < 7200}
+    with LOCK: st['recent'] = dict(EVENTS.get('recent', {}))         # survives a restart (the first full poll needs it)
     with LOCK:
         jobs = list(EVENTS['jobs'].values()); done = set(EVENTS['done_runners'])
         waits, EVENTS['waits'] = EVENTS['waits'], []
@@ -1260,6 +1284,7 @@ def _ref():
 def main():
     mode = (sys.argv[1:] or ['loop'])[0]
     gcp = GCP(PROJECT); gh = GitHub(gcp); st = load_state()
+    EVENTS['recent'] = dict(st.get('recent', {}))
     METRICS.upload = lambda p, b: None if DRY else gcp.storage_upload(METRICS_BUCKET, p, b, 'application/x-ndjson')
     if not E('TEAMS_WEBHOOK'):
         try: os.environ['TEAMS_WEBHOOK'] = gcp.secret('nbci-teams-webhook')

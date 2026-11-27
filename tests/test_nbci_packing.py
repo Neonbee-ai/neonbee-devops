@@ -7,8 +7,11 @@ sys.path.insert(0, os.path.join(ROOT, 'runner', 'controller'))
 import nbci_logic as L  # noqa: E402
 
 CFG = json.load(open(os.path.join(ROOT, 'ci', 'runner-labels.json')))
-CLS = CFG['classes']; BY = {c['name']: c for c in CLS}
-LEGACY = BY['legacy']; PROD = BY['legacy-prod']
+BY = {c['name']: c for c in CFG['classes']}
+LIVE_LEGACY = BY['legacy']; PROD = BY['legacy-prod']
+# slot math below is generic: it runs on a 4-slot class; the live class (8 slots) is pinned in Config/Quota
+LEGACY = dict(LIVE_LEGACY, machine='e2-standard-4', vcpu=4, ram_gb=16, slots=4)
+CLS = [LEGACY if c['name'] == 'legacy' else c for c in CFG['classes']]; BY = {c['name']: c for c in CLS}
 NOW = 1_800_000_000
 LJOB = ['self-hosted', 'runner-vm']
 PJOB = ['self-hosted', 'runner-vm', 'lane-prod']
@@ -33,8 +36,9 @@ def online(*names, busy=()):
 
 
 class Config(unittest.TestCase):
-    def test_given_the_measured_load_then_legacy_vms_carry_four_slots_and_deploy_lanes_one(self):
-        self.assertEqual((LEGACY['machine'], L.slots_of(LEGACY)), ('e2-standard-4', 4))
+    def test_given_ips_are_the_cap_then_legacy_vms_carry_eight_slots_on_e2_standard_8_and_deploy_lanes_one(self):
+        self.assertEqual((LIVE_LEGACY['machine'], L.slots_of(LIVE_LEGACY)), ('e2-standard-8', 8))
+        self.assertEqual(LIVE_LEGACY['ram_gb'] // L.slots_of(LIVE_LEGACY), 4)        # same 4 GB a slot as the measured 4-slot VM
         self.assertEqual(L.slots_of(PROD), 1)
         self.assertFalse(L.packed(PROD))
 
@@ -42,7 +46,7 @@ class Config(unittest.TestCase):
         self.assertEqual(L.slots_of(BY['gate']), 1)
 
     def test_the_aqa_reserve_is_one_vm(self):
-        self.assertEqual(CFG['quota']['reserve_aqa'], {'vcpu': 4, 'ips': 1})
+        self.assertEqual(CFG['quota']['reserve_aqa'], {'vcpu': 2, 'ips': 1})
 
 
 class SlotMath(unittest.TestCase):
@@ -179,13 +183,26 @@ class Supply(unittest.TestCase):
 
 
 class Quota(unittest.TestCase):
-    def test_given_todays_quota_then_six_legacy_vms_fit_and_one_aqa_vm_stays_free(self):
+    def test_given_todays_quota_then_three_legacy_vms_give_24_slots_and_leave_ips_for_deploys_and_aqa(self):
         room = L.capacity(QUOTA, {}, CFG['quota']['reserve_aqa'])
         n = 0
-        while L.fits(LEGACY, room):
-            room = L.take(LEGACY, room); n += 1
-        self.assertEqual(n, 6)                       # 6 x 4 slots = 24 parallel jobs
-        self.assertEqual((room['vcpu'], room['ips']), (2, 0))
+        while L.fits(LIVE_LEGACY, room):
+            room = L.take(LIVE_LEGACY, room); n += 1
+        self.assertEqual(n * L.slots_of(LIVE_LEGACY), 24)   # 3 x 8 slots = 24 parallel jobs on 3 IPs (was 6 IPs for 24)
+        self.assertEqual((room['vcpu'], room['ips']), (4, 3))
+
+    def test_given_three_legacy_vms_bought_then_a_deploy_vm_still_starts_from_the_deploy_reserve(self):
+        reserve = CFG['quota']['reserve_deploy_vcpu']
+        room = L.capacity(QUOTA, {}, CFG['quota']['reserve_aqa'])
+        n = 0
+        while L.fits(LIVE_LEGACY, room) and L.may_start(LIVE_LEGACY, 'ok', room['vcpu'], reserve):
+            room = L.take(LIVE_LEGACY, room); n += 1
+        self.assertEqual(n, 3)
+        self.assertTrue(L.fits(PROD, room) and L.may_start(PROD, 'ok', room['vcpu'], reserve))
+
+    def test_given_the_spend_cap_then_the_packed_legacy_lane_still_starts(self):
+        self.assertTrue(L.may_start(LIVE_LEGACY, 'capped', 12, 4))
+        self.assertFalse(L.may_start(LIVE_LEGACY, 'ok', 11, 4))
 
     def test_given_ips_are_the_limit_then_no_vm_starts_without_a_free_ip(self):
         q = dict(QUOTA, IN_USE_ADDRESSES=(8, 7))
