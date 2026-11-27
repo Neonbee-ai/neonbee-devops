@@ -203,8 +203,10 @@ class Quota(unittest.TestCase):
         n = 0
         while L.fits(LIVE_LEGACY, room) and L.may_start(LIVE_LEGACY, 'ok', room['vcpu'], reserve):
             room = L.take(LIVE_LEGACY, room); n += 1
-        self.assertEqual(n, 3)
-        self.assertTrue(L.fits(PROD, room) and L.may_start(PROD, 'ok', room['vcpu'], reserve))
+        self.assertEqual(n, 2)                    # reserve 12: 2 legacy VMs (16 slots) leave room for 3 deploy VMs at once
+        d = 0
+        while L.fits(PROD, room): room = L.take(PROD, room); d += 1
+        self.assertEqual(d, 3)
 
     def test_given_the_spend_cap_then_the_packed_legacy_lane_still_starts(self):
         self.assertTrue(L.may_start(LIVE_LEGACY, 'capped', 12, 4))
