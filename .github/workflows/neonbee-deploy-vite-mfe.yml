@@ -144,7 +144,8 @@ jobs:
       runs_on: ${{ steps.r.outputs.runs_on }}
       prior_pass: ${{ steps.prior.outputs.prior_pass || 'false' }}
       # deploy jobs: standard (non-Spot) nb-ci VMs in auto mode, a preemption cannot leave a partial deploy
-      deploy_runs_on: ${{ vars.NB_CI_MODE == 'auto' && '["self-hosted","nb-deploy"]' || steps.r.outputs.runs_on }}
+      # deploy = one job on a fresh standard (non-Spot) VM, never a shared packed slot (class legacy-prod)
+      deploy_runs_on: ${{ vars.NB_CI_MODE == 'auto' && '["self-hosted","nb-deploy"]' || '["self-hosted","runner-vm","lane-dev"]' }}
     steps:
       - id: r
         env:
