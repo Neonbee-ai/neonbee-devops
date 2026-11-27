@@ -583,6 +583,7 @@ def _aqa_events(gh, gcp, st, now, today, failures, cfg, pending, later):
                                                    'evidence': cfg['evidence_template'].format(env=A.aqa_env(env), sha=run['head_sha'], repo=repo),
                                                    'tasks': ids}
         else:
+            later.append(ev)            # quota/billing/api: retried next pass (2 h window), never silently dropped
             notify(st, 'AQA VM create failed for %s@%s (%s)' % (repo, run['head_sha'][:8], ','.join(sorted({k for _, k in failures})) or 'api'),
                    key='aqacreate' + key)
 

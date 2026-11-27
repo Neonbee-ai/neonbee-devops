@@ -190,9 +190,22 @@ class AqaResults(unittest.TestCase):
 
         class G:
             def storage_exists(self, b, n): raise RuntimeError('GET storage -> 403 denied')
-        nbci.aqa_trigger(self._gh(), G(), st, NOW, '2026-11-27', [])
+        dry, nbci.DRY = nbci.DRY, False
+        try: nbci.aqa_trigger(self._gh(), G(), st, NOW, '2026-11-27', [])
+        finally: nbci.DRY = dry
         self.assertEqual(len(st['aqa_pending']), 1)
         self.assertNotIn('aqa_bundle', st)
+
+    def test_given_the_vm_create_hits_quota_then_the_deploy_event_is_held_not_dropped(self):
+        st = fresh_state(); self._dev_event(); st['aqa_bundle'] = 'f' * 40
+
+        class G:
+            def compute(self, p, m='GET', b=None): raise RuntimeError("POST -> 403 QUOTA_EXCEEDED Quota 'IN_USE_ADDRESSES' exceeded")
+        dry, nbci.DRY = nbci.DRY, False
+        try: nbci.aqa_trigger(self._gh(), G(), st, NOW, '2026-11-27', [])
+        finally: nbci.DRY = dry
+        self.assertEqual(len(st['aqa_pending']), 1)
+        self.assertNotIn(A.dedupe_key('so360-forms-be', 'd' * 40), st.get('aqa', {}).get('done', {}))
 
     def test_given_the_bundle_already_exists_then_it_is_not_rebuilt_and_remembered(self):
         st = {}
