@@ -16,12 +16,43 @@ echo 'runner ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/runner
 # versions are pinned (no unauthenticated GitHub REST call: shared GCP IPs hit its rate limit); bump on rebuild
 V=${RUNNER_VERSION:-2.338.2}
 GL=${GITLEAKS_VERSION:-8.30.1}
-( # A (apt): Actions runner + its deps, then Playwright Chromium system deps + browser into the runner's cache
+# Heavy tools run through /opt/nb-tools.sh, which writes /opt/nb-ready.<tool> (or /opt/nb-failed.<tool>).
+# Image build (no NB_STARTUP): run inline and wait for everything. Startup/packed VM: start them as transient
+# systemd units and let the runner + slots come up as soon as the runner and Node are ready; semgrep is a shim
+# that waits for its marker, Playwright browsers are copied into a slot's HOME once their marker exists.
+cat > /opt/nb-tools.sh <<'TOOLS'
+#!/bin/bash
+export DEBIAN_FRONTEND=noninteractive HOME=${HOME:-/root}
+t=$1
+case $t in
+  semgrep) # venv: the debian-owned typing_extensions cannot be uninstalled by a system-wide pip
+    python3 -m venv /opt/semgrep && /opt/semgrep/bin/pip install -q semgrep ;;
+  playwright) # apt (system deps) then the browser into the runner's cache
+    npx -y playwright@1 install-deps chromium && sudo -u runner -H npx -y playwright@1 install chromium ;;
+  *) exit 2 ;;
+esac && touch "/opt/nb-ready.$t" || { touch "/opt/nb-failed.$t"; exit 1; }
+TOOLS
+chmod 755 /opt/nb-tools.sh
+cat > /usr/local/bin/semgrep <<'SHIM'
+#!/bin/bash
+# waits for the background semgrep install (max 10 min), then runs the real binary
+for _ in $(seq 1 600); do
+  [ -f /opt/nb-ready.semgrep ] && exec /opt/semgrep/bin/semgrep "$@"
+  [ -f /opt/nb-failed.semgrep ] && { echo "semgrep install failed on this VM" >&2; exit 127; }
+  sleep 1
+done
+echo "semgrep not ready after 10 min" >&2; exit 127
+SHIM
+chmod 755 /usr/local/bin/semgrep
+rm -f /opt/nb-ready.* /opt/nb-failed.*
+lazy_tool() { systemd-run --quiet --no-block --unit="nb-tool-$1" -E DEBIAN_FRONTEND=noninteractive -E HOME=/root /opt/nb-tools.sh "$1"; }
+[ -z "${NB_STARTUP:-}" ] || lazy_tool semgrep
+( # A (apt): Actions runner + its deps; then (image build only, inline) Playwright system deps + browser
   mkdir -p /opt/runner && curl -fsSL "https://github.com/actions/runner/releases/download/v$V/actions-runner-linux-x64-$V.tar.gz" | tar xz -C /opt/runner
   /opt/runner/bin/installdependencies.sh
   echo 'RUNNER_TOOLSDIRECTORY=/opt/hostedtoolcache' >> /opt/runner/.env
-  npx -y playwright@1 install-deps chromium
-  sudo -u runner -H npx -y playwright@1 install chromium
+  # apt is free again: Playwright deps follow (lazily on a startup VM, inline for an image)
+  if [ -n "${NB_STARTUP:-}" ]; then lazy_tool playwright; else /opt/nb-tools.sh playwright; fi
 ) & PA=$!
 ( # B: Node in the Actions tool cache so setup-node finds it instead of downloading it on every job
   mkdir -p /opt/hostedtoolcache/node/$NODEV/x64
@@ -31,10 +62,11 @@ GL=${GITLEAKS_VERSION:-8.30.1}
 ( # C: gitleaks
   curl -fsSL "https://github.com/gitleaks/gitleaks/releases/download/v${GL}/gitleaks_${GL}_linux_x64.tar.gz" | tar xz -C /usr/local/bin gitleaks
 ) & PC=$!
-( # D: semgrep in a venv: the debian-owned typing_extensions cannot be uninstalled by a system-wide pip (broke every startup-mode boot)
-  python3 -m venv /opt/semgrep && /opt/semgrep/bin/pip install -q semgrep && ln -sf /opt/semgrep/bin/semgrep /usr/local/bin/semgrep
+( # D: semgrep (image build only; a startup VM runs it as a unit started above)
+  [ -n "${NB_STARTUP:-}" ] || /opt/nb-tools.sh semgrep
 ) & PD=$!
 wait $PA; wait $PB; wait $PC; wait $PD
+[ -n "${NB_STARTUP:-}" ] || { [ -f /opt/nb-ready.semgrep ] && [ -f /opt/nb-ready.playwright ]; }
 chown -R runner: /opt/runner /opt/hostedtoolcache
 
 # warm npm cache (image only)

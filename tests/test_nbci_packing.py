@@ -388,8 +388,34 @@ class FastBoot(unittest.TestCase):
         self.assertIn('wait $PA; wait $PB; wait $PC; wait $PD', self.PROV)
         a = self.PROV[self.PROV.index('( # A (apt)'):self.PROV.index(') & PA=$!')]
         self.assertIn('installdependencies.sh', a)       # every apt user stays in one group (apt lock)
-        self.assertIn('playwright@1 install-deps', a)
+        self.assertIn('lazy_tool playwright', a)         # playwright apt deps start only after the runner deps are done
+        self.assertIn('playwright@1 install-deps', self.PROV)
         self.assertNotIn('apt-get', self.PROV[self.PROV.index(') & PA=$!'):self.PROV.index('wait $PA')])
+
+    def test_given_a_startup_vm_then_the_slow_tools_install_in_the_background_and_do_not_gate_the_runner(self):
+        p = self.PROV
+        self.assertIn('lazy_tool() { systemd-run', p)
+        self.assertIn('[ -z "${NB_STARTUP:-}" ] || lazy_tool semgrep', p)
+        self.assertIn('if [ -n "${NB_STARTUP:-}" ]; then lazy_tool playwright', p)
+        # the only things awaited before the runner starts are the runner, Node and gitleaks
+        self.assertIn('[ -n "${NB_STARTUP:-}" ] || /opt/nb-tools.sh semgrep', p)
+
+    def test_given_an_image_build_then_every_tool_must_be_ready_or_the_build_fails(self):
+        self.assertIn('{ [ -f /opt/nb-ready.semgrep ] && [ -f /opt/nb-ready.playwright ]; }', self.PROV)
+
+    def test_given_semgrep_is_still_installing_then_the_shim_waits_and_a_failed_install_is_loud(self):
+        shim = self.PROV.split("cat > /usr/local/bin/semgrep <<'SHIM'")[1].split('\nSHIM\n')[0]
+        self.assertIn('/opt/nb-ready.semgrep', shim)
+        self.assertIn('exec /opt/semgrep/bin/semgrep "$@"', shim)
+        self.assertIn('exit 127', shim)                  # never a silent pass
+
+    def test_given_a_tool_install_fails_then_a_failed_marker_is_written(self):
+        self.assertIn('touch "/opt/nb-failed.$t"', self.PROV)
+
+    def test_given_playwright_is_not_ready_at_slot_start_then_the_slot_copies_it_before_a_later_job(self):
+        s = open(os.path.join(ROOT, 'runner', 'image', 'slots.sh')).read()
+        self.assertIn('[ -f /opt/nb-ready.playwright ]', s)
+        self.assertLess(s.index('/opt/nb-ready.playwright'), s.index('rsync -a --delete'))
 
     def test_provision_still_parses(self):
         r = subprocess.run(['bash', '-n', '-c', self.PROV], capture_output=True, text=True)
