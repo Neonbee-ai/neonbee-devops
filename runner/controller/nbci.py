@@ -450,8 +450,9 @@ def _aqa_events(gh, gcp, st, now, today, failures, cfg, pending, later):
         try:
             qa_sha = gh('repos/%s/%s/commits/%s' % (ORG, cfg['qa_repo'], cfg['qa_ref']))['sha']
             script = base64.b64decode(gh('repos/%s/%s/contents/%s?ref=%s' % (ORG, cfg['qa_repo'], cfg['startup_path'], qa_sha))['content']).decode()
-        except (RuntimeError, KeyError) as e:
-            log('aqa held: cannot read %s@%s' % (cfg.get('qa_repo'), cfg.get('qa_ref')), str(e)[:120]); continue
+            ensure_bundle(gh, gcp, st, cfg, qa_sha)
+        except Exception as e:          # held, not dropped: retried every pass until the event is 2 h old
+            log('aqa held: cannot read/bundle %s@%s' % (cfg.get('qa_repo'), cfg.get('qa_ref')), str(e)[:120]); later.append(ev); continue
         machine, workers = A.sizing(len(ids))
         name = A.vm_name(env, run['head_sha'])
         commits = json.dumps([{'message': m[:500], 'branch': run['head_branch'], 'prBody': ''} for m in msgs])
@@ -477,6 +478,35 @@ def _aqa_events(gh, gcp, st, now, today, failures, cfg, pending, later):
         else:
             notify(st, 'AQA VM create failed for %s@%s (%s)' % (repo, run['head_sha'][:8], ','.join(sorted({k for _, k in failures})) or 'api'),
                    key='aqacreate' + key)
+
+
+def ensure_bundle(gh, gcp, st, cfg, qa_sha):
+    """gs://.../aqa/<qa_sha>.tgz (what the AQA VM downloads) exists: built here from the GitHub tarball of
+    neonbee-qa@qa_sha with aqa/bundle.sh's selection when absent. Once per qa sha; no deploy-side step needed."""
+    if st.get('aqa_bundle') == qa_sha:
+        return
+    import tarfile, tempfile, urllib.request
+    bucket, obj = A.gs_split(cfg['bundle_template'].format(qa_sha=qa_sha))
+    if not gcp.storage_exists(bucket, obj):
+        r = urllib.request.Request('https://api.github.com/repos/%s/%s/tarball/%s' % (ORG, cfg['qa_repo'], qa_sha),
+                                   headers={'Authorization': 'Bearer ' + gh.token(), 'Accept': 'application/vnd.github+json'})
+        n = 0
+        with tempfile.TemporaryFile() as out:
+            with urllib.request.urlopen(r, timeout=300) as f, tarfile.open(fileobj=f, mode='r|gz') as src, \
+                    tarfile.open(fileobj=out, mode='w:gz') as dst:
+                for m in src:
+                    rel = A.bundle_path(m.name)
+                    if not rel or not (m.isfile() or m.isdir()):
+                        continue
+                    m.name = rel
+                    dst.addfile(m, src.extractfile(m) if m.isfile() else None); n += m.isfile()
+            if not n:
+                raise RuntimeError('empty bundle for %s' % qa_sha[:8])
+            out.seek(0)
+            if not DRY:
+                gcp.storage_upload(bucket, obj, out.read())
+        log('aqa bundle built', obj, '%d files' % n)
+    st['aqa_bundle'] = qa_sha
 
 
 def reap_aqa(gcp):

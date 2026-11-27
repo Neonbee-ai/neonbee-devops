@@ -164,6 +164,67 @@ class AqaResults(unittest.TestCase):
         nbci.aqa_trigger(lambda *a, **k: {}, None, st, NOW, '2026-11-27', [], vm_room=False)
         self.assertEqual(len(st['aqa_pending']), 1)
 
+    def _dev_event(self, sha='d' * 40):
+        nbci.EVENTS['aqa'] = [{'repo': 'so360-forms-be', 'run': {'id': 2, 'name': 'Deploy', 'event': 'push', 'conclusion': 'success',
+                               'head_branch': 'develop', 'head_sha': sha, 'workflow_id': 9, 'html_url': ''}}]
+
+    def _gh(self, startup_ok=True):
+        def gh(path, method='GET', body=None, cache=False):
+            if 'check-runs' in path: return {'check_runs': []}
+            if '/runs?' in path: return {'workflow_runs': []}
+            if '/commits/main' in path: return {'sha': 'f' * 40}
+            if '/commits/' in path: return {'sha': 'd' * 40, 'commit': {'message': 'x\n\nPulse: 652ffcd8'}}
+            if '/contents/' in path:
+                if not startup_ok: raise RuntimeError('GET contents -> 404 Not Found')
+                return {'content': 'IyEvYmluL2Jhc2g='}
+            raise RuntimeError('unexpected ' + path)
+        return gh
+
+    def test_given_the_startup_script_is_missing_then_the_deploy_event_is_held_not_dropped(self):
+        st = fresh_state(); self._dev_event()
+        nbci.aqa_trigger(self._gh(startup_ok=False), None, st, NOW, '2026-11-27', [])
+        self.assertEqual(len(st['aqa_pending']), 1)
+
+    def test_given_the_bundle_cannot_be_built_then_the_deploy_event_is_held_not_dropped(self):
+        st = fresh_state(); self._dev_event()
+
+        class G:
+            def storage_exists(self, b, n): raise RuntimeError('GET storage -> 403 denied')
+        nbci.aqa_trigger(self._gh(), G(), st, NOW, '2026-11-27', [])
+        self.assertEqual(len(st['aqa_pending']), 1)
+        self.assertNotIn('aqa_bundle', st)
+
+    def test_given_the_bundle_already_exists_then_it_is_not_rebuilt_and_remembered(self):
+        st = {}
+
+        class G:
+            uploads = 0
+            def storage_exists(self, b, n): self.where = (b, n); return True
+            def storage_upload(self, *a): G.uploads += 1
+        g = G()
+        nbci.ensure_bundle(None, g, st, {'bundle_template': 'gs://bkt/aqa/{qa_sha}.tgz', 'qa_repo': 'neonbee-qa'}, 'f' * 40)
+        self.assertEqual(g.where, ('bkt', 'aqa/' + 'f' * 40 + '.tgz'))
+        self.assertEqual((G.uploads, st['aqa_bundle']), (0, 'f' * 40))
+        nbci.ensure_bundle(None, None, st, {}, 'f' * 40)      # cached: no GCS call at all
+
+    def test_given_a_github_tarball_then_the_bundle_keeps_only_the_bundle_sh_selection(self):
+        top = 'Neonbee-ai-neonbee-qa-4008e0a/'
+        keep = {top + 'aqa/vm-startup.sh': 'aqa/vm-startup.sh', top + 'engine/secret-names.txt': 'engine/secret-names.txt',
+                top + 'comb-beeline/e2e/lib/a.mjs': 'comb-beeline/e2e/lib/a.mjs',
+                top + 'comb-beeline/e2e/journeys/ai/x.spec.mjs': 'comb-beeline/e2e/journeys/ai/x.spec.mjs',
+                top + 'comb-beeline/e2e/package.json': 'comb-beeline/e2e/package.json', top + 'aqa/': 'aqa'}
+        drop = [top, top + 'README.md', top + 'aqa/replay.test.mjs', top + 'comb-beeline/e2e/lib/node_modules/p/i.js',
+                top + 'comb-beeline/e2e/sessions/s.json', top + 'comb-beeline/e2e/specs/y.mjs', top + 'engine/.aqa-state/x']
+        for m, want in keep.items():
+            self.assertEqual(A.bundle_path(m), want, m)
+        for m in drop:
+            self.assertIsNone(A.bundle_path(m), m)
+        self.assertEqual(A.gs_split('gs://b/aqa/s.tgz'), ('b', 'aqa/s.tgz'))
+
+    def test_given_the_vite_deploy_then_it_has_no_dead_aqa_bundle_step_so_no_variable_gates_aqa(self):
+        wf = read('.github', 'workflows', 'neonbee-deploy-vite-mfe.yml')
+        self.assertNotIn('NB_AQA_BUNDLE', wf)
+
     def test_given_the_vm_startup_contract_then_the_relay_and_result_file_are_documented(self):
         self.assertIn('result.json', read('runner', 'controller', 'RUNBOOK.md'))
 

@@ -63,6 +63,25 @@ class GCP:
         return req('https://storage.googleapis.com/storage/v1/b/%s/o/%s?alt=media' % (bucket, urllib.parse.quote(name, safe='')),
                    headers={'Authorization': 'Bearer ' + self.token()}, timeout=20)[1]
 
+    def storage_exists(self, bucket, name):
+        try:
+            req('https://storage.googleapis.com/storage/v1/b/%s/o/%s' % (bucket, urllib.parse.quote(name, safe='')),
+                headers={'Authorization': 'Bearer ' + self.token()}, timeout=20)
+            return True
+        except RuntimeError as e:
+            if ' 404 ' in str(e):
+                return False
+            raise
+
+    def storage_upload(self, bucket, name, data, ctype='application/gzip'):
+        """Create-only upload (ifGenerationMatch=0): an object that already exists is left as it is."""
+        try: req('https://storage.googleapis.com/upload/storage/v1/b/%s/o?uploadType=media&name=%s&ifGenerationMatch=0' % (
+            bucket, urllib.parse.quote(name, safe='')), 'POST', data,
+            {'Authorization': 'Bearer ' + self.token(), 'Content-Type': ctype}, timeout=120)
+        except RuntimeError as e:
+            if ' 412 ' not in str(e):
+                raise
+
     def wait_op(self, op, zone=None, timeout=300):
         end = time.time() + timeout
         while time.time() < end:

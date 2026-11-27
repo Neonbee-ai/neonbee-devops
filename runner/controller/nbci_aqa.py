@@ -42,6 +42,29 @@ def pulse_ids(messages):
     return out
 
 
+BUNDLE_DIRS = ('aqa/', 'engine/', 'comb-beeline/e2e/lib/', 'comb-beeline/e2e/journeys/')
+BUNDLE_FILES = ('comb-beeline/e2e/package.json',)
+BUNDLE_SKIP = ('node_modules', 'sessions', '.aqa-state')
+
+
+def bundle_path(member):
+    """Path inside the AQA bundle for one member of a GitHub tarball (`<owner>-<repo>-<sha>/...`), or None.
+    Same selection as neonbee-qa aqa/bundle.sh: aqa/, engine/, e2e lib + journeys + package.json, minus
+    node_modules, sessions, .aqa-state and *.test.mjs."""
+    rel = member.split('/', 1)[1] if '/' in member else ''
+    if not rel or rel.endswith('.test.mjs') or any(p in BUNDLE_SKIP for p in rel.split('/')):
+        return None
+    if rel in BUNDLE_FILES or any(rel.startswith(d) or rel + '/' == d for d in BUNDLE_DIRS):
+        return rel.rstrip('/')
+    return None
+
+
+def gs_split(uri):
+    """('bucket', 'object/path') from gs://bucket/object/path."""
+    b, _, o = uri[5:].partition('/')
+    return b, o
+
+
 def dedupe_key(repo, sha):
     return '%s@%s' % (repo, sha)
 
