@@ -877,7 +877,7 @@ def tick(gh, gcp, st, mode='scale'):
         else:
             r = rby.get(v['name'])
             why = L.vm_verdict(v, r, v['name'] in done, now, L.NO_JOB_STARTUP_S if RUNNER_BOOT == 'startup' else L.NO_JOB_S,
-                               MAX_RUN_S + 900) if mode != 'drain' else 'drain'
+                               MAX_RUN_S + 900, AQA_MAX_S) if mode != 'drain' else 'drain'
             rdesc = r and ('busy' if r['busy'] else r['status'])
             if mode == 'scale': L.acc_busy(vs, bool(r and r.get('busy')), dt_h * 3600)
         if mode == 'status':

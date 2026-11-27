@@ -118,17 +118,18 @@ def cap_creates(want, waiting, served, now, window_s=SERVE_WINDOW_S):
 LIFETIME = 'older than max lifetime'
 
 
-def vm_verdict(vm, runner, job_done, now, no_job_s=NO_JOB_S, max_s=None):
+def vm_verdict(vm, runner, job_done, now, no_job_s=NO_JOB_S, max_s=None, aqa_max_s=7200):
     """Why to delete one runner VM, or None. vm: {status, created}; runner: GitHub runner or None;
     job_done: the controller saw workflow_job completed for this VM's runner. max_s: hard lifetime
-    (GCE maxRunDuration should already have deleted it; this is the backstop, busy or not)."""
+    (GCE maxRunDuration should already have deleted it; this is the backstop, busy or not).
+    aqa-* VMs (label nb-class=aqa) use aqa_max_s instead: a replay legitimately outlives the CI job lifetime."""
     if vm['status'] in DEAD:
         return 'stopped (%s): disk still bills' % vm['status']
+    if vm.get('cls') == 'aqa' or str(vm.get('name', '')).startswith('aqa-'):
+        # AQA VMs have no runner: the VM deletes itself at exit; the reaper removes a TERMINATED one (above) and any older than aqa_max_s
+        return 'aqa VM older than %d min' % (aqa_max_s // 60) if now - vm['created'] >= aqa_max_s else None
     if max_s and now - vm['created'] >= max_s:
         return LIFETIME + ' (%d min)' % ((now - vm['created']) // 60)
-    if vm.get('cls') == 'aqa':
-        # AQA VMs have no runner: the VM deletes itself at exit; the reaper removes a TERMINATED one (above) and any older than 30 min
-        return 'aqa VM older than 30 min' if now - vm['created'] >= 1800 else None
     if job_done:
         return 'job completed'
     if runner and runner.get('busy'):
