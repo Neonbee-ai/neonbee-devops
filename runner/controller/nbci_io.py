@@ -33,35 +33,58 @@ def meta(path):
 
 
 # ── GCP ─────────────────────────────────────────────────────────────────────────────────────────────
+def token_cache_s(expires_in, margin_s=300, floor_s=30):
+    """Seconds to reuse a fresh GCP access token: its remaining life less a margin, never below floor_s
+    (unknown/short life -> re-read soon). Pure."""
+    return max(floor_s, int(expires_in or 0) - margin_s)
+
+
 class GCP:
+    # Refresh a metadata token this long before GCP says it expires. The metadata server hands out its cached
+    # token, which can have only minutes left: a fixed 25-min cache sent expired tokens for up to ~20 min
+    # (2026-11-27: controller listed 0 VMs on 401s, idle VMs never deleted, the guard then stopped nbci).
+    TOKEN_MARGIN_S = 300
+
     def __init__(self, project):
-        self.project, self._tok = project, (0, '')
+        self.project, self._tok = project, (0, '')     # (unix time the token stops being used, token)
 
     def token(self):
-        if time.time() - self._tok[0] > 1500:
+        if time.time() >= self._tok[0]:
             try:
-                t = json.loads(meta('instance/service-accounts/default/token'))['access_token']
+                d = json.loads(meta('instance/service-accounts/default/token'))
+                t, ttl = d['access_token'], int(d.get('expires_in', 0))
             except Exception:   # off-GCP read-only checks: GCP_ACCESS_TOKEN, else gcloud user credentials
                 if E('GCP_ACCESS_TOKEN'):
-                    self._tok = (time.time(), E('GCP_ACCESS_TOKEN')); return self._tok[1]
-                t = subprocess.check_output([E('GCLOUD', 'gcloud'), 'auth', 'print-access-token'], text=True, timeout=60).strip()
-            self._tok = (time.time(), t)
+                    self._tok = (time.time() + 1500, E('GCP_ACCESS_TOKEN')); return self._tok[1]
+                t, ttl = subprocess.check_output([E('GCLOUD', 'gcloud'), 'auth', 'print-access-token'], text=True, timeout=60).strip(), 1800
+            self._tok = (time.time() + token_cache_s(ttl, self.TOKEN_MARGIN_S), t)
         return self._tok[1]
 
+    def invalidate(self):
+        self._tok = (0, '')
+
+    def _authed(self, url, method='GET', body=None, headers=None, timeout=30):
+        """One GCP call; a 401 (token revoked/expired early) drops the cached token and retries once."""
+        for attempt in (1, 2):
+            try:
+                return req(url, method, body, dict(headers or {}, Authorization='Bearer ' + self.token()), timeout=timeout)
+            except RuntimeError as e:
+                if attempt == 1 and ' -> 401 ' in str(e):
+                    self.invalidate(); continue
+                raise
+
     def compute(self, path, method='GET', body=None):
-        return req('https://compute.googleapis.com/compute/v1/projects/%s%s' % (self.project, path), method, body,
-                   {'Authorization': 'Bearer ' + self.token()})[1]
+        return self._authed('https://compute.googleapis.com/compute/v1/projects/%s%s' % (self.project, path), method, body)[1]
 
     def secret(self, name):
-        d = req('https://secretmanager.googleapis.com/v1/projects/%s/secrets/%s/versions/latest:access' % (self.project, name),
-                headers={'Authorization': 'Bearer ' + self.token()})[1]
+        d = self._authed('https://secretmanager.googleapis.com/v1/projects/%s/secrets/%s/versions/latest:access' % (self.project, name))[1]
         return base64.b64decode(d['payload']['data']).decode()
 
     def storage_json(self, bucket, name):
         """One small JSON object from GCS (raises RuntimeError '... 404 ...' when absent)."""
         import urllib.parse
-        return req('https://storage.googleapis.com/storage/v1/b/%s/o/%s?alt=media' % (bucket, urllib.parse.quote(name, safe='')),
-                   headers={'Authorization': 'Bearer ' + self.token()}, timeout=20)[1]
+        return self._authed('https://storage.googleapis.com/storage/v1/b/%s/o/%s?alt=media' % (bucket, urllib.parse.quote(name, safe='')),
+                            timeout=20)[1]
 
     def storage_exists(self, bucket, name):
         try:

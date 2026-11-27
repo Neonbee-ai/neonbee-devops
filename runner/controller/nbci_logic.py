@@ -400,6 +400,30 @@ def churn_verdict(vms, runners, queued_by_class, since, now, window_s=300, cap=8
     return None
 
 
+UNREGISTERED_S = NO_JOB_STARTUP_S + 300   # guard backstop: > the boot grace, so a provisioning VM is never reaped
+
+
+def unregistered_vms(vms, runners, seen, now, after_s=UNREGISTERED_S):
+    """Guard backstop, independent of the controller: live nbci VMs that have had no runner online or busy for
+    more than after_s (counted from boot, or from the last guard pass that saw one), e.g. a VM that never
+    registered, or a packed VM whose one-job slots were never refilled because nbci was down. Those VMs bill
+    and can never take a job: delete + alert. seen: the guard's own {vm name: last time a runner was live},
+    pruned to live VMs. Builders and AQA VMs have their own reapers. Returns [(vm, reason)]."""
+    live = [v for v in vms if v['status'] in LIVE and not v.get('builder') and v.get('cls') != 'aqa']
+    names = {v['name'] for v in live}
+    for k in [k for k in seen if k not in names]:
+        del seen[k]
+    out = []
+    for v in live:
+        if any(r.get('busy') or r.get('status') == 'online' for r in vm_runners(v, runners)):
+            seen[v['name']] = now
+            continue
+        last = max(seen.get(v['name'], 0), v.get('created', now))
+        if now - last > after_s:
+            out.append((v, 'no runner online for %ds' % (now - last)))
+    return out
+
+
 def aqa_reap_verdict(vm, now, max_s):
     """Any aqa-* VM (ours or the AQA agent's), except managed-instance-group members (their group owns them):
     TERMINATED -> delete (a stopped VM's disk bills); older than max_s -> delete. vm: {status, created, mig}."""
