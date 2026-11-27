@@ -60,6 +60,24 @@ Every alert is one comment on Pulse `71b8be5b` starting with `[nbci]`. Deduped p
 CI failures of a PR (not infra) go to the PR's Pulse task(s) from the commit trailers: comment, status `fixing`,
 one bug per task+check; the same check green again closes the bug and moves the task to `reverify`.
 
+## Merge train + promotion (continuous, laptop-free)
+
+`merge-train.timer` (every 5 min) -> `merge-train.service` -> `merge-train-run.py` -> `nbci_train.py`. Metadata `nbci-merge-train` =
+`develop` (default, ON) | `off`. Every open non-draft PR to develop in Neonbee-ai whose checks are all green and that is mergeable
+merges with `gh pr merge --squash --match-head-commit <sha>` as the nb-ci App (no label, no deadline). Up to 10 per tick in parallel
+(`MT_CAP`), one per repo, `so360-shell-fe` first. Skipped: neonbee-devops, drafts, conflicts, red/pending checks, labels `hold` /
+`do-not-merge` / `needs-migration`, any `database/migrations/**` or `*.sql` file. Pause one PR: label it `hold`. Pause all:
+`--metadata nbci-merge-train=off` + bootstrap re-run.
+
+Promotion develop->main, metadata `nbci-promote-main` = `off` (default) | `on`. When on, a repo's develop head D is promoted (one
+develop->main PR, merged with `--match-head-commit D`) only if `gs://neonbee-aqa-0521938031/replay/dev/<D>/result.json` says passed for
+exactly D; not_tested, failed, missing or another sha never promotes. After the merge the Live result `replay/prod/<main sha>` must
+pass, else one alert (Pulse alert task 71b8be5b + Teams; also when no result 90 min after the merge). State `/var/lib/merge-train/state.json`.
+Turn promotion on:
+
+    gcloud compute instances add-metadata nbci-controller --zone us-central1-a --project gen-lang-client-0521938031 --metadata nbci-promote-main=on
+    sudo /opt/nbci/src/runner/controller/bootstrap.sh
+
 ## Night train
 
 `night-train.timer` (every 15 min) -> `night-train.service` (oneshot, user nbci) -> `night-train-run.py` (GitHub App token +

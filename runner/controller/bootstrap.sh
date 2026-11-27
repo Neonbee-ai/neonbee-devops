@@ -148,6 +148,39 @@ NT_AQA_REPOS=$(attr nbci-nt-aqa-repos || true)
 NT_HOME=/var/lib/night-train
 HOME=/var/lib/night-train
 ENV
+# Continuous merge train (nbci_train.py): metadata nbci-merge-train develop|off (default develop = ON for develop),
+# nbci-promote-main on|off (default off; develop->main only after a real Dev AutoQA pass for the exact sha).
+cat > /etc/merge-train.env <<ENV
+MT_TRAIN=$(attr nbci-merge-train || echo develop)
+MT_PROMOTE=$(attr nbci-promote-main || echo off)
+MT_HOME=/var/lib/merge-train
+HOME=/var/lib/merge-train
+ENV
+cat > /etc/systemd/system/merge-train.service <<'U'
+[Unit]
+Description=merge train: merge green develop PRs; optional gated develop->main promotion
+After=network-online.target
+Wants=network-online.target
+[Service]
+Type=oneshot
+User=nbci
+EnvironmentFile=/etc/nbci.env
+EnvironmentFile=/etc/merge-train.env
+StateDirectory=merge-train
+ExecStart=/usr/bin/python3 /opt/nbci/src/runner/controller/merge-train-run.py
+TimeoutStartSec=280
+MemoryMax=250M
+Nice=5
+U
+cat > /etc/systemd/system/merge-train.timer <<'U'
+[Unit]
+Description=merge train every 5 min
+[Timer]
+OnCalendar=*:0/5
+AccuracySec=30s
+[Install]
+WantedBy=timers.target
+U
 cat > /etc/systemd/system/night-train.service <<'U'
 [Unit]
 Description=night train: one release tick (merges night-train PRs, develop->main, failures -> Pulse)
@@ -203,6 +236,7 @@ cat > /etc/cron.d/nbci <<'CRON'
 CRON
 systemctl daemon-reload
 systemctl enable --now caddy nbci nbci-guard nbci-update.timer
+if grep -qE "^MT_TRAIN=develop$" /etc/merge-train.env; then systemctl enable --now merge-train.timer; else systemctl disable --now merge-train.timer 2>/dev/null || true; fi
 if grep -qE "^NT_MODE=(dry|live)$" /etc/night-train.env; then systemctl enable --now night-train.timer; else systemctl disable --now night-train.timer 2>/dev/null || true; fi
 caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null 2>&1 &&
   { systemctl reload caddy || systemctl restart caddy; } || echo 'nbci: Caddyfile invalid - webhook down, polling only'
