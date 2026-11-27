@@ -818,7 +818,7 @@ def tick(gh, gcp, st, mode='scale'):
     day['vm_min'] += L.vm_minutes(vms, dt_h * 3600)
     vm_room = L.minutes_gate(day['vm_min'], DAILY_VM_MIN)
     if not vm_room:
-        notify(st, 'daily VM-minutes cap reached: %.0f of %.0f min today; no VM (deploy, gate or AQA) starts until 00:00 UTC. '
+        notify(st, 'daily VM-minutes cap reached: %.0f of %.0f min today; no gate or AQA VM starts (deploy VMs are exempt) until 00:00 UTC. '
                'Raise NB_DAILY_VM_MIN in /etc/nbci.env to lift it.' % (day['vm_min'], DAILY_VM_MIN), key='vmcap' + today, window_s=86400)
     if L.minutes_warn80(day['vm_min'], DAILY_VM_MIN):
         notify(st, 'daily VM-minutes at 80%%: %.0f of %.0f min used today' % (day['vm_min'], DAILY_VM_MIN), key='vm80' + today, window_s=86400)
@@ -955,7 +955,7 @@ def tick(gh, gcp, st, mode='scale'):
         room = cap['vcpu']
         reserve = cfg['quota']['reserve_deploy_vcpu']
         for c in want:
-            if image and vm_room and L.fits(c, cap) and L.may_start(c, spend, cap['vcpu'], reserve):
+            if image and L.minutes_room(c, vm_room) and L.fits(c, cap) and L.may_start(c, spend, cap['vcpu'], reserve):
                 if create_vm(gh, gcp, c, failures, image, issued):
                     started = True; cap = L.take(c, cap); room = cap['vcpu']
                     for _ in range(L.slots_of(c)):
