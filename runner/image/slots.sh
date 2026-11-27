@@ -6,6 +6,8 @@
 # private /tmp), has no sudo and cannot reach the metadata server; its processes are killed and its work
 # dir, temp files and HOME (npm content cache and Playwright browsers kept) are wiped after every job.
 N=${NB_SLOTS:-1}
+# a slot user sees only its own processes (no neighbour's argv/environ in /proc)
+mount -o remount,hidepid=invisible /proc 2>/dev/null || mount -o remount,hidepid=2 /proc || echo 'nb-ci: no hidepid'
 # 4 slots share 16 GB: a build peak spills to swap instead of the OOM killer taking a neighbour's job
 if ! swapon --show | grep -q /swapfile; then
   { fallocate -l 8G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile; } || echo 'nb-ci: no swap'
@@ -35,7 +37,14 @@ while :; do
     { umask 022; printf %s "$T" > /run/nb-gcs-token; }
   mkdir -p "$D" && rsync -a --delete /opt/runner/ "$D/" && chown -R "$U:" "$D"
   echo "== slot $i job start $(date -u +%FT%TZ)" >> "/var/log/nb-slot-$i.log"
-  sudo -u "$U" -H env ACTIONS_RUNNER_HOOK_JOB_STARTED=/opt/nb-disk-guard.sh "$D/run.sh" --jitconfig "$J" >> "/var/log/nb-slot-$i.log" 2>&1
+  # npm "global" config/prefix per slot: the shared Node in /opt/hostedtoolcache belongs to `runner`, so
+  # `npm config set ... --global` failed with EACCES on every slot (2026-11-27) and, made writable, would have
+  # shared one job's registry token with its neighbours. Both live in the slot HOME, wiped after the job.
+  # runuser, not sudo: sudo logs the whole command line (the JIT config) to the journal.
+  H=/home/$U
+  runuser -u "$U" -- env HOME="$H" USER="$U" LOGNAME="$U" NPM_CONFIG_GLOBALCONFIG="$H/.npmrc-global" \
+    NPM_CONFIG_PREFIX="$H/.npm-global" PATH="$H/.npm-global/bin:$PATH" \
+    ACTIONS_RUNNER_HOOK_JOB_STARTED=/opt/nb-disk-guard.sh "$D/run.sh" --jitconfig "$J" >> "/var/log/nb-slot-$i.log" 2>&1
   pkill -9 -u "$U" 2>/dev/null; sleep 1
   rm -rf "$D/_work"
   find /tmp /var/tmp /dev/shm -xdev -mindepth 1 -user "$U" -delete 2>/dev/null
