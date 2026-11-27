@@ -1032,3 +1032,25 @@ class MinutesCapExemption(unittest.TestCase):
     def test_given_room_left_then_every_class_may_start(self):
         for c in CLS:
             self.assertTrue(L.minutes_room(c, True))
+
+
+class CreateTimeout(unittest.TestCase):
+    TIMEOUT = RuntimeError('operation op-1 timed out')
+
+    def test_given_a_wait_timeout_when_the_instance_exists_then_it_counts_as_created(self):
+        seen = []
+        def compute(path): seen.append(path); return {'name': 'nbci-x', 'status': 'PROVISIONING'}
+        self.assertTrue(L.created_despite_timeout(self.TIMEOUT, compute, 'us-central1-a', 'nbci-x'))
+        self.assertEqual(seen, ['/zones/us-central1-a/instances/nbci-x'])
+
+    def test_given_a_wait_timeout_when_the_instance_is_404_then_the_next_zone_may_be_tried(self):
+        def compute(path): raise RuntimeError('GET u -> 404 not found')
+        self.assertFalse(L.created_despite_timeout(self.TIMEOUT, compute, 'z', 'n'))
+
+    def test_given_a_wait_timeout_when_the_lookup_fails_otherwise_then_no_second_vm_is_bought(self):
+        def compute(path): raise RuntimeError('GET u -> 503 busy')
+        self.assertTrue(L.created_despite_timeout(self.TIMEOUT, compute, 'z', 'n'))
+
+    def test_given_a_stockout_error_then_no_lookup_happens_and_the_next_zone_is_tried(self):
+        def compute(path): raise AssertionError('must not be called')
+        self.assertFalse(L.created_despite_timeout(RuntimeError('ZONE_RESOURCE_POOL_EXHAUSTED'), compute, 'z', 'n'))
