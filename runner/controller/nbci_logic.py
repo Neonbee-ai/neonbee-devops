@@ -556,12 +556,31 @@ def free_slots(vm, c, runners, now, max_s, job_max_s):
     return 0 if busy else 1
 
 
-def plan_packed(waiting, supply_by_class, classes):
-    """VMs to buy: per class, ceil((waiting jobs - free slots) / slots). Deploy (priority 0, standard) first."""
+ROUTE_SPILL_S = 90
+
+
+def aqa_max_live(cfg_max, ci_waiting):
+    """AQA never starves CI: while CI jobs wait for a VM, AQA keeps only its reserved VM (quota.reserve_aqa)
+    (2026-11-27: 3 aqa VMs live, 0 CI VMs, 16 jobs waiting)."""
+    return min(cfg_max, 1) if ci_waiting > 0 else cfg_max
+
+
+def spill_class(job_labels, classes):
+    """First VM class (not the controller) whose labels also cover a controller job's labels, or None."""
+    want = lower(job_labels)
+    return next((c for c in classes if c.get('host') != 'controller' and want <= lower(c['labels'])), None)
+
+
+def plan_packed(waiting, supply_by_class, classes, now=None, spill_s=ROUTE_SPILL_S):
+    """VMs to buy: per class, ceil((waiting jobs - free slots) / slots). Deploy (priority 0, standard) first.
+    A controller job (route/notify) waiting >= spill_s counts as demand for the packed class that also carries
+    its label, so a backlog behind the 2 controller runners buys slots (2026-11-27: 16 queued, want=0)."""
     import math
     need = {}
     for j in waiting:
         c = class_for(j['labels'], classes)
+        if c and c.get('host') == 'controller' and now is not None and now - j.get('created', now) >= spill_s:
+            c = spill_class(j['labels'], classes)
         if c and c.get('host') != 'controller':
             need[c['name']] = need.get(c['name'], 0) + 1
     out = []
