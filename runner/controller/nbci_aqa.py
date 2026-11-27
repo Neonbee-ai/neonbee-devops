@@ -132,10 +132,37 @@ def vm_body(cfg, name, zone, items, stem, max_run_s):
                            'onHostMaintenance': 'TERMINATE', 'maxRunDuration': {'seconds': cfg.get('max_run_s', 5400)}},
             'disks': [{'boot': True, 'autoDelete': True, 'initializeParams': {
                 'sourceImage': cfg.get('image', 'projects/ubuntu-os-cloud/global/images/family/ubuntu-2404-lts-amd64'),   # stock Ubuntu: vm-startup.sh is written for it; the nb-ci-runner image powers off when it finds no JIT config
-                'diskSizeGb': str(cfg.get('disk_gb', 30)), 'diskType': 'zones/%s/diskTypes/pd-balanced' % zone, 'labels': {stem: '1'}}}],
+                'diskSizeGb': str(cfg.get('disk_gb', 30)), 'diskType': 'zones/%s/diskTypes/%s' % (zone, cfg.get('disk_type', 'pd-balanced')), 'labels': {stem: '1'}}}],
             'networkInterfaces': [{'network': 'global/networks/default', 'accessConfigs': [{'type': 'ONE_TO_ONE_NAT', 'name': 'External NAT'}]}],
             'serviceAccounts': [{'email': sa, 'scopes': cfg.get('scopes', ['https://www.googleapis.com/auth/cloud-platform'])}] if sa else [],
             'metadata': {'items': meta}}
+
+
+def recent_deploy_events(runs, now, window_s=7200):
+    """Reconcile safety net for missed/lost workflow_run webhooks: successful runs of one repo finished inside the
+    window, as trigger events (the repo+sha dedupe makes repeats harmless)."""
+    import calendar, time as _t
+    out = []
+    for r in runs or []:
+        if r.get('conclusion') != 'success':
+            continue
+        try: t = calendar.timegm(_t.strptime(r.get('updated_at') or '', '%Y-%m-%dT%H:%M:%SZ'))
+        except ValueError: continue
+        if now - t < window_s:
+            out.append({'repo': (r.get('repository') or {}).get('name', ''), 'run': {k: r.get(k) for k in (
+                'id', 'name', 'event', 'conclusion', 'head_branch', 'head_sha', 'workflow_id', 'html_url')}})
+    return out
+
+
+def merge_pending(pending, extra, done):
+    """pending + extra, one event per repo+sha, skipping repo+shas that already had their AQA run."""
+    seen, out = set(done or {}), []
+    for e in list(pending) + list(extra):
+        k = dedupe_key(e['repo'], e['run'].get('head_sha') or '')
+        if k in seen:
+            continue
+        seen.add(k); out.append(e)
+    return out
 
 
 def gate_blocks(check_runs):

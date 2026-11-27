@@ -398,6 +398,9 @@ def aqa_trigger(gh, gcp, st, now, today, failures, vm_room=True):
         pending = st.pop('aqa_pending', []) + [dict(e, seen=e.get('seen', now)) for e in EVENTS['aqa']]   # persisted: survives a restart
         EVENTS['aqa'] = []
     pending += take_backfill(now)
+    if every(st, 'aqa-reconcile', 600, now):          # missed/lost webhooks: poll recent successful deploys
+        pending += reconcile_deploys(gh, now)
+    pending = A.merge_pending(pending, [], st.get('aqa', {}).get('done', {}))
     later = []
     try:
         if not pending or not cfg.get('enabled'):
@@ -408,11 +411,32 @@ def aqa_trigger(gh, gcp, st, now, today, failures, vm_room=True):
             return
         _aqa_events(gh, gcp, st, now, today, failures, cfg, pending, later)
     finally:
-        st['aqa_pending'] = [e for e in later if now - e.get('seen', now) < 7200][-50:]
+        st['aqa_pending'] = [e for e in later if now - e.get('seen', now) < 86400][-200:]   # queued behind caps: kept a day, never silently lost
+
+
+def reconcile_deploys(gh, now):
+    out, since = [], now - 7200
+    try:
+        for r in gh('orgs/%s/repos?sort=pushed&direction=desc&per_page=100' % ORG, cache=True):
+            if r['archived'] or not r['pushed_at'] or ts(r['pushed_at']) < since - 3600:
+                continue
+            runs = gh('repos/%s/actions/runs?status=success&per_page=10' % r['full_name'], cache=True).get('workflow_runs', [])
+            out += A.recent_deploy_events(runs, now)
+    except (RuntimeError, KeyError) as e:
+        log('aqa reconcile', str(e)[:120])
+    return out
+
+
+def live_aqa(gcp):
+    n = 0
+    for z in ZONES:
+        n += sum(1 for v in gcp.compute('/zones/%s/instances?filter=name%%3Daqa-*' % z).get('items', []) if v['status'] != 'TERMINATED')
+    return n
 
 
 def _aqa_events(gh, gcp, st, now, today, failures, cfg, pending, later):
     ast = st.setdefault('aqa', {})
+    live = None
     for ev in pending:
         repo, run = ev['repo'], ev['run']
         env = A.deploy_env(run, cfg)
@@ -453,6 +477,11 @@ def _aqa_events(gh, gcp, st, now, today, failures, cfg, pending, later):
             ensure_bundle(gh, gcp, st, cfg, qa_sha)
         except Exception as e:          # held, not dropped: retried every pass until the event is 2 h old
             log('aqa held: cannot read/bundle %s@%s' % (cfg.get('qa_repo'), cfg.get('qa_ref')), str(e)[:120]); later.append(ev); continue
+        if live is None:
+            try: live = live_aqa(gcp)
+            except Exception as e: live = 0; log('aqa live count', str(e)[:100])
+        if live >= cfg.get('max_live', 3):
+            later.append(ev); continue                  # IP / vCPU caps: queue, retried next pass
         machine, workers = A.sizing(len(ids))
         name = A.vm_name(env, run['head_sha'])
         commits = json.dumps([{'message': m[:500], 'branch': run['head_branch'], 'prBody': ''} for m in msgs])
@@ -471,6 +500,7 @@ def _aqa_events(gh, gcp, st, now, today, failures, cfg, pending, later):
                 k = L.classify_gce_error(str(e)); failures.append((z, k)); log('aqa create failed', z, k, str(e)[:160])
                 if k in ('billing', 'quota'): break
         if made:
+            live += 1
             A.record(ast, key, today, now)
             st.setdefault('aqa_runs', {})[name] = {'repo': repo, 'sha': run['head_sha'], 'env': env, 'created': now,
                                                    'evidence': cfg['evidence_template'].format(env=A.aqa_env(env), sha=run['head_sha'], repo=repo),
