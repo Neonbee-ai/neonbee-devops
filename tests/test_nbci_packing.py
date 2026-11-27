@@ -46,7 +46,7 @@ class Config(unittest.TestCase):
         self.assertEqual(L.slots_of(BY['gate']), 1)
 
     def test_the_aqa_reserve_is_one_vm(self):
-        self.assertEqual(CFG['quota']['reserve_aqa'], {'vcpu': 2, 'ips': 1})
+        self.assertEqual(CFG['quota']['reserve_aqa'], {'vcpu': 0, 'ips': 0})   # AutoQA off as a gate for the 2026-11-27 release
 
 
 class SlotMath(unittest.TestCase):
@@ -195,7 +195,7 @@ class Quota(unittest.TestCase):
         while L.fits(LIVE_LEGACY, room):
             room = L.take(LIVE_LEGACY, room); n += 1
         self.assertEqual(n * L.slots_of(LIVE_LEGACY), 24)   # 3 x 8 slots = 24 parallel jobs on 3 IPs (was 6 IPs for 24)
-        self.assertEqual((room['vcpu'], room['ips']), (4, 3))
+        self.assertEqual((room['vcpu'], room['ips']), (6, 4))
 
     def test_given_three_legacy_vms_bought_then_a_deploy_vm_still_starts_from_the_deploy_reserve(self):
         reserve = CFG['quota']['reserve_deploy_vcpu']
@@ -206,7 +206,7 @@ class Quota(unittest.TestCase):
         self.assertEqual(n, 2)                    # reserve 12: 2 legacy VMs (16 slots) leave room for 3 deploy VMs at once
         d = 0
         while L.fits(PROD, room): room = L.take(PROD, room); d += 1
-        self.assertEqual(d, 3)
+        self.assertEqual(d, 5)                    # 2-vCPU deploy VMs: 5 at once, capped by the 8 external IPs
 
     def test_given_the_spend_cap_then_the_packed_legacy_lane_still_starts(self):
         self.assertTrue(L.may_start(LIVE_LEGACY, 'capped', 12, 4))

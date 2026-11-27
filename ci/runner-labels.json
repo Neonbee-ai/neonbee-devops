@@ -25,9 +25,9 @@
     },
     {
       "name": "deploy",
-      "machine": "e2-standard-4",
-      "vcpu": 4,
-      "ram_gb": 16,
+      "machine": "e2-standard-2",
+      "vcpu": 2,
+      "ram_gb": 8,
       "spot": false,
       "priority": 0,
       "disk_gb": 40,
@@ -118,9 +118,9 @@
     },
     {
       "name": "legacy-prod",
-      "machine": "e2-standard-4",
-      "vcpu": 4,
-      "ram_gb": 16,
+      "machine": "e2-standard-2",
+      "vcpu": 2,
+      "ram_gb": 8,
       "spot": false,
       "priority": 0,
       "disk_gb": 50,
@@ -169,6 +169,6 @@
     "reserve_deploy_vcpu": 12,
     "autoqa_vm_label": "autoqa",
     "_doc": "One budget for CI + AutoQA: deploy > gate > AutoQA. Gate VMs leave reserve_deploy_vcpu free; AutoQA gets what is left (published as project metadata nb-autoqa-vcpu-allowance). reserve_aqa: CI scale-up (computed from live CPUS_ALL_REGIONS / CPUS / IN_USE_ADDRESSES / INSTANCES / SSD_TOTAL_GB usage) always leaves one AQA VM (2 vCPU e2-standard-2 + 1 external IP; AQA stays that size while CI waits) free, less what live aqa-* VMs already hold.",
-    "reserve_aqa": {"vcpu": 2, "ips": 1}
+    "reserve_aqa": {"vcpu": 0, "ips": 0}
   }
 }
