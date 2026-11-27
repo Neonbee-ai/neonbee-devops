@@ -52,11 +52,9 @@ class Classes(unittest.TestCase):
 
 
 class Minis(unittest.TestCase):
-    def test_no_mac_mini_carries_a_ci_label_in_the_end_state(self):
-        ci = set(CFG['ci_labels']) | {'nb-deploy', 'nb-auto', 'nb-ctl'}
-        for name, labels in CFG['minis'].items():
-            with self.subTest(mini=name):
-                self.assertFalse(ci & set(labels))
+    def test_given_the_no_mini_config_then_no_mac_mini_pool_or_mini_entry_is_configured(self):
+        self.assertNotIn('minis', CFG)
+        self.assertNotIn('pools', CFG)
 
     def test_given_the_user_order_then_no_mac_mini_is_a_fallback_runner(self):
         self.assertIsNone(CFG['fallback']['runner'])

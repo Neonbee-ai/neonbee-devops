@@ -18,7 +18,7 @@ at job end / 5 min without a job; stopped VMs and orphan disks swept. route/noti
 | `night-train.mjs` + `night-train-run.py` | overnight release train (systemd `night-train.timer`, 15 min, API-only); metadata `nbci-night-train=off\|dry\|live`, `nbci-nt-deadline` |
 | `../image/provision.sh` | runner image contents (Node 22, runner, Playwright Chromium, gitleaks, semgrep, npm cache) |
 
-Config: `ci/runner-labels.json` (classes, prices, minis, fallback, quota), `ci/release-manifest.json`.
+Config: `ci/runner-labels.json` (classes, prices, fallback, quota), `ci/release-manifest.json`.
 Off switch: org variable `NB_CI_MODE=legacy|auto`. `DRY_RUN=1` (default) logs every action, changes nothing.
 Ops: `nbci.py status` (read-only) · `once` · `drain` · `build-image` · `set-hook` · `redeliver`. Runbook (stop, rollback, alerts, secrets): `RUNBOOK.md`.
 

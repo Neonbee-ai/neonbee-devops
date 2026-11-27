@@ -153,37 +153,6 @@
     "pd_standard_gb_month": 0.04,
     "image_gb_month": 0.05
   },
-  "pools": {
-    "macmini": {
-      "base": [
-        "self-hosted",
-        "macOS",
-        "ARM64"
-      ],
-      "include_ci_labels": false,
-      "extra": []
-    },
-    "aqa-coord": {
-      "base": [
-        "self-hosted",
-        "macOS",
-        "ARM64"
-      ],
-      "include_ci_labels": false,
-      "extra": [
-        "aqa-coord"
-      ]
-    }
-  },
-  "minis": {
-    "macmini-preview": [
-      "aqa-coord"
-    ],
-    "macmini-preview-2": [
-      "aqa-coord"
-    ],
-    "macmini-preview-3": []
-  },
   "fallback": {
     "runner": null,
     "labels": [

@@ -271,7 +271,6 @@ class Sweeper(unittest.TestCase):
         self.assertTrue(L.stale_runner(off('aqa-dev-7'), live))
         self.assertFalse(L.stale_runner(off('nbci-legacy-1-s2-abc'), live))      # slot of a live (booting) VM
         self.assertFalse(L.stale_runner(off('nbci-ctl-1'), live))
-        self.assertFalse(L.stale_runner(off('macmini-preview'), live))
         self.assertFalse(L.stale_runner({'name': 'nbci-x', 'status': 'offline', 'busy': True}, live))
 
 
