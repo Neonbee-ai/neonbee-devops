@@ -47,20 +47,26 @@ gh_token() {
 }
 TOKEN=; [ -n "$APP" ] && [ -n "$INST" ] && { TOKEN=$(gh_token) || TOKEN=; }; [ "$TOKEN" = null ] && TOKEN=
 SRC=/opt/nbci/src
-OLD_SHA=$(git -C $SRC rev-parse HEAD 2>/dev/null || true)
+OLD_SHA=${NBCI_OLD_SHA:-$(git -C $SRC rev-parse HEAD 2>/dev/null || true)}   # survives the re-exec below
 if [ -n "$TOKEN" ]; then
   if [ -d $SRC/.git ]; then git -C $SRC fetch -q "https://x-access-token:$TOKEN@github.com/Neonbee-ai/neonbee-devops.git" "$REF" && git -C $SRC checkout -q -f FETCH_HEAD
   else mkdir -p /opt/nbci && git clone -q --depth 50 -b "$REF" "https://x-access-token:$TOKEN@github.com/Neonbee-ai/neonbee-devops.git" $SRC; fi
   git -C $SRC remote set-url origin https://github.com/Neonbee-ai/neonbee-devops.git
   # bash reads this file while it runs: after a checkout, re-run the NEW bootstrap once (2026-11-27 a deploy kept
   # the old unit files until a second run)
-  [ -n "${NBCI_REEXEC:-}" ] || NBCI_REEXEC=1 exec "$SRC/runner/controller/bootstrap.sh" "$@"
+  [ -n "${NBCI_REEXEC:-}" ] || NBCI_REEXEC=1 NBCI_OLD_SHA="$OLD_SHA" exec "$SRC/runner/controller/bootstrap.sh" "$@"
 fi
 # nbci-update.timer (every 10 min): only move when the ref has a new sha that did not already fail its health check
 if [ "${NBCI_ONLY_IF_CHANGED:-}" = 1 ]; then
   NEW_SHA=$(git -C $SRC rev-parse HEAD 2>/dev/null || true)
   if [ -z "$NEW_SHA" ] || [ "$NEW_SHA" = "$OLD_SHA" ] || [ "$NEW_SHA" = "$(cat /var/lib/nbci/bad-ref 2>/dev/null)" ]; then
     [ -n "$OLD_SHA" ] && [ "$NEW_SHA" != "$OLD_SHA" ] && git -C $SRC checkout -q -f "$OLD_SHA"
+    exit 0
+  fi
+  # follow main only to a commit whose GitHub check runs are all completed green (none/pending/failed: stay, retry in 10 min)
+  if ! GH_TOKEN="$TOKEN" python3 "$SRC/runner/controller/nbci_update.py" --check-green "$NEW_SHA"; then
+    echo "nbci-update: $NEW_SHA not green yet, staying on ${OLD_SHA:-none}"
+    [ -n "$OLD_SHA" ] && git -C $SRC checkout -q -f "$OLD_SHA"
     exit 0
   fi
 fi
