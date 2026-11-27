@@ -1018,3 +1018,17 @@ class DeregisterBusy(unittest.TestCase):
         def gh(path, method):
             if path.endswith('/2'): raise RuntimeError('DELETE u -> 422 busy')
         self.assertFalse(L.deregister_runners(gh, 'org', [{'id': 1}, {'id': 2}]))
+
+
+class MinutesCapExemption(unittest.TestCase):
+    def test_given_the_minutes_cap_is_hit_when_a_deploy_or_legacy_prod_job_wants_a_vm_then_it_starts(self):
+        for n in ('deploy', 'legacy-prod'):
+            self.assertTrue(L.minutes_room(BY[n], False), n)
+
+    def test_given_the_minutes_cap_is_hit_when_a_gate_or_spot_legacy_job_wants_a_vm_then_it_is_held(self):
+        for n in ('gate', 'large', 'small', 'legacy'):
+            self.assertFalse(L.minutes_room(BY[n], False), n)
+
+    def test_given_room_left_then_every_class_may_start(self):
+        for c in CLS:
+            self.assertTrue(L.minutes_room(c, True))

@@ -414,8 +414,15 @@ def vm_minutes(vms, dt_s):
 
 
 def minutes_gate(used, cap):
-    """True while VMs may still start today (all classes, deploy included); False at/after the cap."""
+    """True while VMs may still start today; False at/after the cap. Callers exempt deploy-priority classes
+    with minutes_room()."""
     return cap <= 0 or used < cap
+
+
+def minutes_room(c, vm_room):
+    """May class c start under the daily VM-minutes cap? Deploy-priority classes (priority 0, not spot: deploy,
+    legacy-prod) always may, like they ignore the $ cap in may_start: a pipeline past its gate must finish."""
+    return True if (c.get('priority') == 0 and not c.get('spot')) else bool(vm_room)
 
 
 def alert_key(text):
