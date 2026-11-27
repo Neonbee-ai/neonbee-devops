@@ -448,10 +448,9 @@ def _build_image(gcp):
             'name': img, 'family': IMAGE_FAMILY, 'sourceDisk': 'zones/%s/disks/%s' % (z, name),
             'labels': {STEM: '1'}, 'storageLocations': [REGION]}), None, 900)
         log('image built', img)
-        imgs = sorted(gcp.compute('/global/images?filter=family%%3D%s' % IMAGE_FAMILY).get('items', []),
-                      key=lambda i: i['creationTimestamp'], reverse=True)
-        for old in imgs[1:]:     # keep only the newest image of the family
-            gcp.compute('/global/images/%s' % old['name'], 'DELETE'); log('image deleted', old['name'])
+        imgs = gcp.compute('/global/images?filter=family%%3D%s' % IMAGE_FAMILY).get('items', [])
+        for old in L.images_to_delete(imgs):     # keep only the newest image of the family
+            gcp.compute('/global/images/%s' % old, 'DELETE'); log('image deleted', old)
     finally:
         try: gcp.wait_op(gcp.compute('/zones/%s/instances/%s' % (z, name), 'DELETE'), z)
         except Exception as e: log('builder delete', e)
@@ -676,6 +675,19 @@ def reap_aqa(gcp):
     return out
 
 
+def aqa_finished(gcp, st, name):
+    """True when the AQA run we started as `name` has a result.json in its evidence folder (the VM exited by itself)."""
+    r = st.get('aqa_runs', {}).get(name)
+    if not r or r.get('done'):
+        return bool(r)
+    try:
+        b, _, path = r['evidence'][5:].partition('/')
+        gcp.storage_json(b, path + '/result.json')
+        return True
+    except Exception:
+        return False
+
+
 def aqa_results(gcp, st, now):
     """After each AQA VM we started is gone: read <evidence>/result.json ({"exit": N}) written by aqa/vm-startup.sh;
     exit != 0, or no result 15 min after the VM is gone -> one alert. Checked every 2 min."""
@@ -842,7 +854,8 @@ def tick(gh, gcp, st, mode='scale'):
         known, ours = st.setdefault('known_vms', {}), st.setdefault('deleted', {})
         cur = {v['name'] for v in vms}
         lost = st.setdefault('lost', {})
-        for n in L.lost_vms(known, cur, ours, {v['name'] for v in vms if v['status'] in L.DEAD}):
+        for n in L.lost_vms(known, cur, ours, {v['name'] for v in vms if v['status'] in L.DEAD},
+                            lambda n: aqa_finished(gcp, st, n)):
             lost[n] = now; log('VM lost (preempted?)', n); emit_vm(st, n, byname, prices, now, lost=True)
         st['known_vms'] = {v['name']: v['created'] for v in vms if v['status'] in L.LIVE and not v['builder']}
         for d in (ours, lost):

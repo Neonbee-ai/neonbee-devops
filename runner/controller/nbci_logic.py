@@ -683,6 +683,11 @@ def created_despite_timeout(err, compute, zone, name):
         return ' 404 ' not in str(e)
 
 
+def images_to_delete(imgs):
+    """Images of the family to delete: everything but the newest (by creationTimestamp)."""
+    return [i['name'] for i in sorted(imgs, key=lambda i: i['creationTimestamp'], reverse=True)[1:]]
+
+
 def stale_runner(r, live_vm_names, now_unused=None):
     """An offline, idle nbci-*/aqa-* registration whose VM is gone. The controller's own nb-ctl runners never."""
     n = r['name']
@@ -698,10 +703,12 @@ def vm_name_of(runner_name):
     return m.group('vm') if m else runner_name
 
 
-def lost_vms(known, current, deleted_by_us, stopped):
+def lost_vms(known, current, deleted_by_us, stopped, finished=lambda name: False):
     """VMs GCE took back: seen live last pass and now gone without a delete of ours, or found stopped (a Spot
-    preemption with instanceTerminationAction DELETE passes through TERMINATED)."""
-    return sorted((set(known) - set(current) - set(deleted_by_us)) | (set(stopped) & set(known)))
+    preemption with instanceTerminationAction DELETE passes through TERMINATED). aqa-* VMs delete themselves at exit:
+    finished(name) is True when the replay wrote its result.json, so those are not preemptions."""
+    gone = (set(known) - set(current) - set(deleted_by_us)) | (set(stopped) & set(known))
+    return sorted(n for n in gone if not (n.startswith('aqa-') and finished(n)))
 
 
 def preempt_retry(f, preempted, retried):
