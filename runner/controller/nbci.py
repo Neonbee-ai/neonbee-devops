@@ -297,6 +297,8 @@ def create_vm(gh, gcp, c, failures, image, issued=None):
             gcp.wait_op(gcp.compute('/zones/%s/instances' % z, 'POST', body), z, 120)
             log('created', name, c['machine'], z, 'spot' if c['spot'] else 'standard', 'slots=%d' % n_slots); return True
         except Exception as e:
+            if L.created_despite_timeout(e, gcp.compute, z, name):
+                log('created (after wait timeout)', name, c['machine'], z, 'spot' if c['spot'] else 'standard', 'slots=%d' % n_slots); return True
             k = L.classify_gce_error(str(e)); failures.append((z, k)); log('create failed', z, k, ' '.join(str(e).split())[:700])
             if k in ('billing', 'quota'):
                 break

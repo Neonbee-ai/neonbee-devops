@@ -671,6 +671,18 @@ def deregister_runners(gh, org, runners, log=lambda *a: None):
     return ok
 
 
+def created_despite_timeout(err, compute, zone, name):
+    """create_vm: a wait_op timeout does not mean the insert failed; the VM may still come up. True when err is a
+    timeout and the instance exists in this zone (GET), so the caller must not buy a second one in another zone.
+    A 404 means it does not exist; any other GET failure is treated as 'may exist' (a stray VM is swept, a duplicate bills)."""
+    if 'timed out' not in str(err):
+        return False
+    try:
+        return bool(compute('/zones/%s/instances/%s' % (zone, name)))
+    except RuntimeError as e:
+        return ' 404 ' not in str(e)
+
+
 def stale_runner(r, live_vm_names, now_unused=None):
     """An offline, idle nbci-*/aqa-* registration whose VM is gone. The controller's own nb-ctl runners never."""
     n = r['name']
