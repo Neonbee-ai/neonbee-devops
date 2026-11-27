@@ -92,6 +92,8 @@ RestartSec=10
 WatchdogSec=900
 NotifyAccess=main
 MemoryMax=300M
+CPUWeight=1000
+Nice=-5
 [Install]
 WantedBy=multi-user.target
 U
@@ -182,3 +184,13 @@ if [ -n "$TOKEN" ]; then
     (cd "$d" && ./svc.sh install ghr && ./svc.sh start)
   done
 fi
+# The loop owns the e2-micro: with both runners busy (load 4-5) a pass took up to 522 s (2026-11-27), so slot
+# refills and VM buys lagged minutes. Runner jobs yield CPU and are squeezed (never killed) under memory pressure.
+for i in 1 2; do
+  mkdir -p "/etc/systemd/system/actions.runner.Neonbee-ai.nbci-ctl-$i.service.d"
+  printf '[Service]\nCPUWeight=20\nNice=10\nIOWeight=20\nMemoryHigh=280M\n' \
+    > "/etc/systemd/system/actions.runner.Neonbee-ai.nbci-ctl-$i.service.d/nbci-yield.conf"
+done
+systemctl daemon-reload
+# applied live, no restart (a restart would kill a running job); Nice takes effect at the runner's next start
+for i in 1 2; do systemctl set-property --runtime "actions.runner.Neonbee-ai.nbci-ctl-$i.service" CPUWeight=20 IOWeight=20 MemoryHigh=280M 2>/dev/null || true; done
