@@ -8,7 +8,9 @@ on:
 
 jobs:
   lint:
-    runs-on: ${{ vars.NB_CI_MODE == 'auto' && fromJSON('["self-hosted","nb-ctl"]') || fromJSON('["self-hosted","runner-vm"]') }}
+    # nb-route: a controller runner or a free packed slot; a backlog >= 90 s buys slots (never queues behind the
+    # 2 controller runners: 2026-11-27, 35 devops lint jobs waited up to 45 min on nb-ctl)
+    runs-on: [self-hosted, nb-route]
     steps:
       - uses: actions/checkout@v4
       - name: Validate workflow YAML syntax
@@ -30,7 +32,9 @@ jobs:
   # Running them here makes the contract enforceable rather than documentary.
   contract:
     name: Gate trust contract
-    runs-on: ${{ vars.NB_CI_MODE == 'auto' && fromJSON('["self-hosted","nb-ctl"]') || fromJSON('["self-hosted","runner-vm"]') }}
+    # nb-route: a controller runner or a free packed slot; a backlog >= 90 s buys slots (never queues behind the
+    # 2 controller runners: 2026-11-27, 35 devops lint jobs waited up to 45 min on nb-ctl)
+    runs-on: [self-hosted, nb-route]
     steps:
       - uses: actions/checkout@v4
       - name: Run contract tests
@@ -59,7 +63,9 @@ jobs:
     continue-on-error: true
     needs: [lint, contract]
     if: always()
-    runs-on: ${{ vars.NB_CI_MODE == 'auto' && fromJSON('["self-hosted","nb-ctl"]') || fromJSON('["self-hosted","runner-vm"]') }}
+    # nb-route: a controller runner or a free packed slot; a backlog >= 90 s buys slots (never queues behind the
+    # 2 controller runners: 2026-11-27, 35 devops lint jobs waited up to 45 min on nb-ctl)
+    runs-on: [self-hosted, nb-route]
     steps:
       - name: Post result to Teams
         env:
