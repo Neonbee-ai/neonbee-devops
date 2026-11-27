@@ -1,5 +1,5 @@
 {
-  "_doc": "Deploy->AQA trigger. Contract from neonbee-qa feat/aqa-replay @4d7c9a7: Spot e2-standard-2 (more tasks: 4/8 vCPU), stock ubuntu-2404 (NOT nb-ci-runner: its nb-runner.service powers off without a JIT config), SA aqa-runner, startup script fetched from neonbee-qa at the resolved sha. pass_stage: previews (pr-*) move the Pulse task to pr_main.",
+  "_doc": "Deploy->AQA trigger. Contract from neonbee-qa feat/aqa-replay @4d7c9a7: Spot e2-standard-2 (more tasks: 4/8 vCPU), stock ubuntu-2404 (NOT nb-ci-runner: its nb-runner.service powers off without a JIT config), SA aqa-runner, startup script fetched from neonbee-qa at the resolved sha. pass_stage: previews (pr-*) move the Pulse task to pr_main. disk_type pd-standard: cheaper and outside the SSD_TOTAL_GB quota. max_live: at most this many aqa-* VMs at once (8 external IPs shared with CI); the rest queue.",
   "enabled": true,
   "contract_ready": true,
   "daily_cap": 40,
@@ -23,5 +23,7 @@
   "bundle_template": "gs://neonbee-aqa-0521938031/aqa/{qa_sha}.tgz",
   "qa_repo": "neonbee-qa",
   "qa_ref": "main",
-  "startup_path": "aqa/vm-startup.sh"
+  "startup_path": "aqa/vm-startup.sh",
+  "disk_type": "pd-standard",
+  "max_live": 3
 }
