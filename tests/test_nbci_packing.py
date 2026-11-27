@@ -350,6 +350,89 @@ class Guard(unittest.TestCase):
             self.assertIsNone(L.churn_verdict([v], {}, {}, since, NOW + t - 600 + 60, 300, 8, L.NO_JOB_STARTUP_S))
 
 
+class UnregisteredBackstop(unittest.TestCase):
+    """Incident 2026-11-27: nbci stopped, one-job slots never refilled, 4 VMs billed ~2 h with no runner."""
+    U = L.UNREGISTERED_S
+
+    def test_given_the_backstop_window_then_it_outlasts_the_boot_grace(self):
+        self.assertGreater(self.U, L.NO_JOB_STARTUP_S)
+
+    def test_given_a_vm_that_never_registered_past_the_window_then_it_is_reaped(self):
+        v = pvm(age=self.U + 1)
+        out = L.unregistered_vms([v], {}, {}, NOW)
+        self.assertEqual([x[0]['name'] for x in out], [v['name']])
+        self.assertIn('no runner online', out[0][1])
+
+    def test_given_a_booting_vm_then_it_is_not_reaped(self):
+        self.assertEqual(L.unregistered_vms([pvm(age=self.U - 1)], {}, {}, NOW), [])
+
+    def test_given_an_online_or_busy_slot_then_the_vm_is_kept_and_its_last_seen_recorded(self):
+        v = pvm(age=9999); n = v['slot_names']; seen = {}
+        self.assertEqual(L.unregistered_vms([v], online(n[2]), seen, NOW), [])
+        self.assertEqual(seen[v['name']], NOW)
+        busy = {n[1]: {'name': n[1], 'status': 'offline', 'busy': True}}
+        self.assertEqual(L.unregistered_vms([v], busy, {}, NOW), [])
+
+    def test_given_slots_that_were_live_and_then_never_refilled_then_it_is_reaped_after_the_window(self):
+        v = pvm(age=99999); seen = {v['name']: NOW - self.U + 5}
+        self.assertEqual(L.unregistered_vms([v], {}, seen, NOW), [])
+        self.assertEqual(len(L.unregistered_vms([v], {}, seen, NOW + 10)), 1)
+
+    def test_given_offline_runners_only_then_they_do_not_count_as_registered(self):
+        v = pvm(age=self.U + 1); n = v['slot_names']
+        off = {x: {'name': x, 'status': 'offline', 'busy': False} for x in n.values()}
+        self.assertEqual(len(L.unregistered_vms([v], off, {}, NOW)), 1)
+
+    def test_given_builders_aqa_and_stopped_vms_then_the_backstop_skips_them(self):
+        vs = [dict(pvm('b', age=99999), builder=True), dict(pvm('a', age=99999), cls='aqa'), pvm('t', age=99999, status='TERMINATED')]
+        self.assertEqual(L.unregistered_vms(vs, {}, {}, NOW), [])
+
+    def test_given_a_vm_that_is_gone_then_its_seen_entry_is_pruned(self):
+        seen = {'old': NOW}
+        L.unregistered_vms([], {}, seen, NOW)
+        self.assertEqual(seen, {})
+
+
+class TokenCache(unittest.TestCase):
+    def setUp(self):
+        import nbci_io
+        self.io = nbci_io
+
+    def test_given_a_metadata_token_with_little_life_left_then_it_is_reused_only_until_the_margin(self):
+        self.assertEqual(self.io.token_cache_s(3599), 3299)
+        self.assertEqual(self.io.token_cache_s(200), 30)
+        self.assertEqual(self.io.token_cache_s(None), 30)
+
+    def test_given_a_401_then_the_token_is_dropped_and_the_call_retried_once(self):
+        g = self.io.GCP('p'); calls = []
+        g.token = lambda: 'new' if calls else 'old'
+
+        def fake(url, method='GET', body=None, headers=None, timeout=30, raw=False):
+            calls.append(headers['Authorization'])
+            if len(calls) == 1:
+                raise RuntimeError('GET x -> 401 {}')
+            return 200, {'ok': 1}, {}
+        orig = self.io.req; self.io.req = fake
+        try:
+            self.assertEqual(g.compute('/zones'), {'ok': 1})
+        finally:
+            self.io.req = orig
+        self.assertEqual(calls, ['Bearer old', 'Bearer new'])
+
+    def test_given_a_non_401_error_then_it_is_raised_without_retry(self):
+        g = self.io.GCP('p'); g.token = lambda: 't'; calls = []
+
+        def fake(*a, **k):
+            calls.append(1); raise RuntimeError('GET x -> 403 {}')
+        orig = self.io.req; self.io.req = fake
+        try:
+            with self.assertRaises(RuntimeError):
+                g.compute('/zones')
+        finally:
+            self.io.req = orig
+        self.assertEqual(len(calls), 1)
+
+
 class BootScript(unittest.TestCase):
     PROV = open(os.path.join(ROOT, 'runner', 'image', 'provision.sh')).read()
     SLOTS = open(os.path.join(ROOT, 'runner', 'image', 'slots.sh')).read()
