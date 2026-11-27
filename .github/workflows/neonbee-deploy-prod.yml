@@ -333,7 +333,8 @@ jobs:
       runs_on: ${{ steps.r.outputs.runs_on }}
       # Deploy jobs (build + rsync/S3) must not run on Spot VMs: a preemption mid-deploy leaves a partial
       # release. NB_CI_MODE=auto -> nb-deploy (standard VMs from nb-autoscaler); otherwise the same lane.
-      deploy_runs_on: ${{ vars.NB_CI_MODE == 'auto' && '["self-hosted","nb-deploy"]' || steps.r.outputs.runs_on }}
+      # deploy = one job on a fresh standard (non-Spot) VM, never a shared packed slot (class legacy-prod)
+      deploy_runs_on: ${{ vars.NB_CI_MODE == 'auto' && '["self-hosted","nb-deploy"]' || '["self-hosted","runner-vm","lane-prod"]' }}
       # 'true' only when this exact tree already passed gate + security (and, for
       # backend, contract + integration) in a develop push run. See step 'prior'.
       prior_pass: ${{ steps.prior.outputs.prior_pass || 'false' }}

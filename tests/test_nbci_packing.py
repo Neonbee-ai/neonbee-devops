@@ -136,6 +136,30 @@ class DevopsChecksOffController(unittest.TestCase):
         self.assertEqual([c['name'] for c in L.plan_packed(j, {}, CLS, NOW)], ['legacy'])
 
 
+class DeployIsolation(unittest.TestCase):
+    """Deploy secrets never land on a shared packed slot; a Spot preemption never cuts a deploy (review 2026-11-27)."""
+    FILES = ('backend', 'vite-mfe', 'nextjs', 'preview', 'prod')
+
+    def legacy_lane(self, f):
+        w = open(os.path.join(ROOT, '.github', 'workflows', 'neonbee-deploy-%s.yml' % f)).read()
+        m = re.search(r"deploy_runs_on: \$\{\{ vars.NB_CI_MODE == 'auto' && '(\[[^']+\])' \|\| '(\[[^']+\])' \}\}", w)
+        self.assertTrue(m, f)
+        return json.loads(m.group(1)), json.loads(m.group(2))
+
+    def test_given_a_legacy_repo_deploy_then_it_gets_a_single_job_standard_vm(self):
+        for f in self.FILES:
+            c = L.class_for(self.legacy_lane(f)[1], CLS)
+            self.assertEqual((c['name'], c['spot'], L.slots_of(c)), ('legacy-prod', False, 1), f)
+
+    def test_given_an_auto_repo_deploy_then_it_gets_the_standard_deploy_class(self):
+        for f in self.FILES:
+            c = L.class_for(self.legacy_lane(f)[0], CLS)
+            self.assertEqual((c['name'], c['spot']), ('deploy', False), f)
+
+    def test_given_a_gate_job_on_runner_vm_then_it_still_packs(self):
+        self.assertEqual(L.class_for(['self-hosted', 'runner-vm'], CLS)['name'], 'legacy')
+
+
 class Supply(unittest.TestCase):
     def test_given_a_packed_vm_with_one_busy_slot_then_three_slots_are_supply(self):
         v = pvm(); rs = online(*v['slot_names'].values(), busy=(v['slot_names'][1],))

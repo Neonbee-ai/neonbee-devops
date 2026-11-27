@@ -229,7 +229,7 @@ class Workflows(unittest.TestCase):
 
     def test_deploy_job_runs_on_the_non_spot_lane_in_auto_mode(self):
         t = wf('neonbee-deploy-prod.yml')
-        self.assertIn("""deploy_runs_on: ${{ vars.NB_CI_MODE == 'auto' && '["self-hosted","nb-deploy"]' || steps.r.outputs.runs_on }}""", t)
+        self.assertRegex(t, r"""deploy_runs_on: \$\{\{ vars.NB_CI_MODE == 'auto' && '\["self-hosted","nb-deploy"\]' \|\| '\["self-hosted","runner-vm","lane-(dev|prod)"\]' \}\}""")
         bd = t[t.index('  build-deploy:\n'):]
         self.assertIn('runs-on: ${{ fromJSON(needs.route.outputs.deploy_runs_on) }}', bd[:bd.index('\n    steps:')])
 
@@ -378,7 +378,7 @@ class IsolationLegacy(unittest.TestCase):
     def test_legacy_route_and_notify_keep_nb_route_when_the_controller_is_gone(self):
         t = wf('neonbee-deploy-prod.yml')
         self.assertIn("|| fromJSON('[\"self-hosted\",\"nb-route\"]') }}", t)
-        self.assertIn("vars.NB_CI_MODE == 'auto' && '[\"self-hosted\",\"nb-deploy\"]' || steps.r.outputs.runs_on", t)
+        self.assertIn("vars.NB_CI_MODE == 'auto' && '[\"self-hosted\",\"nb-deploy\"]' || '[\"self-hosted\",\"runner-vm\",\"lane-prod\"]'", t)
 
 
 class IsolationTrain(unittest.TestCase):
