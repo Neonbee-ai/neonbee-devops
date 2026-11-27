@@ -17,6 +17,19 @@ def pr(**k):
 class Eligibility(unittest.TestCase):
     def v(self, repo='so360-crm-fe', files=(), **k): return T.pr_verdict(repo, pr(**k), list(files))
 
+    def test_given_the_accounting_canaries_or_website_12_then_the_train_never_merges_them(self):
+        for repo, n in (('so360-accounting-fe', 127), ('so360-accounting-fe', 128), ('neonbee-website', 12)):
+            self.assertEqual(self.v(repo=repo, number=n), (False, 'PR held by hand (SKIP_PRS)'))
+        self.assertEqual(self.v(repo='so360-accounting-fe', number=129), (True, 'green'))
+
+    def test_given_a_required_check_still_running_or_red_then_the_pr_waits(self):
+        self.assertFalse(self.v(statusCheckRollup=[{'status': 'IN_PROGRESS'}])[0])
+        self.assertFalse(self.v(statusCheckRollup=[{'status': 'COMPLETED', 'conclusion': 'FAILURE'}])[0])
+        self.assertFalse(self.v(mergeStateStatus='BLOCKED')[0])
+
+    def test_given_no_switches_then_develop_train_on_and_main_promotion_off(self):
+        self.assertEqual(T.plan({})[:2], (True, False))
+
     def test_given_a_green_clean_pr_then_it_is_eligible(self): self.assertTrue(self.v()[0])
     def test_given_no_label_at_all_then_it_is_still_eligible(self): self.assertTrue(self.v(labels=[])[0])
     def test_given_a_draft_then_skipped(self): self.assertEqual(self.v(isDraft=True), (False, 'draft'))

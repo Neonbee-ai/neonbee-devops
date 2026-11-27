@@ -18,6 +18,9 @@ E = os.environ.get
 FIRST_REPO = 'so360-shell-fe'
 SKIP_REPOS = {'neonbee-devops'}
 HOLD_LABELS = {'hold', 'do-not-merge', 'needs-migration'}
+# never merged by the train (canaries / hand-held PRs), plus MT_SKIP_PRS="repo#n,repo#n"
+SKIP_PRS = {'so360-accounting-fe#127', 'so360-accounting-fe#128', 'neonbee-website#12'} | \
+    {x.strip() for x in (os.environ.get('MT_SKIP_PRS') or '').split(',') if x.strip()}
 CLEAN = ('CLEAN', 'HAS_HOOKS')
 LIVE_WAIT_S = 90 * 60            # no Live AQA result this long after the main merge -> alert
 
@@ -63,6 +66,8 @@ def pr_verdict(repo, pr, files):
     """(eligible, reason) for one open PR."""
     if repo in SKIP_REPOS:
         return False, 'repo %s is merged by hand' % repo
+    if '%s#%s' % (repo, pr.get('number')) in SKIP_PRS:
+        return False, 'PR held by hand (SKIP_PRS)'
     if pr.get('state') != 'OPEN' or pr.get('baseRefName') != 'develop':
         return False, 'not an open PR to develop'
     if pr.get('isDraft'):
