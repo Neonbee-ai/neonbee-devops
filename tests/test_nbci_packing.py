@@ -122,7 +122,7 @@ class RouteSpill(unittest.TestCase):
 
     def test_given_a_deploy_then_bootstrap_reexecs_the_new_copy_once(self):
         b = open(os.path.join(ROOT, 'runner', 'controller', 'bootstrap.sh')).read()
-        self.assertIn('NBCI_REEXEC=1 exec "$SRC/runner/controller/bootstrap.sh"', b)
+        self.assertIn('NBCI_REEXEC=1 NBCI_OLD_SHA="$OLD_SHA" exec "$SRC/runner/controller/bootstrap.sh"', b)
 
 
 class DevopsChecksOffController(unittest.TestCase):
