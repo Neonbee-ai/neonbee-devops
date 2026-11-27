@@ -1007,9 +1007,8 @@ def tick(gh, gcp, st, mode='scale'):
                     log('sweep', v['name'], why)
                     notify(st, 'orphan VM %s: %s (%s)' % (v['name'], why, 'would delete (DRY)' if DRY else 'deleted'), key='orphanvm' + v['name'])
                     if not DRY:
-                        for r in vr:
-                            _safe(gh, 'orgs/%s/actions/runners/%s' % (ORG, r['id']), 'DELETE')
-                        _safe(gcp.compute, '/zones/%s/instances/%s' % (v['zone'], v['name']), 'DELETE')
+                        if L.deregister_runners(gh, ORG, vr, log):
+                            _safe(gcp.compute, '/zones/%s/instances/%s' % (v['zone'], v['name']), 'DELETE')
         except Exception as e: log('sweep', str(e)[:160])
     names = all_names if all_names is not None else {v['name'] for v in vms}
     for r in rs:

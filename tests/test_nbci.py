@@ -996,3 +996,25 @@ class SlotReap(unittest.TestCase):
         self.assertIn('chmod -R go-w /opt/ms-playwright.tmp', src)
         self.assertNotIn('! -name _cacache', src)
         self.assertNotIn('! -name ms-playwright', src)
+
+
+class DeregisterBusy(unittest.TestCase):
+    def test_given_github_answers_422_busy_when_deregistering_then_the_vm_is_kept(self):
+        def gh(path, method):
+            raise RuntimeError('DELETE https://api.github.com/x -> 422 {"message":"Bad request - Runner is busy"}')
+        self.assertFalse(L.deregister_runners(gh, 'org', [{'id': 1, 'name': 'nbci-a'}]))
+
+    def test_given_every_delete_succeeds_then_the_vm_may_go(self):
+        calls = []
+        self.assertTrue(L.deregister_runners(lambda p, m: calls.append((p, m)), 'org', [{'id': 1}, {'id': 2}]))
+        self.assertEqual(calls, [('orgs/org/actions/runners/1', 'DELETE'), ('orgs/org/actions/runners/2', 'DELETE')])
+
+    def test_given_a_404_or_5xx_when_deregistering_then_the_vm_may_still_go(self):
+        def gh(path, method):
+            raise RuntimeError('DELETE u -> 404 gone')
+        self.assertTrue(L.deregister_runners(gh, 'org', [{'id': 1}]))
+
+    def test_given_one_busy_among_several_then_the_vm_is_kept(self):
+        def gh(path, method):
+            if path.endswith('/2'): raise RuntimeError('DELETE u -> 422 busy')
+        self.assertFalse(L.deregister_runners(gh, 'org', [{'id': 1}, {'id': 2}]))
