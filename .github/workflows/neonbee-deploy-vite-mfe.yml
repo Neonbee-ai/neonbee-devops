@@ -219,7 +219,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4.3.1
         with:
-          fetch-depth: 0
+          fetch-depth: ${{ vars.NB_FULL_CLONE == '1' && 0 || 1 }}   # unit/gate tier never reads history; repo var NB_FULL_CLONE=1 opts out (security keeps depth 0)
       - uses: actions/setup-node@v4.4.0
         with:
           node-version: ${{ inputs.node_version }}
