@@ -455,10 +455,12 @@ def image_build_due(age_d, max_age_d, last_try, now, retry_s=20 * 3600):
 
 def aqa_outcome(result, gone_s, grace_s=900):
     """AQA verdict from <evidence>/result.json once the VM is gone. result: parsed JSON, None (404) or {'_err': ...}.
-    'pass' (exit 0) | 'failed (exit N)' | 'wait' (no result yet, inside grace) | 'ended without a result'."""
+    'pass' (exit 0) | 'not_tested' (exit 4 / state not_tested) | 'failed (exit N)' | 'wait' (no result yet, inside grace) | 'ended without a result'."""
     if isinstance(result, dict) and 'exit' in result:
         try: code = int(result['exit'])
         except (TypeError, ValueError): code = -1
+        if result.get('state') == 'not_tested' or code == 4:
+            return 'not_tested'                 # 0 cases executed: never a pass (alerted like a failure)
         return 'pass' if code == 0 else 'failed (exit %s)' % result['exit']
     return 'wait' if gone_s < grace_s else 'ended without a result'
 

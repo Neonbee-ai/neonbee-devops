@@ -238,6 +238,55 @@ class AqaResults(unittest.TestCase):
         wf = read('.github', 'workflows', 'neonbee-deploy-vite-mfe.yml')
         self.assertNotIn('NB_AQA_BUNDLE', wf)
 
+    def test_given_zero_executed_cases_then_the_outcome_is_not_tested_never_pass(self):
+        self.assertEqual(L.aqa_outcome({'exit': 4, 'state': 'not_tested'}, 5), 'not_tested')
+        self.assertEqual(L.aqa_outcome({'exit': 4}, 5), 'not_tested')
+
+    def test_given_a_not_tested_result_then_it_alerts_like_a_failure(self):
+        st = fresh_state()
+        st['aqa_runs'] = {'aqa-dev-2': {'repo': 'r', 'sha': 'e' * 40, 'env': 'dev', 'created': NOW, 'tasks': [],
+                                        'evidence': 'gs://b/replay/dev/' + 'e' * 40}}
+
+        class G:
+            def compute(self, p, m='GET', b=None): return {'items': []}
+            def storage_json(self, b, n): return {'exit': 4, 'state': 'not_tested'}
+        nbci.aqa_results(G(), st, NOW)
+        self.assertIn('AQA not_tested', st['pulse']['q'][0]['text'])
+
+    def test_given_recent_successful_runs_then_the_reconcile_turns_them_into_trigger_events(self):
+        iso = lambda t: time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(t))  # noqa: E731
+        runs = [{'conclusion': 'success', 'updated_at': iso(NOW - 60), 'repository': {'name': 'so360-forms-fe'}, 'name': 'Deploy', 'head_sha': 'a'},
+                {'conclusion': 'success', 'updated_at': iso(NOW - 9000), 'repository': {'name': 'old'}, 'head_sha': 'b'},
+                {'conclusion': 'failure', 'updated_at': iso(NOW - 60), 'repository': {'name': 'red'}, 'head_sha': 'c'}]
+        ev = A.recent_deploy_events(runs, NOW)
+        self.assertEqual([(e['repo'], e['run']['head_sha']) for e in ev], [('so360-forms-fe', 'a')])
+
+    def test_given_duplicate_and_already_run_events_then_one_pending_event_per_new_repo_sha(self):
+        e = lambda r, s: {'repo': r, 'run': {'head_sha': s}}  # noqa: E731
+        out = A.merge_pending([e('a', '1'), e('a', '1')], [e('a', '1'), e('b', '2'), e('c', '3')], {'c@3': 1})
+        self.assertEqual([(x['repo'], x['run']['head_sha']) for x in out], [('a', '1'), ('b', '2')])
+
+    def test_given_max_live_aqa_vms_then_new_deploy_events_queue_instead_of_creating(self):
+        st = fresh_state(); self._dev_event(); st['aqa_bundle'] = 'f' * 40
+        created = []
+
+        class G:
+            def compute(self, p, m='GET', b=None):
+                if m == 'POST': created.append(p)
+                return {'items': [{'name': 'aqa-dev-%d' % i, 'status': 'RUNNING'} for i in range(3)]}
+        dry, nbci.DRY = nbci.DRY, False
+        try: nbci.aqa_trigger(self._gh(), G(), st, NOW, '2026-11-27', [])
+        finally: nbci.DRY = dry
+        self.assertEqual(created, [])
+        self.assertEqual(len(st['aqa_pending']), 1)
+
+    def test_given_the_contract_then_aqa_disks_are_pd_standard_outside_the_ssd_quota(self):
+        with open(os.path.join(os.path.dirname(__file__), '..', 'ci', 'aqa.json')) as f:
+            c = json.load(f)
+        b = A.vm_body(c, 'n', 'us-central1-a', [], 'nbci', 5400)
+        self.assertTrue(b['disks'][0]['initializeParams']['diskType'].endswith('/pd-standard'))
+        self.assertLessEqual(c['max_live'], 4)
+
     def test_given_the_vm_startup_contract_then_the_relay_and_result_file_are_documented(self):
         self.assertIn('result.json', read('runner', 'controller', 'RUNBOOK.md'))
 
