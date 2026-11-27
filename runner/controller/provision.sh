@@ -16,7 +16,7 @@ SA=nbci-controller@$P.iam.gserviceaccount.com
 REF=${NBCI_REF:-feat/ci-autoscaler}
 MODE=${1:-plan}
 run() { echo "+ $*"; [ "$MODE" = apply ] && "$@" || true; }
-PERMS=compute.instances.create,compute.instances.delete,compute.instances.get,compute.instances.list,compute.instances.setMetadata,compute.instances.setLabels,compute.instances.setScheduling,compute.disks.create,compute.disks.delete,compute.disks.get,compute.disks.list,compute.disks.use,compute.disks.useReadOnly,compute.disks.setLabels,compute.images.create,compute.images.delete,compute.images.get,compute.images.list,compute.images.getFromFamily,compute.images.useReadOnly,compute.images.setLabels,compute.subnetworks.use,compute.subnetworks.useExternalIp,compute.networks.use,compute.zoneOperations.get,compute.globalOperations.get,compute.regions.get,compute.projects.get,compute.machineTypes.get
+PERMS=compute.instances.create,compute.instances.delete,compute.instances.get,compute.instances.list,compute.instances.setMetadata,compute.instances.setLabels,compute.instances.setScheduling,compute.instances.getSerialPortOutput,compute.disks.create,compute.disks.delete,compute.disks.get,compute.disks.list,compute.disks.use,compute.disks.useReadOnly,compute.disks.setLabels,compute.images.create,compute.images.delete,compute.images.get,compute.images.list,compute.images.getFromFamily,compute.images.useReadOnly,compute.images.setLabels,compute.subnetworks.use,compute.subnetworks.useExternalIp,compute.networks.use,compute.zoneOperations.get,compute.globalOperations.get,compute.regions.get,compute.projects.get,compute.machineTypes.get
 
 run "$G" services enable compute.googleapis.com secretmanager.googleapis.com --project "$P"
 if "$G" iam roles describe nbciController --project "$P" >/dev/null 2>&1; then

@@ -10,9 +10,10 @@
 N=${NB_SLOTS:-1}
 # a slot user sees only its own processes (no neighbour's argv/environ in /proc)
 mount -o remount,hidepid=invisible /proc 2>/dev/null || mount -o remount,hidepid=2 /proc || echo 'nb-ci: no hidepid'
-# 4 slots share 16 GB: a build peak spills to swap instead of the OOM killer taking a neighbour's job
+# N slots share 4 GB each: a build peak spills to swap (2 GB a slot, at least 8 GB) instead of the OOM killer taking a neighbour's job
+SWAP_G=$(( N * 2 > 8 ? N * 2 : 8 ))
 if ! swapon --show | grep -q /swapfile; then
-  { fallocate -l 8G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile; } || echo 'nb-ci: no swap'
+  { fallocate -l ${SWAP_G}G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile; } || echo 'nb-ci: no swap'
 fi
 cat > /opt/nb-slot.sh <<'SLOT'
 #!/bin/bash

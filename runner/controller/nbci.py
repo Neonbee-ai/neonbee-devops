@@ -546,16 +546,23 @@ def reconcile_deploys(gh, now):
     return out
 
 
-def live_aqa(gcp):
-    n = 0
+def aqa_instances(gcp):
+    """{name: status} of every aqa-* VM in our zones (ours or the AQA agent's): the live count and the names a
+    create must not reuse (one VM name per repo+sha; a second POST of the same name is a 409)."""
+    out = {}
     for z in ZONES:
-        n += sum(1 for v in gcp.compute('/zones/%s/instances?filter=name%%3Daqa-*' % z).get('items', []) if v['status'] != 'TERMINATED')
-    return n
+        for v in gcp.compute('/zones/%s/instances?filter=name%%3Daqa-*' % z).get('items', []):
+            out[v['name']] = v['status']
+    return out
+
+
+def live_aqa(gcp):
+    return sum(1 for s in aqa_instances(gcp).values() if s != 'TERMINATED')
 
 
 def _aqa_events(gh, gcp, st, now, today, failures, cfg, pending, later, ci_waiting=0):
     ast = st.setdefault('aqa', {})
-    live = None
+    live, existing = None, {}
     for ev in pending:
         repo, run = ev['repo'], ev['run']
         env = A.deploy_env(run, cfg)
@@ -597,12 +604,14 @@ def _aqa_events(gh, gcp, st, now, today, failures, cfg, pending, later, ci_waiti
         except Exception as e:          # held, not dropped: retried every pass until the event is 2 h old
             log('aqa held: cannot read/bundle %s@%s' % (cfg.get('qa_repo'), cfg.get('qa_ref')), str(e)[:120]); later.append(ev); continue
         if live is None:
-            try: live = live_aqa(gcp)
-            except Exception as e: live = 0; log('aqa live count', str(e)[:100])
+            try: existing = aqa_instances(gcp); live = sum(1 for s in existing.values() if s != 'TERMINATED')
+            except Exception as e: existing, live = {}, 0; log('aqa live count', str(e)[:100])
+        name = A.vm_name(env, run['head_sha'])
+        if name in existing:            # already created (a restart lost the record, or the webhook + 10-min reconcile raced): never a 2nd VM
+            log('aqa exists', name, key, existing[name]); A.record(ast, key, today, now); continue
         if live >= L.aqa_max_live(cfg.get('max_live', 3), ci_waiting):
             later.append(ev); continue                  # IP / vCPU caps: queue, retried next pass
-        machine, workers = A.sizing(len(ids))
-        name = A.vm_name(env, run['head_sha'])
+        machine, workers = A.sizing(len(ids), ci_waiting)
         commits = json.dumps([{'message': m[:500], 'branch': run['head_branch'], 'prBody': ''} for m in msgs])
         items = A.metadata(env, run['head_sha'], cfg['bundle_template'].format(qa_sha=qa_sha), ids, commits,
                            cfg['evidence_template'].format(env=A.aqa_env(env), sha=run['head_sha'], repo=repo),
@@ -616,11 +625,18 @@ def _aqa_events(gh, gcp, st, now, today, failures, cfg, pending, later, ci_waiti
                 gcp.wait_op(gcp.compute('/zones/%s/instances' % z, 'POST', A.vm_body(vm_cfg, name, z, items, STEM, MAX_RUN_S)), z, 120)
                 log('aqa created', name, env, key, 'tasks=%s' % ','.join(ids)); made = True; break
             except Exception as e:
-                k = L.classify_gce_error(str(e)); failures.append((z, k)); log('aqa create failed', z, k, str(e)[:160])
+                if L.created_despite_timeout(e, gcp.compute, z, name):
+                    log('aqa created (after wait timeout)', name, env, key); made = True; break
+                k = L.classify_gce_error(str(e))
+                if k == 'exists':           # the name is taken: that VM is this run; never retry it in another zone
+                    log('aqa exists', name, key, z); made = None; break
+                failures.append((z, k)); log('aqa create failed', z, k, str(e)[:160])
                 if k in ('billing', 'quota'): break
+        if made is None:
+            A.record(ast, key, today, now); existing[name] = 'EXISTS'; save_state(st); continue
         if made:
-            live += 1
-            A.record(ast, key, today, now)
+            live += 1; existing[name] = 'PROVISIONING'
+            A.record(ast, key, today, now); save_state(st)      # persisted at once: a restart before the pass ends never re-creates it
             st.setdefault('aqa_runs', {})[name] = {'repo': repo, 'sha': run['head_sha'], 'env': env, 'created': now,
                                                    'evidence': cfg['evidence_template'].format(env=A.aqa_env(env), sha=run['head_sha'], repo=repo),
                                                    'tasks': ids}

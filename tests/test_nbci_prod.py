@@ -479,3 +479,59 @@ class JitScrub(unittest.TestCase):
     def test_given_a_listed_but_offline_runner_then_the_jit_config_stays_in_metadata(self):
         src = read('runner', 'controller', 'nbci.py')
         self.assertIn("if v.get('jit') and r and (r.get('status') == 'online' or r.get('busy'))", src)
+
+
+class AqaIdempotentCreate(unittest.TestCase):
+    """Pulse 652ffcd8: AQA creates hit 409 duplicate-name errors; a restart lost the record and the same repo+sha
+    was created again, once landing a duplicate in a second zone."""
+
+    def _gh(self):
+        def gh(path, method='GET', body=None, cache=False):
+            if 'check-runs' in path: return {'check_runs': []}
+            if '/runs?' in path: return {'workflow_runs': []}
+            if '/commits/main' in path: return {'sha': 'f' * 40}
+            if '/commits/' in path: return {'sha': 'd' * 40, 'commit': {'message': 'x\n\nPulse: 652ffcd8'}}
+            if '/contents/' in path: return {'content': 'IyEvYmluL2Jhc2g='}
+            raise RuntimeError('unexpected ' + path)
+        return gh
+
+    def _run(self, G, st):
+        nbci.EVENTS['aqa'] = [{'repo': 'so360-forms-be', 'run': {'id': 2, 'name': 'Deploy', 'event': 'push', 'conclusion': 'success',
+                               'head_branch': 'develop', 'head_sha': 'd' * 40, 'workflow_id': 9, 'html_url': ''}}]
+        st['aqa_bundle'] = 'f' * 40
+        dry, nbci.DRY = nbci.DRY, False
+        saved, nbci.save_state = nbci.save_state, (lambda s: None)
+        try: nbci.aqa_trigger(self._gh(), G, st, NOW, '2026-11-27', [])
+        finally: nbci.DRY = dry; nbci.save_state = saved
+
+    def test_given_a_vm_with_the_runs_name_already_exists_then_no_create_is_sent_and_the_run_is_recorded(self):
+        posts = []
+
+        class G:
+            def compute(self, p, m='GET', b=None):
+                if m == 'POST': posts.append(p)
+                return {'items': [{'name': 'aqa-dev-dddddddd-1', 'status': 'RUNNING'}] if p.startswith('/zones/us-central1-a/') else []}
+        st = fresh_state(); self._run(G(), st)
+        self.assertEqual(posts, [])
+        self.assertIn('so360-forms-be@' + 'd' * 40, st['aqa']['done'])
+        self.assertEqual(st['aqa_pending'], [])
+
+    def test_given_the_create_returns_409_then_no_other_zone_is_tried_and_the_run_is_recorded(self):
+        posts = []
+
+        class G:
+            def compute(self, p, m='GET', b=None):
+                if m == 'POST':
+                    posts.append(p); raise RuntimeError('POST %s -> 409 {"error": {"code": 409, "errors": [{"reason": "alreadyExists"}]}}' % p)
+                return {'items': []}
+            def wait_op(self, op, z, t): return op
+        st = fresh_state(); self._run(G(), st)
+        self.assertEqual(len(posts), 1)
+        self.assertIn('so360-forms-be@' + 'd' * 40, st['aqa']['done'])
+
+    def test_given_ci_jobs_waiting_then_a_big_aqa_run_still_gets_the_small_vm(self):
+        self.assertEqual(A.sizing(30, ci_waiting=5), ('e2-standard-2', None))
+        self.assertEqual(A.sizing(30), ('e2-standard-8', 8))
+
+    def test_given_a_409_text_then_it_classifies_as_exists_not_api(self):
+        self.assertEqual(L.classify_gce_error('POST x -> 409 {"reason": "alreadyExists"}'), 'exists')
