@@ -267,6 +267,7 @@ jobs:
     timeout-minutes: 3
     outputs:
       runs_on: ${{ steps.r.outputs.runs_on }}
+      prior_pass: ${{ steps.prior.outputs.prior_pass || 'false' }}
       # deploy jobs: standard (non-Spot) nb-ci VMs in auto mode, a preemption cannot leave a partial deploy
       deploy_runs_on: ${{ vars.NB_CI_MODE == 'auto' && '["self-hosted","nb-deploy"]' || steps.r.outputs.runs_on }}
     steps:
@@ -332,7 +333,46 @@ jobs:
           echo "runs_on=$lane" >> "$GITHUB_OUTPUT"
           echo "lane: $lane ($why)" >> "$GITHUB_STEP_SUMMARY"
 
+      # -- Reuse a PR's unit + security result on the merge commit (opt-in: repo variable NB_PR_REUSE=on) --
+      # A develop push whose git tree is byte-identical to the tree of a PR head whose PR run passed the same
+      # tiers (unit + security, and for backends contract + integration) skips them: the code that was tested is
+      # exactly the code being deployed. Fails closed - any API/jq error, tree mismatch, missing or non-success
+      # job leaves prior_pass=false and the full gate runs. Re-runs never reuse. Squash merges whose base moved
+      # have a different tree and simply run the gate. Uses only contents/actions read (default token).
+      - id: prior
+        if: github.run_attempt == 1 && vars.NB_PR_REUSE == 'on' && github.event_name == 'push' && github.ref == 'refs/heads/develop'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.sha }}
+          KIND: backend
+        run: |
+          set +e
+          out=false; why="no passing PR run with an identical tree"
+          api="$GITHUB_API_URL/repos/$GITHUB_REPOSITORY"
+          auth=(-H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json")
+          get() { curl -fsS -m 10 "${auth[@]}" "$api/$1"; }
+          need='["unit","security"]'
+          [ "$KIND" = backend ] && need='["unit","security","API Contract Tests","Integration Tests"]'
+          tree=$(get "commits/$SHA" | jq -r '.commit.tree.sha // empty' 2>/dev/null)
+          if [ -z "$tree" ]; then why="commit lookup failed"; else
+            cands=$(get "actions/runs?event=pull_request&status=completed&per_page=40" | jq -r '[.workflow_runs[] | select(.conclusion == "success")] | unique_by(.head_sha) | .[:12][] | "\(.id) \(.head_sha)"' 2>/dev/null)
+            for pair in $(printf '%s\n' "$cands" | tr ' ' ','); do
+              id=${pair%%,*}; s=${pair##*,}
+              [ -n "$id" ] && [ -n "$s" ] || continue
+              t=$(get "commits/$s" | jq -r '.commit.tree.sha // empty' 2>/dev/null)
+              [ -n "$t" ] && [ "$t" = "$tree" ] || continue
+              ok=$(get "actions/runs/$id/jobs?filter=latest&per_page=100" | jq -r --argjson need "$need" '
+                [.jobs[] | {n: (.name | sub("^.* / "; "")), c: .conclusion}] as $j
+                | [$need[] as $x | [$j[] | select(.n == $x)] | (length > 0 and all(.c == "success"))] | all' 2>/dev/null)
+              if [ "$ok" = true ]; then out=true; why="PR run $id on $s passed $(jq -r 'join(", ")' <<<"$need") (tree $tree)"; break; fi
+            done
+          fi
+          echo "prior_pass=$out" >> "$GITHUB_OUTPUT"
+          if [ "$out" = true ]; then echo "::notice::PR reuse: unit/security skipped - $why"; else echo "PR reuse: no ($why)"; fi
+          echo "PR reuse: $out - $why" >> "$GITHUB_STEP_SUMMARY"
+
   gate:
+    if: needs.route.outputs.prior_pass != 'true'
     timeout-minutes: 20
     needs: [route]
     # Superseded runs on the same branch cancel here (never on main); build-deploy keeps its own
@@ -559,6 +599,7 @@ jobs:
           --excludePrivatePackages
   # ── Security (parallel with gate; build-deploy needs both to pass) ───────
   security:
+    if: needs.route.outputs.prior_pass != 'true'
     needs: [route]
     runs-on: ${{ fromJSON(needs.route.outputs.runs_on) }}
     timeout-minutes: 15
@@ -656,6 +697,7 @@ jobs:
 
   # ── Parallel with gate (build-deploy needs all) ──────────────────────────────────────────────
   contract-tests:
+    if: needs.route.outputs.prior_pass != 'true'
     timeout-minutes: 20
     name: API Contract Tests
     runs-on: ${{ fromJSON(needs.route.outputs.runs_on) }}
@@ -855,6 +897,7 @@ jobs:
           MOBILITY_INTERNAL_KEY: ${{ secrets.MOBILITY_INTERNAL_KEY }}
 
   integration-tests:
+    if: needs.route.outputs.prior_pass != 'true'
     timeout-minutes: 20
     name: Integration Tests
     runs-on: ${{ fromJSON(needs.route.outputs.runs_on) }}
@@ -1061,6 +1104,8 @@ jobs:
   # ── Build + Deploy (ALL gates must pass) ───────────────────────────────────
   build-deploy:
     needs: [route, gate, security, contract-tests, integration-tests]
+    # tiers may be skipped only when route proved an identical, passing PR run (prior_pass); a failed tier always blocks
+    if: ${{ !cancelled() && needs.route.result == 'success' && (needs.gate.result == 'success' || (needs.gate.result == 'skipped' && needs.route.outputs.prior_pass == 'true')) && (needs.security.result == 'success' || (needs.security.result == 'skipped' && needs.route.outputs.prior_pass == 'true')) && (needs.contract-tests.result == 'success' || (needs.contract-tests.result == 'skipped' && needs.route.outputs.prior_pass == 'true')) && (needs.integration-tests.result == 'success' || (needs.integration-tests.result == 'skipped' && needs.route.outputs.prior_pass == 'true')) }}
     # Linux only: the Mac Mini gate runners also carry `contabo` (they run the
     # gate), but this job builds + rsyncs to the VMs and assumes a Linux host.
     runs-on: ${{ fromJSON(needs.route.outputs.deploy_runs_on) }}
