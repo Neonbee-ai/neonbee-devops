@@ -91,6 +91,12 @@ class ControllerChoke(unittest.TestCase):
         self.assertIn('nb-route', LEGACY['labels'])
         self.assertNotIn('nb-route', PROD['labels'])      # deploy lanes stay one job per fresh VM
 
+    def test_given_a_controller_without_aws_then_bootstrap_installs_aws_cli_v2(self):
+        b = open(os.path.join(ROOT, 'runner', 'controller', 'bootstrap.sh')).read()
+        self.assertIn('if ! command -v aws', b)                      # idempotent: skipped once installed
+        self.assertIn('awscli.amazonaws.com/awscli-exe-linux-x86_64.zip', b)
+        self.assertIn('aws/install" --update', b)
+
     def test_given_the_controller_then_the_loop_outranks_its_runner_jobs(self):
         b = open(os.path.join(ROOT, 'runner', 'controller', 'bootstrap.sh')).read()
         self.assertIn('CPUWeight=1000', b)

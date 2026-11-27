@@ -1096,3 +1096,20 @@ class LostVmsAqa(unittest.TestCase):
     def test_given_a_ci_vm_vanishing_then_finished_is_never_consulted(self):
         def boom(n): raise AssertionError('no')
         self.assertEqual(L.lost_vms({'nbci-a': 1}, set(), {}, set(), finished=boom), ['nbci-a'])
+
+
+class TestTickJobMerge(unittest.TestCase):
+    """The reconcile pass merges webhook jobs with polled jobs; both are keyed by integer job id."""
+    SRC = open(os.path.join(os.path.dirname(__file__), '..', 'runner', 'controller', 'nbci.py')).read()
+
+    def test_given_integer_job_ids_when_merged_the_old_way_then_python_raises(self):
+        with self.assertRaises(TypeError): dict({1: 'a'}, **{2: 'b'})
+
+    def test_given_integer_job_ids_when_merged_then_polled_wins_and_fresh_survives(self):
+        fresh, polled = {1: 'webhook', 2: 'webhook'}, {2: 'polled', 3: 'polled'}
+        self.assertEqual({**fresh, **polled}, {1: 'webhook', 2: 'polled', 3: 'polled'})
+
+    def test_given_the_controller_source_then_no_keyword_merge_of_job_dicts_remains(self):
+        self.assertNotIn('dict(fresh, **polled)', self.SRC)
+        self.assertIsNone(re.search(r"=\s*dict\(\w+, \*\*\w+\)", self.SRC))
+
