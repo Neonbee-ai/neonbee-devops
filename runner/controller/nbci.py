@@ -830,6 +830,7 @@ def tick(gh, gcp, st, mode='scale'):
             fresh = {k: j for k, j in EVENTS['jobs'].items() if now - j['created'] < 120}   # listing lag: a just-queued webhook job survives
             EVENTS['jobs'] = dict(fresh, **polled)
             EVENTS['recent'] = {n: t for n, t in EVENTS.get('recent', {}).items() if now - t < 7200}
+    with LOCK: st['recent'] = dict(EVENTS.get('recent', {}))         # survives a restart (the first full poll needs it)
     with LOCK:
         jobs = list(EVENTS['jobs'].values()); done = set(EVENTS['done_runners'])
         waits, EVENTS['waits'] = EVENTS['waits'], []
@@ -1283,6 +1284,7 @@ def _ref():
 def main():
     mode = (sys.argv[1:] or ['loop'])[0]
     gcp = GCP(PROJECT); gh = GitHub(gcp); st = load_state()
+    EVENTS['recent'] = dict(st.get('recent', {}))
     METRICS.upload = lambda p, b: None if DRY else gcp.storage_upload(METRICS_BUCKET, p, b, 'application/x-ndjson')
     if not E('TEAMS_WEBHOOK'):
         try: os.environ['TEAMS_WEBHOOK'] = gcp.secret('nbci-teams-webhook')
