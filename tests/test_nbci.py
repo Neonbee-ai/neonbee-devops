@@ -964,6 +964,48 @@ class AqaLifetime(unittest.TestCase):
         self.assertIn(L.LIFETIME, L.vm_verdict(vm, {'busy': True}, False, NOW, max_s=1800))
 
 
+class SlotToolCache(unittest.TestCase):
+    """2026-11-28: setup-gcloud failed on every packed slot with EACCES mkdir /opt/hostedtoolcache/gcloud."""
+    def _run(self, env_line):
+        import subprocess, tempfile
+        src = open(os.path.join(ROOT, 'runner', 'image', 'slots.sh')).read()
+        fn = src.split('# nb-tc-begin\n')[1].split('# nb-tc-end')[0]
+        with tempfile.TemporaryDirectory() as d:
+            shared = os.path.join(d, 'shared'); os.makedirs(os.path.join(shared, 'node', '22.12.0', 'x64'))
+            open(os.path.join(shared, 'node', '22.12.0', 'x64.complete'), 'w').close()
+            tc = os.path.join(d, 'slot', '_tool'); envf = os.path.join(d, 'slot', '.env')
+            os.makedirs(os.path.join(tc, 'gcloud', 'old')); open(envf, 'w').write(env_line)
+            stub = os.path.join(d, 'bin'); os.makedirs(stub)
+            open(os.path.join(stub, 'chown'), 'w').write('#!/bin/bash\necho "chown $*" >> %s/calls\n' % d)
+            os.chmod(os.path.join(stub, 'chown'), 0o755)
+            r = subprocess.run(['bash', '-c', fn + '\nnb_slot_toolcache nbs1 "$1" "$2" "$3"', 'x', tc, envf, shared],
+                               env={'PATH': stub + ':/usr/bin:/bin'}, capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            return (os.listdir(tc), os.path.realpath(os.path.join(tc, 'node', '22.12.0')),
+                    os.path.realpath(os.path.join(shared, 'node', '22.12.0')), open(envf).read(), open(os.path.join(d, 'calls')).read(), tc)
+
+    def test_given_a_slot_job_then_its_tool_cache_is_its_own_dir_and_the_runner_env_points_there(self):
+        ls, _, _, env, calls, tc = self._run('LANG=C.UTF-8\nRUNNER_TOOLSDIRECTORY=/opt/hostedtoolcache\n')
+        self.assertIn('RUNNER_TOOLSDIRECTORY=%s' % tc, env)
+        self.assertNotIn('/opt/hostedtoolcache', env)
+        self.assertIn('chown -hR nbs1: %s' % tc, calls)
+        self.assertNotIn('gcloud', ls)        # last job's downloads are gone
+
+    def test_given_shared_node_then_it_is_linked_per_version_not_copied(self):
+        ls, real, want, _, _, _ = self._run('RUNNER_TOOLSDIRECTORY=/opt/hostedtoolcache\n')
+        self.assertEqual(ls, ['node'])
+        self.assertEqual(real, want)
+
+    def test_given_an_env_file_without_the_key_then_it_is_added(self):
+        _, _, _, env, _, tc = self._run('LANG=C.UTF-8\n')
+        self.assertTrue(env.endswith('RUNNER_TOOLSDIRECTORY=%s\n' % tc))
+
+    def test_given_the_slot_script_then_each_job_runs_with_the_slot_tool_cache(self):
+        s = open(os.path.join(ROOT, 'runner', 'image', 'slots.sh')).read()
+        self.assertIn('nb_slot_toolcache "$U" "$D/_tool" "$D/.env"', s)
+        self.assertIn('RUNNER_TOOL_CACHE="$D/_tool"', s)
+
+
 class SlotReap(unittest.TestCase):
     def _run(self, with_at):
         import subprocess, tempfile, stat

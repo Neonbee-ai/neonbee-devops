@@ -40,6 +40,25 @@ nb_reap_user() {
   return 0
 }
 # nb-reap-end
+# nb-tc-begin
+# Per-slot tool cache. setup-gcloud / setup-node write into RUNNER_TOOL_CACHE, but the shared /opt/hostedtoolcache
+# belongs to `runner`, so every packed job failed with "EACCES mkdir /opt/hostedtoolcache/gcloud" (2026-11-28,
+# neonbee-qa autoqa-cases-ci publish). Each slot gets its own cache dir, rebuilt per job; the pre-installed shared
+# versions (Node) are linked in per version, so they are reused without a copy and stay read-only to the slot.
+nb_slot_toolcache() {
+  local u=$1 tc=$2 envf=$3 src=${4:-/opt/hostedtoolcache} t v n
+  rm -rf "$tc" && mkdir -p "$tc" || return 1
+  for t in "$src"/*/; do
+    [ -d "$t" ] || continue
+    t=${t%/}; n=${t##*/}; mkdir -p "$tc/$n"
+    for v in "$t"/*; do [ -e "$v" ] && ln -s "$v" "$tc/$n/${v##*/}"; done
+  done
+  chown -hR "$u:" "$tc"
+  # the runner loads .env over its process env, so the key must be rewritten there, not only exported
+  { grep -v '^RUNNER_TOOLSDIRECTORY=' "$envf" 2>/dev/null; echo "RUNNER_TOOLSDIRECTORY=$tc"; } > "$envf.nb" &&
+    mv -f "$envf.nb" "$envf"
+}
+# nb-tc-end
 last=
 while :; do
   J=$(md "attributes/jit-$i") || J=
@@ -56,6 +75,7 @@ while :; do
   fi
   PW=; [ -d /opt/ms-playwright ] && PW=/opt/ms-playwright
   mkdir -p "$D" && rsync -a --delete /opt/runner/ "$D/" && chown -R "$U:" "$D"
+  nb_slot_toolcache "$U" "$D/_tool" "$D/.env"
   echo "== slot $i job start $(date -u +%FT%TZ)" >> "/var/log/nb-slot-$i.log"
   # npm "global" config/prefix per slot: the shared Node in /opt/hostedtoolcache belongs to `runner`, so
   # `npm config set ... --global` failed with EACCES on every slot (2026-11-27) and, made writable, would have
@@ -63,7 +83,7 @@ while :; do
   # runuser, not sudo: sudo logs the whole command line (the JIT config) to the journal.
   H=/home/$U
   runuser -u "$U" -- env HOME="$H" USER="$U" LOGNAME="$U" NPM_CONFIG_GLOBALCONFIG="$H/.npmrc-global" \
-    NPM_CONFIG_PREFIX="$H/.npm-global" ${PW:+PLAYWRIGHT_BROWSERS_PATH="$PW"} PATH="$H/.npm-global/bin:$PATH" \
+    NPM_CONFIG_PREFIX="$H/.npm-global" RUNNER_TOOLSDIRECTORY="$D/_tool" RUNNER_TOOL_CACHE="$D/_tool" ${PW:+PLAYWRIGHT_BROWSERS_PATH="$PW"} PATH="$H/.npm-global/bin:$PATH" \
     ACTIONS_RUNNER_HOOK_JOB_STARTED=/opt/nb-disk-guard.sh "$D/run.sh" --jitconfig "$J" >> "/var/log/nb-slot-$i.log" 2>&1
   nb_reap_user "$U"; sleep 1
   rm -rf "$D/_work"
